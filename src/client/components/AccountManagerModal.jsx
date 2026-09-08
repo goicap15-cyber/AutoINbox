@@ -16,6 +16,7 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
   const [pageConnectError, setPageConnectError] = useState('');
   const [pageConnectLoading, setPageConnectLoading] = useState(false);
   const [initialAccountIds, setInitialAccountIds] = useState(null);
+  const [initialDisconnectedAccountIds, setInitialDisconnectedAccountIds] = useState(null);
 
   const loadInboxSources = async () => {
     try {
@@ -52,7 +53,13 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
   useEffect(() => {
     if (!socket) return;
     const handleAccountStatus = (data) => {
-      if (addingSession && initialAccountIds && !initialAccountIds.has(data.account_id)) {
+      const belongsToCurrentSetup = Boolean(
+        addingSession && pendingKey && data?.pending_key === pendingKey
+      );
+      const isNewAccount = Boolean(
+        addingSession && initialAccountIds && !initialAccountIds.has(data?.account_id)
+      );
+      if (belongsToCurrentSetup || isNewAccount) {
         // Tài khoản mới đã được backend xác nhận
         setAddingSession(false);
         setPendingKey(null);
@@ -69,6 +76,18 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
           ? { ...account, is_extension_connected: is_connected === true }
           : account
       )));
+      if (
+        addingSession
+        && is_connected === true
+        && initialDisconnectedAccountIds?.has(String(account_id))
+      ) {
+        setAddingSession(false);
+        setPendingKey(null);
+        setInitialAccountIds(null);
+        setInitialDisconnectedAccountIds(null);
+        loadAccounts();
+        onSourcesChanged?.();
+      }
     };
     const handleAccountLinkFailed = (data) => {
       if (!pendingKey || data?.pending_key !== pendingKey) return;
@@ -85,13 +104,60 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
       socket.off('EXTENSION_CONNECTION_CHANGED', handleExtensionConnection);
       socket.off('ACCOUNT_LINK_FAILED', handleAccountLinkFailed);
     };
-  }, [socket, addingSession, pendingKey, initialAccountIds, onSourcesChanged]);
+  }, [socket, addingSession, pendingKey, initialAccountIds, initialDisconnectedAccountIds, onSourcesChanged]);
+
+  // Socket events can arrive before the POST /new-session response updates
+  // pendingKey. Polling already refreshes accounts, so use that data as a
+  // reliable fallback when an existing disconnected account reconnects.
+  useEffect(() => {
+    if (!addingSession || !initialDisconnectedAccountIds) return;
+    const reconnected = accounts.some((account) => (
+      account.is_extension_connected === true
+      && initialDisconnectedAccountIds.has(String(account.id))
+    ));
+    if (!reconnected) return;
+    setAddingSession(false);
+    setPendingKey(null);
+    setInitialAccountIds(null);
+    setInitialDisconnectedAccountIds(null);
+    onSourcesChanged?.();
+  }, [accounts, addingSession, initialDisconnectedAccountIds, onSourcesChanged]);
+
+  useEffect(() => {
+    if (!addingSession || !pendingKey) return;
+    let stopped = false;
+    const checkCompletion = async () => {
+      try {
+        const res = await fetch(`/api/facebook-setup/${encodeURIComponent(pendingKey)}/status`);
+        const data = await res.json();
+        if (stopped || !res.ok || data?.completed !== true) return;
+        setAddingSession(false);
+        setPendingKey(null);
+        setInitialAccountIds(null);
+        setInitialDisconnectedAccountIds(null);
+        await loadAccounts();
+        onSourcesChanged?.();
+      } catch (_) {}
+    };
+    checkCompletion();
+    const timer = setInterval(checkCompletion, 1500);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [addingSession, pendingKey, onSourcesChanged]);
 
   const handleAddNewAccount = async () => {
     setAccountActionError('');
     const currentAccounts = await loadAccounts();
     const currentIds = new Set(currentAccounts.map((a) => a.id));
+    const disconnectedIds = new Set(
+      currentAccounts
+        .filter((account) => account.is_extension_connected !== true)
+        .map((account) => String(account.id))
+    );
     setInitialAccountIds(currentIds);
+    setInitialDisconnectedAccountIds(disconnectedIds);
     setAddingSession(true);
     try {
       const res = await fetch('/api/accounts/new-session', { method: 'POST' });
@@ -102,12 +168,14 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
         setAccountActionError(data.error || 'Không thể mở Chrome để thêm tài khoản Facebook');
         setAddingSession(false);
         setInitialAccountIds(null);
+        setInitialDisconnectedAccountIds(null);
       }
     } catch (e) {
       console.error(e);
       setAccountActionError(e.message || 'Không thể kết nối backend để thêm tài khoản');
       setAddingSession(false);
       setInitialAccountIds(null);
+      setInitialDisconnectedAccountIds(null);
     }
   };
 

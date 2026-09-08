@@ -23,3 +23,11 @@ bin/chrome-linux/*
 !bin/chrome-win/.gitkeep
 !bin/chrome-mac/.gitkeep
 !bin/chrome-linux/.gitkeep
+
+# Build and scratch artifacts
+release-*/
+scratch/
+*.exe
+*.dll
+*.zip
+

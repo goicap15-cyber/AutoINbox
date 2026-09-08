@@ -148,7 +148,12 @@ class InboxSyncScheduler {
     }, this.sidebarTimeoutMs);
     if (typeof state.timeout.unref === 'function') state.timeout.unref();
 
-    extWs.send(JSON.stringify({ type: 'SYNC_THREADS', data: { account_id: accId, reason } }));
+    extWs.send(JSON.stringify({ type: 'SYNC_THREADS', data: {
+      account_id: accId,
+      reason,
+      resume: reason === 'crm_continue',
+      time_budget_ms: 120000
+    } }));
     console.log(`[INBOX_SYNC_THREADS_DISPATCHED] account=${accId} reason=${reason}`);
     return true;
   }
@@ -170,17 +175,23 @@ class InboxSyncScheduler {
     }
   }
 
-  enqueueThreadSync({ account_id, thread_id, thread_url = null, page_id = null, contact_name = null, reason = 'changed', allow_navigation = false }) {
+  enqueueThreadSync({ account_id, thread_id, external_thread_id = null, thread_url = null, page_id = null, contact_name = null, reason = 'changed', allow_navigation = false, priority = 'normal', sync_mode = null, scroll_delta = 0 }) {
     const accId = String(account_id || '');
     const threadId = String(thread_id || '');
     if (!accId || !threadId || !this.dispatchThreadMessagesSync) return false;
 
     const key = `${accId}:${threadId}`;
     const now = Date.now();
-    const jobData = { account_id: accId, thread_id: threadId, thread_url, page_id, contact_name, reason, allow_navigation: allow_navigation === true };
+    const jobData = { account_id: accId, thread_id: threadId, external_thread_id, thread_url, page_id, contact_name, reason, allow_navigation: allow_navigation === true, priority, sync_mode, scroll_delta: Number(scroll_delta) || 0 };
     const cooldownUntil = this.threadCooldownUntil.get(key) || 0;
-    if (this.threadInFlight.has(key) || now < cooldownUntil) {
-      this.pendingThreadSyncs.set(key, { ...jobData, reason: `${reason}_replay` });
+    // Explicit CRM navigation/scroll may reacquire a thread immediately after
+    // it was preempted when the operator switched away and then back.
+    if (this.threadInFlight.has(key) || (now < cooldownUntil && priority !== 'high')) {
+      const pending = this.pendingThreadSyncs.get(key);
+      const combinedScrollDelta = sync_mode === 'ondemand_viewport' && pending?.sync_mode === 'ondemand_viewport'
+        ? Math.max(-3600, Math.min(3600, Number(pending.scroll_delta || 0) + Number(jobData.scroll_delta || 0)))
+        : jobData.scroll_delta;
+      this.pendingThreadSyncs.set(key, { ...jobData, scroll_delta: combinedScrollDelta, reason: `${reason}_replay` });
       const deferredBy = this.threadInFlight.has(key) ? 'in_flight' : 'cooldown';
       console.log(`[INBOX_SYNC_MESSAGES_DEFER] account=${accId} thread=${threadId} reason=${reason} defer=${deferredBy}`);
       if (deferredBy === 'cooldown') {
@@ -193,17 +204,71 @@ class InboxSyncScheduler {
     const queue = this.threadQueues.get(accId) || [];
     const existingIndex = queue.findIndex(job => job.key === key);
     if (existingIndex >= 0) {
-      queue[existingIndex] = { key, ...jobData };
+      const existing = queue[existingIndex];
+      const combinedScrollDelta = sync_mode === 'ondemand_viewport' && existing.sync_mode === 'ondemand_viewport'
+        ? Math.max(-3600, Math.min(3600, Number(existing.scroll_delta || 0) + Number(jobData.scroll_delta || 0)))
+        : jobData.scroll_delta;
+      queue[existingIndex] = { key, ...jobData, scroll_delta: combinedScrollDelta };
       console.log(`[INBOX_SYNC_MESSAGES_COALESCED] account=${accId} thread=${threadId} reason=${reason}`);
       return false;
     }
 
-    queue.push({ key, ...jobData });
+    if (priority === 'high') queue.unshift({ key, ...jobData });
+    else queue.push({ key, ...jobData });
     this.threadQueues.set(accId, queue);
     this.threadCooldownUntil.set(key, now + this.threadCooldownMs);
     console.log(`[INBOX_SYNC_MESSAGES_QUEUED] account=${accId} thread=${threadId} reason=${reason} queue_depth=${queue.length}`);
     this.drainThreadQueue(accId);
     return true;
+  }
+
+  clearQueuedThreadSyncs(accountId, predicate = () => true) {
+    const accId = String(accountId || '');
+    const queue = this.threadQueues.get(accId) || [];
+    const removedJobs = queue.filter(predicate);
+    if (removedJobs.length === 0) return 0;
+    this.threadQueues.set(accId, queue.filter((job) => !predicate(job)));
+    for (const job of removedJobs) this.pendingThreadSyncs.delete(job.key);
+    console.log(`[INBOX_SYNC_MESSAGES_CLEARED] account=${accId} removed=${removedJobs.length}`);
+    return removedJobs.length;
+  }
+
+  clearPendingThreadSyncs(accountId, predicate = () => true) {
+    const accId = String(accountId || '');
+    let removed = 0;
+    for (const [key, job] of [...this.pendingThreadSyncs.entries()]) {
+      if (!key.startsWith(`${accId}:`) || !predicate(job)) continue;
+      this.pendingThreadSyncs.delete(key);
+      removed += 1;
+    }
+    if (removed) console.log(`[INBOX_SYNC_MESSAGES_PENDING_CLEARED] account=${accId} removed=${removed}`);
+    return removed;
+  }
+
+  preemptActiveThreadSync(accountId, predicate = () => true) {
+    const accId = String(accountId || '');
+    let removed = 0;
+    for (const key of [...this.threadInFlight]) {
+      if (!key.startsWith(`${accId}:`)) continue;
+      const threadId = key.slice(accId.length + 1);
+      const activeJob = { key, account_id: accId, thread_id: threadId };
+      if (!predicate(activeJob)) continue;
+      this.threadInFlight.delete(key);
+      const timeout = this.threadTimeouts.get(key);
+      if (timeout) clearTimeout(timeout);
+      this.threadTimeouts.delete(key);
+      this.pendingThreadSyncs.delete(key);
+      removed += 1;
+    }
+    if (removed) {
+      this.accountThreadBusy.delete(accId);
+      console.log(`[INBOX_SYNC_MESSAGES_PREEMPTED] account=${accId} removed=${removed}`);
+    }
+    return removed;
+  }
+
+  isAccountThreadBusy(accountId) {
+    return this.accountThreadBusy.has(String(accountId || ''));
   }
 
   drainThreadQueue(accountId) {
@@ -222,10 +287,13 @@ class InboxSyncScheduler {
     const dispatched = this.dispatchThreadMessagesSync({
       account_id: job.account_id,
       thread_id: job.thread_id,
+      external_thread_id: job.external_thread_id,
       thread_url: job.thread_url,
       page_id: job.page_id,
       contact_name: job.contact_name,
       reason: job.reason,
+      sync_mode: job.sync_mode,
+      scroll_delta: job.scroll_delta,
       allow_navigation: job.allow_navigation === true,
       force: false
     });

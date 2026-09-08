@@ -43,7 +43,7 @@ export default function MessageRequestActions({ thread, socket, isConnected }) {
       setIsLoading(false);
       setPendingAction(null);
       if (!result.success) {
-        if (result.action !== 'query') setError(result.error || 'Không điều khiển được Tin nhắn đang chờ.');
+        setError(result.error || 'Không điều khiển được Tin nhắn đang chờ.');
         return;
       }
       setError('');

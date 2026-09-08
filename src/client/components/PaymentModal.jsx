@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { setStoredLicenseKey } from '../utils/machineId';
 import { X, Check, Copy, RefreshCw, CreditCard, ShieldCheck, Laptop, Calendar } from 'lucide-react';
 
-const LICENSE_SERVER_URL = 'http://localhost:5055';
+const LICENSE_SERVER_URL = 'https://genblackmmoonline.online/license_server';
 
 export default function PaymentModal({ isOpen, onClose, onActivated, existingLicense = null }) {
   const isUpgrade = Boolean(existingLicense?.key);

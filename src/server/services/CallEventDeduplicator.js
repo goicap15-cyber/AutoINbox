@@ -1,5 +1,5 @@
 class CallEventDeduplicator {
-  constructor({ outgoingCooldownMs = 10000, incomingCooldownMs = 5000 } = {}) {
+  constructor({ outgoingCooldownMs = 10000, incomingCooldownMs = 2000 } = {}) {
     this.outgoingCooldownMs = outgoingCooldownMs;
     this.incomingCooldownMs = incomingCooldownMs;
     this.outgoing = new Map();

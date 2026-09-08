@@ -93,26 +93,26 @@ class AuthService {
   }
 
   async registerManaged(input, centralClient) {
-    const centralIdentity = await centralClient.register(input);
-    return this.ensureLocalUser(input, centralIdentity);
+    const username = this.normalizeUsername(input.username);
+    const payload = { ...input, username };
+    const centralIdentity = await centralClient.register(payload);
+    return this.ensureLocalUser(payload, centralIdentity);
   }
 
   async loginManaged(input, centralClient) {
+    const username = this.normalizeUsername(input.username);
+    const payload = { ...input, username };
     let centralIdentity;
     try {
-      centralIdentity = await centralClient.login(input);
+      centralIdentity = await centralClient.login(payload);
     } catch (error) {
       if (error.code !== 'USER_NOT_FOUND') throw error;
-      // One-time migration for accounts created before central auth existed:
-      // only somebody who proves the existing local password may claim the
-      // same username centrally.
-      const username = this.normalizeUsername(input.username);
       const local = this.db.prepare('SELECT password_hash FROM users WHERE lower(username)=?').get(username);
       if (!local || !bcrypt.compareSync(String(input.password || ''), local.password_hash)) throw error;
-      centralIdentity = await centralClient.register(input);
-      centralIdentity = await centralClient.login(input);
+      centralIdentity = await centralClient.register(payload);
+      centralIdentity = await centralClient.login(payload);
     }
-    const user = this.ensureLocalUser(input, centralIdentity);
+    const user = this.ensureLocalUser(payload, centralIdentity);
     return { user, ...this.createSession(user.id) };
   }
 

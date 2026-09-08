@@ -124,6 +124,21 @@ class ConversationRepository {
     database.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = CURRENT_TIMESTAMP WHERE id = ?').run(lastMessage, threadId);
   }
 
+  // History crawling must not make an old conversation look newly active.
+  // Advance the sidebar only when the observed Facebook timestamp is newer
+  // than the timestamp already stored for the thread.
+  static touchThreadFromHistory(threadId, lastMessage, observedTimestampMs, database = getDefaultDb()) {
+    const timestampMs = Number(observedTimestampMs || 0);
+    if (!Number.isFinite(timestampMs) || timestampMs <= 0) return false;
+    const thread = database.prepare('SELECT last_activity FROM threads WHERE id = ?').get(threadId);
+    if (!thread) return false;
+    const currentTimestampMs = Date.parse(thread.last_activity || '') || 0;
+    if (currentTimestampMs >= timestampMs) return false;
+    database.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = ? WHERE id = ?')
+      .run(lastMessage, new Date(timestampMs).toISOString(), threadId);
+    return true;
+  }
+
   // Writes a resolved avatar to the contacts row only when no real avatar is
   // stored yet, so re-scanning an already-captured thread (or one whose
   // messages predate avatar extraction) can still backfill it once, without
@@ -165,10 +180,12 @@ class ConversationRepository {
 
   static saveMessagesTransaction(threadId, messages = [], database = getDefaultDb()) {
     const insertMsg = database.prepare(`
-      INSERT INTO messages (thread_id, fb_message_id, sender_id, content, timestamp_ms, timestamp_source, is_outgoing, sender_role, sequence_order, direction_status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (thread_id, fb_message_id, sender_id, content, media_type, media_url, timestamp_ms, timestamp_source, is_outgoing, sender_role, sequence_order, direction_status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(fb_message_id) DO UPDATE SET
         content = CASE WHEN excluded.content IS NOT NULL AND excluded.content <> '' THEN excluded.content ELSE messages.content END,
+        media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
+        media_url = COALESCE(excluded.media_url, messages.media_url),
         timestamp_ms = excluded.timestamp_ms,
         timestamp_source = excluded.timestamp_source,
         created_at = excluded.created_at,
@@ -177,7 +194,7 @@ class ConversationRepository {
         sequence_order = CASE WHEN excluded.sequence_order IS NOT NULL THEN excluded.sequence_order ELSE messages.sequence_order END,
         direction_status = CASE WHEN excluded.direction_status = 'confirmed' THEN 'confirmed' ELSE messages.direction_status END
     `);
-    const rank = { facebook_payload: 6, facebook_label: 5, dom_order: 5, facebook_dom: 4, realtime_fallback: 3, sync: 3, fallback: 2, unknown: 1 };
+    const rank = { facebook_payload: 6, facebook_timestamp: 6, facebook_label: 5, dom_clock_order: 5, dom_order: 5, facebook_dom: 4, realtime_fallback: 3, sync: 3, fallback: 2, unknown: 1 };
     const transaction = database.transaction((msgs) => {
       const result = { insertedIds: [], updatedIds: [], skippedCount: 0 };
       for (const msg of msgs) {
@@ -190,12 +207,34 @@ class ConversationRepository {
         const observedSequence = Number.isFinite(Number(msg.sequence_order ?? msg.dom_order))
           ? Number(msg.sequence_order ?? msg.dom_order)
           : null;
-        const stableId = msg.fb_message_id || msg.messageId || msg.client_message_id || ConversationRepository.fingerprint(threadId, msg);
+        let stableId = msg.fb_message_id || msg.messageId || msg.client_message_id || ConversationRepository.fingerprint(threadId, msg);
         const observedTimestampMs = Number(msg.timestamp_ms || msg.timestamp || 0);
         const observedTimestampSource = msg.timestamp_source || 'sync';
         const content = msg.content ?? msg.text ?? msg.cleaned ?? null;
+        const mediaType = msg.media_type || (msg.media_url ? 'image' : 'text');
+        const mediaUrl = msg.media_url || null;
         const observedCreatedAt = msg.created_at || (observedTimestampMs > 0 ? new Date(observedTimestampMs).toISOString() : new Date().toISOString());
-        const existing = database.prepare('SELECT content, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+        let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+        // Facebook sometimes omits data-message-id during a partial/reloaded DOM
+        // render. The extension then generates an occurrence-based dom_* id,
+        // whose suffix can change when fewer older rows are mounted. Reuse one
+        // unambiguous historical row with the same payload and nearby timestamp
+        // instead of inserting that old message again under the changed id.
+        if (!existing && /^dom_.+_hash_.+_\d+$/.test(String(stableId)) && observedTimestampMs > 0) {
+          const candidates = database.prepare(`
+            SELECT fb_message_id, content, media_type, media_url, timestamp_ms, timestamp_source, created_at,
+                   is_outgoing, sender_role, sequence_order, direction_status
+            FROM messages
+            WHERE thread_id = ? AND content = ? AND is_outgoing = ?
+              AND timestamp_ms > 0 AND ABS(timestamp_ms - ?) <= 90000
+            ORDER BY ABS(timestamp_ms - ?) ASC
+            LIMIT 2
+          `).all(threadId, content, isOutgoing, observedTimestampMs, observedTimestampMs);
+          if (candidates.length === 1) {
+            stableId = candidates[0].fb_message_id;
+            existing = candidates[0];
+          }
+        }
         let timestampMs = observedTimestampMs;
         let timestampSource = observedTimestampSource;
         let createdAt = observedCreatedAt;
@@ -226,18 +265,38 @@ class ConversationRepository {
           const sequenceChanged = observedSequence !== null
             && observedSequence !== Number(existing.sequence_order);
           const roleChanged = existing.sender_role !== senderRole;
-          const changed = existing.content !== content || timestampChanged || directionChanged || sequenceChanged || roleChanged;
+          const mediaChanged = (mediaUrl && existing.media_url !== mediaUrl) || (mediaType !== 'text' && existing.media_type !== mediaType);
+          const changed = existing.content !== content || mediaChanged || timestampChanged || directionChanged || sequenceChanged || roleChanged;
           if (!changed) { result.skippedCount += 1; continue; }
-          insertMsg.run(threadId, stableId, senderId, content, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
+          insertMsg.run(threadId, stableId, senderId, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
           result.updatedIds.push(stableId);
           continue;
         }
-        insertMsg.run(threadId, stableId, senderId, content, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
+        insertMsg.run(threadId, stableId, senderId, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
         result.insertedIds.push(stableId);
       }
       return result;
     });
     return transaction(messages);
+  }
+
+  static normalizeMessageSequence(threadId, database = getDefaultDb()) {
+    const rows = database.prepare(`
+      SELECT id
+      FROM messages
+      WHERE thread_id = ?
+      ORDER BY
+        CASE WHEN COALESCE(timestamp_ms, 0) > 0 THEN 0 ELSE 1 END ASC,
+        COALESCE(NULLIF(timestamp_ms, 0), CAST(strftime('%s', created_at) AS INTEGER) * 1000, id) ASC,
+        COALESCE(sequence_order, id) ASC,
+        id ASC
+    `).all(threadId);
+    const update = database.prepare('UPDATE messages SET sequence_order = ? WHERE id = ?');
+    const normalize = database.transaction((orderedRows) => {
+      orderedRows.forEach((row, index) => update.run(index + 1, row.id));
+    });
+    normalize(rows);
+    return rows.length;
   }
   // Test-only: clears direction-flip hysteresis state between test cases so
   // one test's pending candidate can't leak into another's assertions.

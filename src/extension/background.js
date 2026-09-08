@@ -230,6 +230,14 @@ function connectWebSocket() {
             });
           } catch (e) {}
           if (setupPendingKey && user_id) waitForPendingSetupCompletion(user_id);
+          if (!setupPendingKey && user_id) {
+            // Establish the Messenger interaction surface immediately after
+            // registration. Receiving realtime messages must not depend on the
+            // operator sending the first outbound message.
+            ensureRoleMessengerTab(user_id, 'interaction').catch((error) => {
+              console.warn('[FB Engine] Không thể khởi tạo tab nhận realtime:', error.message);
+            });
+          }
           break;
         }
         case 'SEND_MESSAGE':
@@ -241,6 +249,10 @@ function connectWebSocket() {
         case 'SYNC_THREADS':
           console.log("[FB Engine] 🔄 Đang sync threads sidebar cho account:", message.data);
           await handleSync100Threads(message.data);
+          break;
+        case 'CANCEL_THREADS_SYNC':
+          discoverySyncCancelledAccounts.add(String(message.data?.account_id || user_id || ''));
+          console.log('[FB Engine] [DISCOVERY] Cancel requested for account:', message.data?.account_id || user_id);
           break;
         case 'SYNC_THREAD_MESSAGES':
           console.log("[FB Engine] 🔄 Đang sync lịch sử tin nhắn thread:", message.data);
@@ -255,8 +267,10 @@ function connectWebSocket() {
           await handleTriggerMessengerCall(message.data);
           break;
         case 'ANSWER_INCOMING_CALL':
-          console.log("[FB Engine] 🎯 Nhận lệnh điều khiển cuộc gọi từ CRM:", message.data);
-          await handleAnswerIncomingCall(message.data);
+          await handleAnswerIncomingCall(message.data || {});
+          break;
+        case 'MESSAGE_REQUEST_ACTION':
+          await handleMessageRequestAction(message.data || {});
           break;
         default:
           console.log('[FB Engine] Không có handler cho message type:', message.type);
@@ -345,12 +359,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[FB Engine] 📥 onMessage received from content:', message.type, JSON.stringify(message).substring(0, 300));
 
   // Helper to ensure tabRegistry is loaded and auto-register active Messenger tabs
-  async function resolveSenderTabRole(senderTab) {
+  // allowAnyFbTab=true: bat ky tab facebook.com nao cung duoc coi la interaction (cho call events)
+  async function resolveSenderTabRole(senderTab, allowAnyFbTab) {
     await loadTabRegistry();
     let senderRole = FbCrmMessengerTabRoles.roleForTab([...tabRegistry.entries()], user_id, senderTab?.id);
     if (!senderRole && senderTab?.id) {
-      const isMessagesUrl = /(^|\.)facebook\.com\/messages|(^|\.)messenger\.com/i.test(senderTab.url || senderTab.pendingUrl || '');
-      if (isMessagesUrl || !user_id) {
+      var tabUrl = senderTab.url || senderTab.pendingUrl || '';
+      var isMessagesUrl = /(^|\.)(facebook\.com\/messages|messenger\.com)/i.test(tabUrl);
+      // Call popup co the xuat hien tren bat ky tab facebook.com nao
+      var isAnyFbUrl = !!allowAnyFbTab && /(^|\.)facebook\.com/i.test(tabUrl);
+      if (isMessagesUrl || isAnyFbUrl || !user_id) {
         if (user_id) {
           const interactionKey = FbCrmMessengerTabRoles.roleKey(user_id, 'interaction');
           await registerTab(interactionKey, senderTab.id);
@@ -390,7 +408,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'NEW_MESSAGE_FROM_FB') {
     (async () => {
       const senderRole = await resolveSenderTabRole(sender?.tab);
-      if (!FbCrmMessengerTabRoles.canForwardRealtime(senderRole)) {
+      const isExplicitIncoming = message.data?.is_outgoing === false || message.data?.is_outgoing === 0;
+      const mayForward = FbCrmMessengerTabRoles.canForwardRealtime(senderRole)
+        || (isExplicitIncoming && FbCrmMessengerTabRoles.canForwardIncomingRealtime?.(senderRole));
+      if (!mayForward) {
         console.log(`[FB Engine] Skip NEW_MESSAGE_FROM_FB from role=${senderRole || 'unregistered'} tab=${sender?.tab?.id || 'unknown'}`);
         return;
       }
@@ -443,32 +464,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
   }
 
-  if (message.type === 'INCOMING_CALL_RINGING') {
-    (async () => {
-      const senderRole = await resolveSenderTabRole(sender?.tab);
-      if (!FbCrmMessengerTabRoles.canForwardCallRealtime(senderRole)) return;
-      console.log('[FB Engine] 🔔 INCOMING_CALL_RINGING từ content.js:', message.data);
-      sendToBackend('INCOMING_CALL_RINGING', {
-        ...message.data,
-        account_id: user_id,
-        source_tab_id: sender?.tab?.id || null
-      });
-    })();
-    return true;
+  if (message.type === 'INCOMING_CALL_RINGING' || message.type === 'INCOMING_CALL_ENDED') {
+    sendToBackend(message.type, { ...(message.data || {}), account_id: user_id, source_tab_id: sender?.tab?.id || null, source_frame_id: Number.isInteger(sender?.frameId) ? sender.frameId : 0 });
   }
 
-  if (message.type === 'INCOMING_CALL_ENDED') {
-    (async () => {
-      const senderRole = await resolveSenderTabRole(sender?.tab);
-      if (!FbCrmMessengerTabRoles.canForwardCallRealtime(senderRole)) return;
-      console.log('[FB Engine] 📴 INCOMING_CALL_ENDED từ content.js');
-      sendToBackend('INCOMING_CALL_ENDED', {
-        ...message.data,
-        account_id: user_id
-      });
-    })();
-    return true;
-  }
+
 
   // Lets a content script re-seed its client-side timestamp-anchor map after
   // a restart from the backend's persistent record (feature 014) - fixes
@@ -1089,12 +1089,48 @@ async function handleSendMessage({ thread_id, thread_url = null, expected_contac
       null,
       expected_contact_name
     );
-    const verifiedThreadId = await getCurrentThreadIdInTab(tab.id);
-    if (!onRecipientThread || String(verifiedThreadId || '') !== recipientThreadId) {
+    const interactionDeadline = Date.now() + 10000;
+    let interactionState = null;
+    while (onRecipientThread && Date.now() < interactionDeadline) {
+      interactionState = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (targetThreadId) => {
+          const routeMatch = location.href.match(/\/messages\/(?:e2ee\/)?t\/([^\/?#]+)/) ||
+            location.href.match(/[?&](?:selected_item_id|thread_id)=([^&#]+)/);
+          const currentThreadId = routeMatch ? decodeURIComponent(routeMatch[1]) : null;
+          const main = document.querySelector('div[role="main"]');
+          const composer = main && [...main.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
+            .find((element) => {
+              const rect = element.getBoundingClientRect();
+              const label = (element.getAttribute('aria-label') || '').toLowerCase();
+              return rect.width > 0 && rect.height > 0 && !label.includes('search') && !label.includes('tìm kiếm');
+            });
+          const heading = main?.querySelector('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"]');
+          const headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
+          const composerLabel = (composer?.getAttribute('aria-label') || '').trim();
+          const conversation = main?.querySelector('[aria-label^="Tin nhắn trong cuộc trò chuyện với "], [aria-label^="Messages in conversation with "]');
+          const conversationName = (conversation?.getAttribute('aria-label') || '')
+            .replace(/^(?:Tin nhắn trong cuộc trò chuyện với|Messages in conversation with)\s+/i, '')
+            .trim();
+          return {
+            current_thread_id: currentThreadId,
+            composer_ready: Boolean(composer),
+            visible_contact_name: headingName || composerLabel.replace(/^(?:Viết cho|Write to)\s+/i, '').trim() || conversationName || null,
+            route_ready: String(currentThreadId || '') === String(targetThreadId || '')
+          };
+        },
+        args: [recipientThreadId]
+      }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+      if (interactionState?.route_ready && interactionState?.composer_ready && interactionState?.visible_contact_name) break;
+      await delay(200);
+    }
+    const verifiedThreadId = interactionState?.current_thread_id || await getCurrentThreadIdInTab(tab.id);
+    if (!onRecipientThread || !interactionState?.route_ready || !interactionState?.composer_ready || String(verifiedThreadId || '') !== recipientThreadId) {
       trace('THREAD_ROUTE_REJECTED', {
         tab_id: tab.id,
         requested_thread_id: recipientThreadId,
-        actual_thread_id: verifiedThreadId || null
+        actual_thread_id: verifiedThreadId || null,
+        composer_ready: Boolean(interactionState?.composer_ready)
       });
       sendToBackend('SEND_MESSAGE_RESULT', {
         thread_id,
@@ -1105,23 +1141,7 @@ async function handleSendMessage({ thread_id, thread_url = null, expected_contac
       });
       return;
     }
-    const visibleContactName = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => {
-        const main = document.querySelector('div[role="main"]') || document;
-        const heading = main.querySelector('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"]');
-        const headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
-        if (headingName) return headingName;
-        const composer = [...main.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
-          .find((element) => /^(?:Viết cho|Write to)\s+/i.test(element.getAttribute('aria-label') || ''));
-        const composerLabel = (composer?.getAttribute('aria-label') || '').trim();
-        if (composerLabel) return composerLabel.replace(/^(?:Viết cho|Write to)\s+/i, '').trim() || null;
-        const conversation = main.querySelector('[aria-label^="Tin nhắn trong cuộc trò chuyện với "], [aria-label^="Messages in conversation with "]');
-        return (conversation?.getAttribute('aria-label') || '')
-          .replace(/^(?:Tin nhắn trong cuộc trò chuyện với|Messages in conversation with)\s+/i, '')
-          .trim() || null;
-      }
-    }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+    const visibleContactName = interactionState.visible_contact_name;
     const normalizeIdentity = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
     if (!expected_contact_name || !visibleContactName || normalizeIdentity(visibleContactName) !== normalizeIdentity(expected_contact_name)) {
       trace('CONTACT_IDENTITY_REJECTED', {
@@ -2047,6 +2067,8 @@ async function getBusinessSuiteTab(pageId) {
 // Yêu cầu content.js scrape DOM sidebar của facebook.com/messages
 let discoverySyncInFlight = false;
 let recoverySyncRetryTimer = null;
+const discoverySyncCheckpoints = new Map();
+const discoverySyncCancelledAccounts = new Set();
 
 function moveMessengerDiscoverySidebar(action = 'step') {
   // Strategy 1: Find container by navigation grid/gridcell/role or sidebar aria labels
@@ -2099,7 +2121,7 @@ function moveMessengerDiscoverySidebar(action = 'step') {
   return { found: true, before, after, atEnd };
 }
 
-async function handleSync100Threads({ account_id }) {
+async function handleSync100Threads({ account_id, resume = false, time_budget_ms = 120000 }) {
   if (discoverySyncInFlight) {
     console.log(`[FB Engine] [DISCOVERY] Skip overlapping scan for account=${account_id}`);
     // The original scan still owns the result. Sending an empty result here
@@ -2107,6 +2129,14 @@ async function handleSync100Threads({ account_id }) {
     return;
   }
   discoverySyncInFlight = true;
+  const accountKey = String(account_id || '');
+  const deadline = Date.now() + Math.max(10000, Math.min(Number(time_budget_ms) || 120000, 120000));
+  if (!resume) discoverySyncCheckpoints.delete(accountKey);
+  discoverySyncCancelledAccounts.delete(accountKey);
+  const checkpoint = discoverySyncCheckpoints.get(accountKey) || { sections: new Map(), updated_at: Date.now() };
+  discoverySyncCheckpoints.set(accountKey, checkpoint);
+  let budgetExpired = false;
+  let cancelled = false;
   console.log('[FB Engine] 🔄 Đang sync threads sidebar cho account:', account_id);
 
   // Keep the existing Personal Messenger flow, but scrape open Business Suite
@@ -2189,7 +2219,18 @@ async function handleSync100Threads({ account_id }) {
   try {
     const collectedThreads = [];
     for (const target of scrapeTargets) {
+      if (Date.now() >= deadline || discoverySyncCancelledAccounts.has(accountKey)) {
+        budgetExpired = Date.now() >= deadline;
+        cancelled = discoverySyncCancelledAccounts.has(accountKey);
+        break;
+      }
       try {
+        // Facebook does not fully mount virtualized rows in a never-active
+        // background tab. Make the target active inside the managed (already
+        // hidden/off-screen) Chrome window before selecting Requests/Spam.
+        // This does not foreground Chrome on the user's desktop.
+        await chrome.tabs.update(target.tab.id, { active: true }).catch(() => null);
+        await delay(target.requestSection ? 1200 : 500);
         let scraped = [];
         if (target.isBizTab) {
           const results = await chrome.scripting.executeScript({ target: { tabId: target.tab.id }, func: scrapeBusinessSuiteSidebar });
@@ -2208,6 +2249,18 @@ async function handleSync100Threads({ account_id }) {
             const sectionSelected = await chrome.scripting.executeScript({
               target: { tabId: target.tab.id },
               func: (section) => {
+                const normalizeTabText = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+                const semanticNames = section === 'spam'
+                  ? new Set(['spam', 'thư rác'])
+                  : new Set(['có thể bạn biết', 'you may know']);
+                const semanticTab = [...document.querySelectorAll('[role="tab"]')].find((tab) => {
+                  const rect = tab.getBoundingClientRect();
+                  return rect.width > 0 && rect.height > 0 && semanticNames.has(normalizeTabText(tab.textContent));
+                });
+                if (semanticTab) {
+                  if (semanticTab.getAttribute('aria-selected') !== 'true') semanticTab.click();
+                  return true;
+                }
                 const labels = section === 'spam'
                   ? /^(?:Spam|Thư rác)$/i
                   : /^(?:Có thể bạn biết|You may know)$/i;
@@ -2235,6 +2288,27 @@ async function handleSync100Threads({ account_id }) {
               continue;
             }
             await delay(1200);
+            let selectedSectionReady = false;
+            for (let selectionAttempt = 0; selectionAttempt < 20; selectionAttempt += 1) {
+              selectedSectionReady = await chrome.scripting.executeScript({
+                target: { tabId: target.tab.id },
+                func: (section) => {
+                  const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+                  const names = section === 'spam'
+                    ? new Set(['spam', 'thư rác'])
+                    : new Set(['có thể bạn biết', 'you may know']);
+                  return [...document.querySelectorAll('[role="tab"][aria-selected="true"]')]
+                    .some((tab) => names.has(normalize(tab.textContent)));
+                },
+                args: [target.requestSection]
+              }).then((rows) => rows?.[0]?.result === true).catch(() => false);
+              if (selectedSectionReady) break;
+              await delay(250);
+            }
+            if (!selectedSectionReady) {
+              console.warn(`[FB Engine] [REQUESTS] Section did not become selected=${target.requestSection}`);
+              continue;
+            }
             // Wait for both the request URL and its React surface. Merely
             // waiting for navigation lets the previous Inbox DOM be scraped
             // during the transition and labels normal chats as requests.
@@ -2244,9 +2318,10 @@ async function handleSync100Threads({ account_id }) {
                 target: { tabId: target.tab.id },
                 func: () => {
                   const path = location.pathname.replace(/\/$/, '');
-                  const heading = String(document.body?.innerText || '').slice(0, 4000);
-                  const hasRequestHeading = /Tin nh.n (?:.ang )?ch.|Message requests/i.test(heading);
-                  return path === '/messages/requests' && hasRequestHeading;
+                  const hasRequestTabs = [...document.querySelectorAll('[role="tab"]')].some((tab) =>
+                    /^(?:Có thể bạn biết|You may know|Spam|Thư rác)$/i.test(String(tab.textContent || '').replace(/\s+/g, ' ').trim())
+                  );
+                  return path === '/messages/requests' && hasRequestTabs;
                 }
               }).then((rows) => rows?.[0]?.result === true).catch(() => false);
               if (requestSurfaceReady) break;
@@ -2257,13 +2332,50 @@ async function handleSync100Threads({ account_id }) {
               continue;
             }
           }
-          const discovered = new Map();
+          const sectionKey = target.isBizTab
+            ? `page:${target.pageId}`
+            : (target.requestSection || 'inbox');
+          const sectionCheckpoint = checkpoint.sections.get(sectionKey) || { threads: new Map(), completed: false };
+          if (resume && sectionCheckpoint.completed) {
+            scraped = [...sectionCheckpoint.threads.values()];
+            for (const thread of scraped) collectedThreads.push({ ...thread, page_id: target.isBizTab ? (thread.page_id || target.pageId) : null, source_type: target.isBizTab ? 'page_messenger' : 'personal_messenger' });
+            continue;
+          }
+          const discovered = resume ? new Map(sectionCheckpoint.threads) : new Map();
           let roundsWithoutNew = 0;
           for (let round = 0; round < 60 && discovered.size < 500; round += 1) {
+            if (Date.now() >= deadline || discoverySyncCancelledAccounts.has(accountKey)) {
+              budgetExpired = Date.now() >= deadline;
+              cancelled = discoverySyncCancelledAccounts.has(accountKey);
+              break;
+            }
             const results = await chrome.scripting.executeScript({ target: { tabId: target.tab.id }, func: scrapeFacebookSidebar });
-            const visible = results?.[0]?.result || [];
-            if (round === 0 && target.requestSection && visible.length === 0) {
-              console.log(`[FB Engine] [REQUESTS] section=${target.requestSection} empty; continue immediately`);
+            const primaryVisible = results?.[0]?.result || [];
+            let visible = primaryVisible;
+            if (target.requestSection) {
+              const fallbackResults = await chrome.scripting.executeScript({
+                target: { tabId: target.tab.id },
+                func: scrapeMessageRequestsSidebar
+              }).catch(() => []);
+              const combined = new Map();
+              for (const thread of [...primaryVisible, ...(fallbackResults?.[0]?.result || [])]) {
+                if (thread?.thread_id) combined.set(String(thread.thread_id), thread);
+              }
+              visible = [...combined.values()];
+              if (round === 0) {
+                console.log(`[FB Engine] [REQUESTS] section=${target.requestSection} primary=${primaryVisible.length} fallback=${(fallbackResults?.[0]?.result || []).length}`);
+              }
+            }
+            if (target.requestSection && visible.length === 0 && round < 10) {
+              // The selected ARIA tab becomes active before React mounts its
+              // virtualized conversation rows. An immediate empty result is
+              // therefore "not loaded yet", not proof that Requests is empty.
+              console.log(`[FB Engine] [REQUESTS] section=${target.requestSection} waiting_for_rows attempt=${round + 1}/10`);
+              await delay(600);
+              continue;
+            }
+            if (target.requestSection && visible.length === 0 && round === 10) {
+              console.log(`[FB Engine] [REQUESTS] section=${target.requestSection} confirmed_empty_after_wait`);
               break;
             }
             const beforeCount = discovered.size;
@@ -2301,6 +2413,11 @@ async function handleSync100Threads({ account_id }) {
               });
             }
             roundsWithoutNew = discovered.size === beforeCount ? roundsWithoutNew + 1 : 0;
+            sectionCheckpoint.threads = new Map(discovered);
+            sectionCheckpoint.completed = false;
+            sectionCheckpoint.updated_at = Date.now();
+            checkpoint.sections.set(sectionKey, sectionCheckpoint);
+            checkpoint.updated_at = Date.now();
             console.log('[FB Engine] [DISCOVERY] account=' + account_id + ' round=' + (round + 1) + ' total=' + discovered.size + ' visible=' + visible.length);
             // Messenger virtualizes the list and often pauses at the bottom of
             // the currently loaded chunk. Give it several load windows before
@@ -2315,7 +2432,12 @@ async function handleSync100Threads({ account_id }) {
             await delay(moveState.atEnd ? 1800 : 850);
           }
           scraped = [...discovered.values()];
-          await chrome.scripting.executeScript({ target: { tabId: target.tab.id }, func: moveMessengerDiscoverySidebar, args: ['restore'] }).catch(() => {});
+          sectionCheckpoint.threads = new Map(discovered);
+          sectionCheckpoint.completed = !budgetExpired && !cancelled;
+          checkpoint.sections.set(sectionKey, sectionCheckpoint);
+          if (!budgetExpired && !cancelled) {
+            await chrome.scripting.executeScript({ target: { tabId: target.tab.id }, func: moveMessengerDiscoverySidebar, args: ['restore'] }).catch(() => {});
+          }
         }
         console.log(`[FB Engine] ✅ Đã scrape được ${scraped.length} threads từ ${target.isBizTab ? `Business Suite Page ${target.pageId}` : 'Messenger cá nhân'} sidebar`);
         for (const thread of scraped) {
@@ -2383,7 +2505,13 @@ async function handleSync100Threads({ account_id }) {
       };
     }));
 
-    sendToBackend('SYNC_THREADS_RESULT', { account_id, threads: processedThreads });
+    sendToBackend('SYNC_THREADS_RESULT', {
+      account_id,
+      threads: processedThreads,
+      partial: budgetExpired || cancelled,
+      sync_status: cancelled ? 'cancelled' : (budgetExpired ? 'paused' : 'completed'),
+      checkpoint: [...checkpoint.sections.entries()].map(([section, state]) => ({ section, count: state.threads.size, completed: state.completed }))
+    });
   } catch (err) {
     console.error('[FB Engine] Lỗi executeScript scrape sidebar:', err.message);
     sendToBackend('SYNC_THREADS_RESULT', { account_id, threads: [] });
@@ -2639,12 +2767,66 @@ function scrapeFacebookSidebar() {
 
 // ── Điều hướng/xác thực tab Facebook trước khi scrape lịch sử ──────────────
 
+// Additive fallback for Message Requests. Request rows can expose their id in
+// query parameters and wrap anchors in role=button instead of normal rows.
+function scrapeMessageRequestsSidebar() {
+  const threads = [];
+  const seen = new Set();
+  const controls = [...document.querySelectorAll('a[href], [role="row"], [role="listitem"], [role="button"]')]
+    .filter((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && !element.closest('[role="tab"]');
+    });
+  const extractThread = (rawHref) => {
+    const href = String(rawHref || '');
+    const pathMatch = href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/i);
+    if (pathMatch) return decodeURIComponent(pathMatch[1]);
+    try {
+      const url = new URL(href, location.origin);
+      return url.searchParams.get('thread_id') || url.searchParams.get('selected_item_id');
+    } catch (_) { return null; }
+  };
+  for (const control of controls) {
+    const anchors = control.tagName === 'A' ? [control] : [...control.querySelectorAll('a[href]')];
+    let anchor = null;
+    let threadId = null;
+    for (const candidate of anchors) {
+      threadId = extractThread(candidate.getAttribute('href') || candidate.href);
+      if (threadId) { anchor = candidate; break; }
+    }
+    if (!threadId || seen.has(String(threadId))) continue;
+    const row = control.closest('[role="row"], [role="listitem"], [role="button"]') || control;
+    const rect = row.getBoundingClientRect();
+    const lines = String(row.innerText || row.textContent || '').split(/\n+/)
+      .map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    if (rect.width <= 0 || rect.height <= 0 || lines.length === 0) continue;
+    const image = row.querySelector('img[src], image[href]');
+    if (!image && lines.length < 2) continue;
+    const systemLine = /^(?:Có thể bạn biết|You may know|Spam|Thư rác|Xem thêm|See more)$/i;
+    const name = lines.find((line) => !systemLine.test(line) && line.length >= 2 && line.length <= 80)
+      || `Khách hàng (${String(threadId).slice(0, 8)})`;
+    const lastMessage = [...lines].reverse().find((line) => line !== name && !systemLine.test(line) && line.length < 200) || '';
+    const rawHref = anchor?.getAttribute('href') || anchor?.href || '';
+    let threadUrl = rawHref;
+    try { threadUrl = new URL(rawHref, location.origin).toString(); } catch (_) {}
+    seen.add(String(threadId));
+    threads.push({
+      thread_id: String(threadId), name, last_message: lastMessage,
+      is_unread: Boolean(row.querySelector('[aria-label*="Chưa đọc"], [aria-label*="unread"], [data-testid="unread-count"]')),
+      avatar_url: image?.currentSrc || image?.src || image?.getAttribute?.('href') || null,
+      avatar_base64: null, thread_url: threadUrl,
+      is_e2ee: /\/messages\/(?:requests\/)?(?:spam\/)?e2ee\/t\//i.test(threadUrl)
+    });
+  }
+  return threads;
+}
+
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function extractThreadIdFromMessengerUrl(url) {
-  const match = String(url || '').match(/\/messages\/(?:e2ee\/)?t\/([^\/?#]+)/) ||
+  const match = String(url || '').match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/) ||
                 String(url || '').match(/[?&](?:selected_item_id|thread_id)=(\d+)/);
   return match ? decodeURIComponent(match[1]) : null;
 }
@@ -2663,7 +2845,7 @@ async function getCurrentThreadIdInTab(tabId) {
     const res = await chrome.scripting.executeScript({
       target: { tabId },
       func: () => {
-        const match = location.href.match(/\/messages\/(?:e2ee\/)?t\/([^\/?#]+)/) ||
+        const match = location.href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/) ||
                       location.href.match(/[?&](?:selected_item_id|thread_id)=(\d+)/);
         if (match) return decodeURIComponent(match[1]);
 
@@ -2672,7 +2854,7 @@ async function getCurrentThreadIdInTab(tabId) {
         if (selected) {
           const links = selected.tagName === 'A' ? [selected] : Array.from(selected.querySelectorAll('a[href]'));
           for (const l of links) {
-            const m = l.href?.match(/(?:selected_item_id|thread_id)=(\d+)/) || l.href?.match(/\/messages\/(?:e2ee\/)?t\/(\d+)/);
+            const m = l.href?.match(/(?:selected_item_id|thread_id)=(\d+)/) || l.href?.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/);
             if (m) return m[1];
           }
         }
@@ -2856,10 +3038,124 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
 }
 
 // ── Đồng bộ lịch sử tin nhắn của 1 hội thoại cụ thể ────────────────────────
-async function handleSyncThreadMessages({ account_id, thread_id, thread_url, page_id = null, mode = 'initial', cursor = null, contact_name = null, reason = null, allow_navigation = false, _history_tab_id = null }) {
+async function dispatchTrustedMouseClick(tabId, point) {
+  const target = { tabId };
+  try {
+    await chrome.debugger.attach(target, '1.3');
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+    return true;
+  } catch (error) {
+    console.warn('[FB Engine] Trusted message-request click failed:', error.message);
+    return false;
+  } finally {
+    try { await chrome.debugger.detach(target); } catch (_) {}
+  }
+}
+
+async function inspectMessageRequestControls(tabId) {
+  const result = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+      const actionLabels = new Map([
+        ['chấp nhận', 'accept'], ['accept', 'accept'],
+        ['tiếp tục', 'continue'], ['continue', 'continue'],
+        ['xóa', 'delete'], ['delete', 'delete'],
+        ['chặn', 'block'], ['block', 'block']
+      ]);
+      const visible = (element) => {
+        if (!element || element.closest('[aria-hidden="true"]')) return false;
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 20 && rect.height > 20 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const controls = [];
+      for (const element of document.querySelectorAll('button, [role="button"], a[role="button"]')) {
+        if (!visible(element)) continue;
+        const labels = [element.innerText, element.textContent, element.getAttribute('aria-label'), element.getAttribute('title')];
+        const action = labels.map(normalize).map((label) => actionLabels.get(label)).find(Boolean);
+        if (!action) continue;
+        const rect = element.getBoundingClientRect();
+        controls.push({ action, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, inDialog: Boolean(element.closest('[role="dialog"][aria-modal="true"]')) });
+      }
+      const unique = [];
+      for (const control of controls) {
+        if (!unique.some((item) => item.action === control.action)) unique.push(control);
+      }
+      const pageText = normalize(document.body?.innerText);
+      const contactUnavailable = /không (?:thể|còn) liên lạc|can't (?:contact|message)|cannot (?:contact|message)/i.test(pageText);
+      return { controls: unique, contactUnavailable, href: location.href };
+    }
+  });
+  return result?.[0]?.result || { controls: [], contactUnavailable: false };
+}
+
+async function handleMessageRequestAction(data) {
+  const requestId = String(data.request_id || '');
+  const threadId = String(data.external_thread_id || data.thread_id || '');
+  const accountId = String(data.account_id || user_id || '');
+  const action = String(data.action || 'query');
+  const reply = (payload) => sendToBackend('MESSAGE_REQUEST_ACTION_RESULT', {
+    request_id: requestId, thread_id: data.thread_id || threadId, action, ...payload
+  });
+  if (!requestId || !threadId || !accountId || !['query', 'accept', 'continue', 'delete', 'block'].includes(action)) {
+    reply({ success: false, error: 'INVALID_MESSAGE_REQUEST_ACTION' });
+    return;
+  }
+  try {
+    const tab = await ensureRoleMessengerTab(accountId, 'request_action');
+    if (!tab?.id) throw new Error('Không tìm thấy tab Messenger của tài khoản.');
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => null);
+    const navigationToken = beginPersonalNavigation(accountId);
+    const onThread = await ensureTabOnThread(tab, threadId.includes(':') ? threadId.split(':').pop() : threadId, data.thread_url || null, null, navigationToken, data.contact_name || null);
+    if (!onThread) throw new Error('Không mở đúng được hội thoại Tin nhắn chờ trên Messenger.');
+    let snapshot = { controls: [], contactUnavailable: false };
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      snapshot = await inspectMessageRequestControls(tab.id);
+      if (snapshot.controls.length || snapshot.contactUnavailable) break;
+      await delay(250);
+    }
+    if (action === 'query') {
+      reply({ success: true, available_actions: snapshot.controls.map((control) => control.action), contact_unavailable: snapshot.contactUnavailable });
+      return;
+    }
+    const requestedControl = snapshot.controls.find((control) => control.action === action)
+      || (action === 'accept' ? snapshot.controls.find((control) => control.action === 'continue') : null);
+    if (!requestedControl) throw new Error(`Messenger hiện không có nút ${action} cho hội thoại này.`);
+    if (!await dispatchTrustedMouseClick(tab.id, requestedControl)) throw new Error('Không thể gửi cú bấm tin cậy tới Messenger.');
+    await delay(450);
+    const confirmation = await inspectMessageRequestControls(tab.id).catch(() => ({ controls: [] }));
+    const confirmationControl = confirmation.controls.find((control) => control.action === action && control.inDialog);
+    if (confirmationControl) {
+      if (!await dispatchTrustedMouseClick(tab.id, confirmationControl)) throw new Error('Không thể xác nhận thao tác trên Messenger.');
+      await delay(500);
+    }
+    const after = await inspectMessageRequestControls(tab.id).catch(() => ({ controls: [] }));
+    reply({ success: true, available_actions: after.controls.map((control) => control.action), contact_unavailable: Boolean(after.contactUnavailable) });
+  } catch (error) {
+    reply({ success: false, error: error.message || 'MESSAGE_REQUEST_ACTION_FAILED' });
+  }
+}
+
+async function handleSyncThreadMessages({ account_id, thread_id, external_thread_id = null, thread_url, page_id = null, mode = 'initial', cursor = null, contact_name = null, reason = null, allow_navigation = false, scroll_delta = 0, _history_tab_id = null }) {
   console.log(`[FB Engine] 🔄 Sync lịch sử tin nhắn cho thread: ${thread_id} (${contact_name || 'unknown'}, account=${account_id || user_id}) mode=${mode}`);
   if (!thread_id) return;
+  const allowedReasons = new Set(['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport', 'initial_sweep', 'manual_resync', 'history_retry', 'sidebar_incoming']);
+  const baseReason = String(reason || '').replace(/(?:_replay)+$/, '');
+  if (!_history_tab_id && (allow_navigation !== true || !allowedReasons.has(baseReason))) {
+    sendToBackend('THREAD_MESSAGES_SYNCED', {
+      account_id: account_id || user_id,
+      thread_id,
+      messages: [],
+      reason: 'navigation_not_authorized',
+      mode,
+      cursor
+    });
+    return;
+  }
   const targetAcc = account_id || user_id;
+  const navigationThreadId = String(external_thread_id || thread_id).split(':').pop();
   const navigationToken = (page_id || _history_tab_id) ? null : beginPersonalNavigation(targetAcc);
 
   // Page threads use the exact Business Suite asset. Personal threads always
@@ -2878,7 +3174,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
   }
 
   if (!isPersonalNavigationCurrent(navigationToken)) return;
-  const onTargetThread = await ensureTabOnThread(tab, thread_id, thread_url, page_id, navigationToken, contact_name);
+  const onTargetThread = await ensureTabOnThread(tab, navigationThreadId, thread_url, page_id, navigationToken, contact_name);
   if (!isPersonalNavigationCurrent(navigationToken)) {
     console.log(`[FB Engine] Bỏ sync thread ${thread_id}: đã có click Messenger cá nhân mới hơn.`);
     return;
@@ -2888,7 +3184,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
 
   console.log(`[DOM Sync Verification] requested thread: ${thread_id} | current Facebook URL: ${updatedTab?.url || tab.url} | current thread id: ${currentTabThreadId}`);
 
-  if (!onTargetThread || (currentTabThreadId && String(currentTabThreadId) !== String(thread_id))) {
+  if (!onTargetThread || (currentTabThreadId && String(currentTabThreadId) !== navigationThreadId)) {
     console.warn(`[DOM Sync Verification] ⚠️ Tab Facebook đang mở thread ${currentTabThreadId || 'khác'}, không khớp thread ${thread_id}. Result count: 0. Hủy sync để tránh ghi nhầm DB.`);
     sendToBackend('THREAD_MESSAGES_SYNCED', {
       account_id: targetAcc,
@@ -2904,11 +3200,44 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: async (targetThreadId, mode, cursor, contactName) => {
+      func: async (targetThreadId, mode, cursor, contactName, scrollDelta) => {
+        const MESSAGE_ROW_SELECTOR = 'div[role="row"], div[role="article"]';
+        const FALLBACK_MESSAGE_SELECTOR = 'div[data-scope="messages_table"] div[dir="auto"]';
+        const UI_EXCLUDE = 'form, [contenteditable="true"], [role="textbox"], [role="contentinfo"], header, nav, [role="complementary"]';
+        function collectMessageRows(root) {
+          // Messenger currently mixes several generations of message markup
+          // in one mounted viewport. Some bubbles are role=row/article while
+          // others expose only data-message-id or a semantic aria-label. Do
+          // not stop at the first selector that happens to return something:
+          // that previously reduced a fully mounted latest viewport to only
+          // one or two messages.
+          const rows = new Set(Array.from(root.querySelectorAll(MESSAGE_ROW_SELECTOR)));
+          const semanticUnits = root.querySelectorAll(
+            '[data-message-id], [data-scope="messages_table"][aria-label], [aria-roledescription][aria-label]'
+          );
+          for (const unit of semanticUnits) {
+            if (unit.closest(UI_EXCLUDE)) continue;
+            const wrapper = unit.closest(MESSAGE_ROW_SELECTOR);
+            rows.add(wrapper && root.contains(wrapper) ? wrapper : unit);
+          }
+          if (rows.size === 0) {
+            Array.from(root.querySelectorAll(FALLBACK_MESSAGE_SELECTOR))
+            .filter((node) => !node.closest(UI_EXCLUDE))
+            .filter((node) => node.hasAttribute('data-message-id') || node.closest('[data-message-id], [aria-roledescription]'))
+            .forEach((node) => rows.add(node.closest(MESSAGE_ROW_SELECTOR) || node));
+          }
+          return [...rows].filter((node) => root.contains(node)).sort((left, right) => {
+            if (left === right) return 0;
+            return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+          });
+        }
         // 1. Helper chờ DOM Ready
         async function waitForThreadDomReady(targetThreadId, timeoutMs = 8000) {
           const startTime = Date.now();
           let lastReason = 'timeout';
+          let emptySince = 0;
+          let lastRowsSignature = '';
+          let stableRowsRounds = 0;
 
           while (Date.now() - startTime < timeoutMs) {
             // Personal Messenger exposes the thread in /messages/t/<id>;
@@ -2955,8 +3284,39 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
               continue;
             }
 
-            const existingRows = mainContainer.querySelectorAll('div[role="row"], div[role="article"], div[data-scope="messages_table"] div[dir="auto"]');
+            // A Facebook SPA route changes before React replaces the old
+            // conversation DOM. URL equality alone can therefore scrape user
+            // A's rows into user B. When a contact name is available, wait
+            // until the mounted conversation identity agrees as well.
+            if (contactName) {
+              const normalizeIdentity = (value) => String(value || '')
+                .normalize('NFC').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+              const expectedIdentity = normalizeIdentity(contactName);
+              const conversationLabel = mainContainer.querySelector(
+                '[aria-label^="Tin nhắn trong cuộc trò chuyện với "], [aria-label^="Messages in conversation with "]'
+              )?.getAttribute('aria-label') || '';
+              const labelIdentity = normalizeIdentity(conversationLabel
+                .replace(/^(?:Tin nhắn trong cuộc trò chuyện với|Messages in conversation with)\s+/i, ''));
+              const headingCandidates = Array.from(mainContainer.querySelectorAll('h1, h2, span[aria-level="1"], span[aria-level="2"]'))
+                .map((node) => normalizeIdentity(node.textContent))
+                .filter(Boolean);
+              const hasIdentitySignal = Boolean(labelIdentity || headingCandidates.length);
+              const identityReady = !hasIdentitySignal || labelIdentity === expectedIdentity || headingCandidates.includes(expectedIdentity);
+              if (!identityReady) {
+                lastReason = 'contact_identity_pending';
+                await new Promise(r => setTimeout(r, 250));
+                continue;
+              }
+            }
+
+            const existingRows = collectMessageRows(mainContainer);
             if (existingRows.length === 0) {
+              const composerReady = !!mainContainer.querySelector('[contenteditable="true"], [role="textbox"]');
+              const loading = !!mainContainer.querySelector('svg[aria-label="Loading"], div[role="progressbar"]');
+              if (composerReady && !loading) {
+                if (!emptySince) emptySince = Date.now();
+                if (Date.now() - emptySince >= 1200) return { ok: true, empty: true, mainContainer };
+              } else emptySince = 0;
               lastReason = 'no_rows';
               await new Promise(r => setTimeout(r, 400));
               continue;
@@ -2977,7 +3337,21 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
               continue;
             }
 
-            return { ok: true, mainContainer };
+            // Route readiness occurs before React has necessarily mounted the
+            // whole latest viewport. Wait for the visible row set to settle,
+            // otherwise an initial sync can persist only the last 1-2 bubbles.
+            const rowsSignature = existingRows.map((row) => (
+              row.querySelector('[data-message-id]')?.getAttribute('data-message-id')
+              || row.getAttribute('data-message-id')
+              || row.getAttribute('aria-label')
+              || String(row.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+            )).join('|');
+            if (rowsSignature && rowsSignature === lastRowsSignature) stableRowsRounds += 1;
+            else stableRowsRounds = 0;
+            lastRowsSignature = rowsSignature;
+            if (stableRowsRounds >= 3) return { ok: true, mainContainer };
+            lastReason = 'rows_settling';
+            await new Promise(r => setTimeout(r, 250));
           }
           return { ok: false, reason: lastReason };
         }
@@ -2995,22 +3369,200 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
         // 2. Helper scroll lazy load nhiều vòng
         let boundaryReached = false;
         let stopReason = null;
-        const boundaryId = mode === 'incremental' ? cursor?.newest_message_id : null;
+        const boundaryId = mode === 'incremental'
+          ? cursor?.newest_message_id
+          : (mode === 'ondemand_older' ? cursor?.oldest_message_id : null);
+        const boundaryContent = mode === 'ondemand_older' ? String(cursor?.oldest_content || '').trim() : '';
+        const boundaryMediaUrl = mode === 'ondemand_older' ? String(cursor?.oldest_media_url || '') : '';
+        const boundaryTimestampMs = mode === 'ondemand_older' ? Number(cursor?.oldest_timestamp_ms || 0) : 0;
+        // Keep the durable resume marker separate from the moving per-page
+        // cursor. Reopening a thread mounts the newest viewport first; that
+        // initial page must not erase where the previous crawl stopped.
+        const resumeMarkerId = String(cursor?.resume_message_id || '').replace(/_media$/, '');
+        const resumeMarkerContent = String(cursor?.resume_content || '').trim();
+        const resumeMarkerTimestampMs = Number(cursor?.resume_timestamp_ms || 0);
+        let resumeMarkerReached = cursor?.resume_marker_reached === true;
         // Round-budget phải khớp đúng mode server thực sự gửi (initial/incremental/deep_backfill) -
         // trước đây map này canh theo 'backfill' (không bao giờ được gửi) nên 'initial', mode quan
         // trọng nhất cho lần sync đầu tiên, luôn rơi vào default 5 vòng.
-        const ROUND_BUDGET = { incremental: 1, initial: 12, deep_backfill: 20, bulk_full: 15 };
+        // One navigation pass must persist one Facebook virtualized page. If
+        // several pages are scrolled inside one executeScript call, React
+        // unmounts the intermediate rows before the parser runs and CRM loses
+        // them. Multi-page sync still works through the existing checkpoint /
+        // next-batch loop, but every page is now extracted before continuing.
+        const ROUND_BUDGET = { incremental: 1, ondemand_initial: 1, ondemand_older: 1, initial: 1, deep_backfill: 1, bulk_full: 1 };
+        function findHistoryScroller(container) {
+          const rows = collectMessageRows(container);
+          const candidates = new Set([container]);
+          for (const seed of [container.querySelector('[role="log"]'), container.querySelector('[data-scope="messages_table"]'), rows[0], rows[rows.length - 1]].filter(Boolean)) {
+            let node = seed;
+            while (node && node !== document.body) {
+              candidates.add(node);
+              node = node.parentElement;
+            }
+          }
+          for (const node of container.querySelectorAll('div')) {
+            if (node.scrollHeight > node.clientHeight + 40) candidates.add(node);
+          }
+          return [...candidates].map((node) => {
+            const style = getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            const range = Math.max(0, node.scrollHeight - node.clientHeight);
+            const score = range
+              + (['auto', 'scroll'].includes(style.overflowY) ? 100000 : 0)
+              + (rows.some((row) => node.contains(row)) ? 200000 : 0)
+              + (rect.width > 180 && rect.height > 180 ? 50000 : 0);
+            return { node, score };
+          }).filter(({ node }) => node.scrollHeight > node.clientHeight + 8)
+            .sort((a, b) => b.score - a.score)[0]?.node || null;
+        }
+
+        function historyRowIdentity(row) {
+          const marker = row?.querySelector?.('[data-message-id], [data-id], [id^="mid."]') || row;
+          const nativeId = marker?.getAttribute?.('data-message-id') || marker?.getAttribute?.('data-id') || marker?.getAttribute?.('id');
+          if (nativeId) return nativeId;
+          if (!row) return '';
+          // Some Messenger rows expose no stable id. This fingerprint is only
+          // used to wait until the virtualized page has actually changed.
+          const labels = Array.from(row.querySelectorAll('[aria-label], [title], time[datetime]'))
+            .slice(0, 8)
+            .map((element) => element.getAttribute('aria-label') || element.getAttribute('title') || element.getAttribute('datetime') || '')
+            .filter(Boolean)
+            .join('|');
+          const media = Array.from(row.querySelectorAll('img[src], video[src], source[src], a[href]'))
+            .slice(0, 6)
+            .map((element) => element.currentSrc || element.src || element.href || '')
+            .filter(Boolean)
+            .join('|');
+          const text = String(row.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+          return text || labels || media ? `fallback_${stringHash(`${text}|${labels}|${media}`)}` : '';
+        }
+
+        async function forceLoadOlder(container) {
+          const scroller = findHistoryScroller(container);
+          if (!scroller) return { moved: false, reason: 'no_scroll_container' };
+          const beforeTop = scroller.scrollTop;
+          const beforeHeight = scroller.scrollHeight;
+          const beforeFirst = historyRowIdentity(collectMessageRows(container)[0]);
+          scroller.focus?.({ preventScroll: true });
+          const pageDistance = Math.max(600, scroller.clientHeight);
+          // Move in visible-sized stages so Messenger has time to mount the
+          // preceding page instead of jumping over it in its virtual list.
+          for (let step = 0; step < 4; step++) {
+            const stepDistance = Math.max(180, Math.floor(pageDistance / 4));
+            scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: -stepDistance, deltaMode: 0, bubbles: true, cancelable: true }));
+            scroller.scrollBy?.({ top: -stepDistance, behavior: 'auto' });
+            scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+          // Reach the mounted page's top to trigger Messenger's lazy loader,
+          // then wait below until both row identity and height settle.
+          scroller.scrollTop = 0;
+          scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+          let lastHeight = beforeHeight;
+          let lastFirst = beforeFirst;
+          let stableRounds = 0;
+          let changed = false;
+          for (let waitRound = 0; waitRound < 24; waitRound++) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            const afterFirst = historyRowIdentity(collectMessageRows(container)[0]);
+            const afterHeight = scroller.scrollHeight;
+            const spinnerVisible = !!container.querySelector('svg[aria-label="Loading"], div[role="progressbar"]');
+            if (afterHeight !== beforeHeight || (afterFirst && afterFirst !== beforeFirst)) changed = true;
+            if (!spinnerVisible && afterHeight === lastHeight && afterFirst === lastFirst) stableRounds += 1;
+            else stableRounds = 0;
+            lastHeight = afterHeight;
+            lastFirst = afterFirst;
+            // 1 second stable after a real DOM change is sufficient for all
+            // bubbles/media of that page to mount before extraction.
+            if (changed && stableRounds >= 4) return { moved: true };
+          }
+          return { moved: changed || beforeTop !== scroller.scrollTop };
+        }
+
+        async function mirrorCrmViewportScroll(container, requestedDelta) {
+          const scroller = findHistoryScroller(container);
+          if (!scroller) return { moved: false, reason: 'no_scroll_container' };
+          const rawDelta = Number(requestedDelta) || 0;
+          // A CRM wheel gesture covers fewer CSS pixels than Messenger's
+          // virtualized viewport. Scale it to a useful Messenger page while
+          // preserving direction; this also prevents tiny trackpad deltas
+          // from producing a visually imperceptible crawl.
+          const scaledDelta = Math.sign(rawDelta) * Math.max(
+            Math.abs(rawDelta) * 3,
+            Math.min(900, Math.max(420, scroller.clientHeight * 0.85))
+          );
+          const delta = Math.max(-2800, Math.min(2800, scaledDelta));
+          if (!delta) return { moved: false, reason: 'zero_delta' };
+          const beforeTop = scroller.scrollTop;
+          const beforeIdentity = historyRowIdentity(collectMessageRows(container)[0]);
+          scroller.focus?.({ preventScroll: true });
+          scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: delta, deltaMode: 0, bubbles: true, cancelable: true }));
+          scroller.scrollBy?.({ top: delta, behavior: 'auto' });
+          scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+          let stableRounds = 0;
+          let lastIdentity = beforeIdentity;
+          let lastTop = beforeTop;
+          for (let round = 0; round < 24; round++) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            const identity = historyRowIdentity(collectMessageRows(container)[0]);
+            const top = scroller.scrollTop;
+            const loading = !!container.querySelector('svg[aria-label="Loading"], div[role="progressbar"]');
+            if (!loading && identity === lastIdentity && top === lastTop) stableRounds += 1;
+            else stableRounds = 0;
+            lastIdentity = identity;
+            lastTop = top;
+            if (stableRounds >= 4) break;
+          }
+          return { moved: beforeTop !== scroller.scrollTop || beforeIdentity !== lastIdentity };
+        }
+
         async function loadOlderMessages(container, modeStr) {
-          const maxRounds = ROUND_BUDGET[modeStr] || 5;
+          const maxRounds = modeStr === 'ondemand_older' && !boundaryId ? 1 : (ROUND_BUDGET[modeStr] || 5);
 
           let prevScrollHeight = 0;
           let roundsWithoutIncrease = 0;
           for (let i = 0; i < maxRounds; i++) {
-            const rowsForBoundary = Array.from(container.querySelectorAll('div[role="row"], div[role="article"], div[data-scope="messages_table"] div[dir="auto"]'));
-            if (boundaryId && rowsForBoundary.some(row => {
+            const rowsForBoundary = collectMessageRows(container);
+            if (!resumeMarkerReached && (resumeMarkerId || resumeMarkerContent)) {
+              resumeMarkerReached = rowsForBoundary.some((row) => {
+                const marker = row.querySelector('[data-message-id], [data-id], [id^="mid."]') || row;
+                const nativeId = String(marker.getAttribute('data-message-id') || marker.getAttribute('data-id') || marker.getAttribute('id') || '').replace(/_media$/, '');
+                if (resumeMarkerId && nativeId === resumeMarkerId) return true;
+                if (!resumeMarkerContent || resumeMarkerTimestampMs <= 0) return false;
+                const text = String(row.textContent || '').replace(/\s+/g, ' ').trim();
+                const label = Array.from(row.querySelectorAll('[aria-label], [title], time[datetime], [data-utime]'))
+                  .map((element) => element.getAttribute('aria-label') || element.getAttribute('title') || element.getAttribute('datetime') || '')
+                  .find((value) => /\b\d{1,2}:\d{2}\b/.test(value)) || row.getAttribute('aria-label') || '';
+                const unixSeconds = Number(row.querySelector('[data-utime]')?.getAttribute('data-utime') || 0);
+                const timestampMs = unixSeconds > 0 ? unixSeconds * 1000 : parseTimeFromLabel(label, resumeMarkerTimestampMs);
+                return text.includes(resumeMarkerContent) && timestampMs > 0
+                  && Math.abs(timestampMs - resumeMarkerTimestampMs) <= 90000;
+              });
+            }
+            const foundBoundary = (boundaryId || boundaryContent || boundaryMediaUrl) && rowsForBoundary.some(row => {
               const el = row.querySelector('[data-message-id], [data-id], [id^="mid."]') || row;
-              return el.getAttribute('data-message-id') === boundaryId || el.getAttribute('data-id') === boundaryId || el.getAttribute('id') === boundaryId;
-            })) {
+              const rawBoundaryId = String(boundaryId || '').replace(/_media$/, '');
+              const idMatched = rawBoundaryId && (el.getAttribute('data-message-id') === rawBoundaryId || el.getAttribute('data-id') === rawBoundaryId || el.getAttribute('id') === rawBoundaryId);
+              const normalizedRowText = String(row.textContent || '').replace(/\s+/g, ' ').trim();
+              const rowTimeLabel = Array.from(row.querySelectorAll('[aria-label], [title], time[datetime], [data-utime]'))
+                .map((element) => element.getAttribute('aria-label') || element.getAttribute('title') || element.getAttribute('datetime') || '')
+                .find((label) => /\b\d{1,2}:\d{2}\b/.test(label)) || row.getAttribute('aria-label') || '';
+              const rowUnixSeconds = Number(row.querySelector('[data-utime]')?.getAttribute('data-utime') || 0);
+              const rowTimestampMs = rowUnixSeconds > 0
+                ? rowUnixSeconds * 1000
+                : parseTimeFromLabel(rowTimeLabel, boundaryTimestampMs || Date.now());
+              // Repeated message text is common. Content alone is never a
+              // resume boundary: it must also match the saved Facebook minute.
+              const timestampMatched = boundaryTimestampMs > 0 && rowTimestampMs > 0
+                && Math.abs(rowTimestampMs - boundaryTimestampMs) <= 90000;
+              const textMatched = boundaryContent.length >= 2 && normalizedRowText.includes(boundaryContent) && timestampMatched;
+              const mediaMatched = boundaryMediaUrl && Array.from(row.querySelectorAll('img[src], video[src], source[src]'))
+                .some((media) => (media.currentSrc || media.src || '') === boundaryMediaUrl) && timestampMatched;
+              return idMatched || textMatched || mediaMatched;
+            });
+            const loadOnePagePastBoundary = foundBoundary && modeStr === 'ondemand_older';
+            if (foundBoundary && !loadOnePagePastBoundary) {
               boundaryReached = true;
               stopReason = 'boundary_reached';
               console.log(`[FB LazyLoad] Đã gặp boundary ${boundaryId}; dừng crawl ${modeStr}.`);
@@ -3027,6 +3579,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
               }
               scrollProbe = scrollProbe.parentElement;
             }
+            scrollContainer = findHistoryScroller(container) || scrollContainer;
             const currentScrollHeight = scrollContainer ? scrollContainer.scrollHeight : 0;
             const currentScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
             const spinnerVisible = !!container.querySelector('svg[aria-label="Loading"], div[role="progressbar"]');
@@ -3052,29 +3605,38 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
               break;
             }
 
-            if (spinnerVisible) {
-              await new Promise(r => setTimeout(r, 1000));
-            } else {
-              if (scrollContainer) {
-                scrollContainer.scrollTop = 0;
-                scrollContainer.dispatchEvent(new Event('scroll', { bubbles: true }));
-                await new Promise(r => setTimeout(r, 1100));
-                // Facebook prepends rows and may recycle off-screen nodes. Keep
-                // the former first row anchored so repeated rounds continue
-                // walking backwards instead of jumping to an arbitrary point.
-                scrollContainer.scrollTop = 0;
-              } else {
-                await new Promise(r => setTimeout(r, 1100));
-              }
+            if (spinnerVisible) await new Promise(r => setTimeout(r, 300));
+            const loadResult = await forceLoadOlder(container);
+            if (!loadResult.moved && loadResult.reason === 'no_scroll_container') {
+              stopReason = 'no_scroll_growth';
+              break;
+            }
+            if (!loadResult.moved && modeStr === 'ondemand_older') {
+              stopReason = 'no_scroll_growth';
+              break;
+            }
+            if (loadOnePagePastBoundary) {
+              boundaryReached = true;
+              stopReason = 'on_demand_page';
+              break;
             }
           }
           if (!stopReason) stopReason = 'max_rounds_hit';
         }
 
-        await loadOlderMessages(mainContainer, mode);
+        if (domReadyStatus.empty) stopReason = 'no_scroll_growth';
+        else if (mode === 'ondemand_initial') {
+          // Opening a user synchronizes only the messages already mounted on
+          // screen. Messenger scrolls only after the operator reaches the top
+          // of the CRM conversation and requests `ondemand_older`.
+          stopReason = 'on_demand_page';
+        } else if (mode === 'ondemand_viewport') {
+          const mirrorResult = await mirrorCrmViewportScroll(mainContainer, scrollDelta);
+          stopReason = mirrorResult.moved ? 'on_demand_page' : 'no_scroll_growth';
+        } else await loadOlderMessages(mainContainer, mode);
 
         // Kiểm tra marker lại lần cuối xem có lạc thread không
-        const finalRows = mainContainer.querySelectorAll('div[role="row"], div[role="article"], div[data-scope="messages_table"] div[dir="auto"]');
+        const finalRows = collectMessageRows(mainContainer);
         for (const row of finalRows) {
           const taggedId = row.dataset.crmThreadId;
           if (taggedId && String(taggedId) !== String(targetThreadId)) {
@@ -3084,6 +3646,10 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
 
         // Inline text filter helpers
         const SYSTEM_PATTERNS = [
+          /Tin nh\u1eafn v\u00e0 cu\u1ed9c g\u1ecdi .*b\u1ea3o m\u1eadt/i,
+          /^(?:\u0110\u00e3 g\u1eedi|\u0110\u00e3 nh\u1eadn|\u0110\u00e3 xem|Sent|Delivered|Seen)$/i,
+          /^(?:\u0110ang ho\u1ea1t \u0111\u1ed9ng|Ho\u1ea1t \u0111\u1ed9ng|\u0110\u00e3 ho\u1ea1t \u0111\u1ed9ng).*$/i,
+          /^(?:\u0110ang nh\u1eadp|\u0110ang g\u1eedi|\u0110ang t\u1ea3i|Typing|Sending|Loading)[.\u2026]*$/i,
           /Tin nhắn và cuộc gọi (?:đang )?được bảo mật/i,
           /bảo mật bằng tính năng mã hóa/i,
           /bảo mật đầu cuối/i,
@@ -3248,8 +3814,21 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
         // (xác nhận qua live DOM inspection 2026-08-19, giống fix đã có ở
         // content.js:401-407 cho luồng real-time) - phải nhận cả hai để không
         // bỏ sót toàn bộ lịch sử của thread dùng cấu trúc mới.
-        const messageLog = mainContainer.querySelector('[role="log"], [data-scope="messages_table"]') || mainContainer;
-        const allRows = Array.from(messageLog.querySelectorAll('div[role="row"], div[role="article"]'));
+        // `data-scope="messages_table"` is attached to individual message
+        // units in current Messenger builds. Selecting the first one here
+        // made the history scraper inspect only a single bubble after scroll.
+        // A real role=log can be used as the conversation root; otherwise the
+        // verified main container is the only safe complete scan boundary.
+        const messageLog = mainContainer.querySelector('[role="log"]') || mainContainer;
+        const historyDirectionContainer = findHistoryScroller(mainContainer) || messageLog || mainContainer;
+        const allRows = collectMessageRows(messageLog).flatMap((row) => {
+          const nativeUnits = Array.from(row.querySelectorAll('[data-message-id]'))
+            .filter((unit) => {
+              const parentUnit = unit.parentElement?.closest('[data-message-id]');
+              return !parentUnit || !row.contains(parentUnit);
+            });
+          return nativeUnits.length > 1 ? nativeUnits : [row];
+        });
 
         let dom_order = 0;
         let lastFallbackTime = Date.now();
@@ -3269,13 +3848,21 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
             row.querySelector('[data-scope="messages_table"][aria-label], [aria-roledescription="tin nhắn"][aria-label]') ||
             row.querySelector('[aria-label*="Tin nhắn do"], [aria-label*="Message sent"]')
           ) : null;
-          const effectiveLabel = rowAriaLabel || (childMsgEl?.getAttribute('aria-label') || '');
+          let effectiveLabel = rowAriaLabel || (childMsgEl?.getAttribute('aria-label') || '');
+          if (!/Tin nh\u1eafn do .+ g\u1eedi l\u00fac|Message sent by|^L\u00fac\s+.+?,\s*.+?:/i.test(effectiveLabel)) {
+            effectiveLabel = Array.from(row.querySelectorAll('[aria-label]'))
+              .map((element) => element.getAttribute('aria-label') || '')
+              .find((label) => /Tin nh\u1eafn do .+ g\u1eedi l\u00fac|Message sent by|^L\u00fac\s+.+?,\s*.+?:/i.test(label))
+              || effectiveLabel;
+          }
 
           const hasMessageLabel = /Tin nhắn do .+ gửi lúc|Message sent by|^Lúc\s+.+?,\s*.+?:/i.test(effectiveLabel);
           // data-message-id là attribute Facebook thực sự dùng trên cấu trúc
           // role="article" mới (khớp content.js/page_content.js) - [data-id]/mid.
           // chỉ còn là fallback cho cấu trúc role="row" cũ.
-          const nativeIdEl = row.querySelector('[data-message-id]') || row.querySelector('[data-id], [id^="mid."]');
+          const nativeIdEl = row.matches?.('[data-message-id], [data-id], [id^="mid."]')
+            ? row
+            : (row.querySelector('[data-message-id]') || row.querySelector('[data-id], [id^="mid."]'));
           const hasNativeId = !!nativeIdEl;
 
           if (!hasMessageLabel && !hasNativeId) return;
@@ -3286,15 +3873,105 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
             return !b.querySelector('div[dir="auto"], span[dir="auto"]');
           });
 
-          if (leafBubbles.length === 0) return;
+          // A Messenger video frequently uses a transient blob: URL and may
+          // not have videoWidth yet while the hidden history tab is scraping.
+          // Treat the VIDEO element itself as authoritative media evidence;
+          // keep the old geometry-based image filtering for avatars/photos.
+          const videoElement = Array.from(row.querySelectorAll('video')).find((element) => !element.closest(COMPOSER_EXCLUDE)) || null;
+          const mediaElement = videoElement || Array.from(row.querySelectorAll('img[src]')).find((element) => {
+            const rect = element.getBoundingClientRect();
+            // Use rendered geometry first. Avatars often have a large source
+            // bitmap (hundreds of pixels) but are rendered as a 28-40px circle;
+            // Math.max(naturalWidth, rect.width) therefore misclassified them
+            // as message photos.
+            const width = rect.width || element.naturalWidth || element.videoWidth || 0;
+            const height = rect.height || element.naturalHeight || element.videoHeight || 0;
+            const alt = String(element.getAttribute('alt') || element.getAttribute('aria-label') || '').toLowerCase();
+            const normalizedContactName = String(contactName || '').trim().toLowerCase();
+            const namesContact = normalizedContactName && alt.includes(normalizedContactName);
+            const isSmallProfileImage = width <= 64 && height <= 64;
+            const isLikelyAvatar = namesContact || isSmallProfileImage;
+            return !isLikelyAvatar && width >= 72 && height >= 72;
+          });
+          const mediaAnchor = row.querySelector('a[href*="fbcdn"], a[href*=".mp4"], a[href*="video"]');
+          const videoPoster = videoElement?.poster || videoElement?.getAttribute?.('poster') || null;
+          const rawMediaUrl = mediaElement?.currentSrc || mediaElement?.src
+            || mediaElement?.querySelector?.('source[src]')?.src
+            || mediaAnchor?.href || videoPoster || null;
+          // MSE videos expose blob: as currentSrc, but their poster remains a
+          // stable fbcdn/data image. Persist that thumbnail so CRM renders the
+          // video message instead of a bare "[Video]" placeholder.
+          const mediaUrl = rawMediaUrl && !String(rawMediaUrl).startsWith('blob:')
+            ? rawMediaUrl
+            : (videoPoster && !String(videoPoster).startsWith('blob:') ? videoPoster : null);
+          const isVideoMessage = Boolean(videoElement)
+            || /\.mp4(?:\?|$)|video/i.test(String(mediaUrl || ''));
+          const mediaType = isVideoMessage ? 'video' : (mediaUrl ? 'image' : null);
 
-          let tsMs = parseTimeFromLabel(effectiveLabel, lastFallbackTime);
-          let tsSource = tsMs ? 'facebook_label' : 'fallback';
+          if (leafBubbles.length === 0 && !mediaUrl && !isVideoMessage) return;
+
+          const timestampElement = row.querySelector('time[datetime], abbr[data-utime], [data-utime]');
+          const unixSeconds = Number(timestampElement?.getAttribute('data-utime') || 0);
+          const dateTimeValue = timestampElement?.getAttribute('datetime') || '';
+          const timestampLabel = effectiveLabel || Array.from(row.querySelectorAll('[aria-label], [title]'))
+            .map((element) => element.getAttribute('aria-label') || element.getAttribute('title') || '')
+            .find((label) => /\b\d{1,2}:\d{2}\b/.test(label)) || '';
+          const clockMatch = timestampLabel.match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH|SÁNG|CHIỀU|TỐI))?/i);
+          let clockMinutes = null;
+          if (clockMatch) {
+            let clockHour = Number(clockMatch[1]);
+            const clockSuffix = String(clockMatch[3] || '').toUpperCase();
+            if (['PM', 'CH', 'CHIỀU', 'TỐI'].includes(clockSuffix) && clockHour < 12) clockHour += 12;
+            if (['AM', 'SA', 'SÁNG'].includes(clockSuffix) && clockHour === 12) clockHour = 0;
+            clockMinutes = clockHour * 60 + Number(clockMatch[2]);
+          }
+          const timestampHasExplicitDate = /(?:hôm qua|yesterday|thứ\s+(?:hai|ba|tư|năm|sáu|bảy)|chủ nhật|\bT[2-7]\b|\bCN\b|\d{1,2}\s*tháng\s*\d{1,2}|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b)/i.test(timestampLabel);
+          let tsMs = unixSeconds > 0
+            ? unixSeconds * 1000
+            : (dateTimeValue && Number.isFinite(Date.parse(dateTimeValue)) ? Date.parse(dateTimeValue) : parseTimeFromLabel(timestampLabel, lastFallbackTime));
+          let tsSource = tsMs ? (unixSeconds > 0 || dateTimeValue ? 'facebook_timestamp' : 'facebook_label') : 'fallback';
 
           if (tsMs) {
             lastFallbackTime = tsMs;
           } else {
             tsMs = lastFallbackTime;
+          }
+
+          if (mediaUrl || isVideoMessage) {
+            const mediaRect = (mediaElement || mediaAnchor).getBoundingClientRect();
+            const directionRect = historyDirectionContainer.getBoundingClientRect();
+            const relativeCenter = directionRect.width > 0
+              ? (mediaRect.left + mediaRect.width / 2 - directionRect.left) / directionRect.width
+              : 0.5;
+            const mediaOutgoing = relativeCenter >= 0.55;
+            const mediaNativeId = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id')
+              || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id') || row.getAttribute('data-id') || null;
+            const mediaStableId = mediaNativeId
+              ? `${mediaNativeId}_media`
+              : `dom_${targetThreadId}_media_${stringHash(mediaUrl || `${effectiveLabel}:${idx}:video`)}`;
+            messages.push({
+              fb_message_id: mediaStableId,
+              thread_id: targetThreadId,
+              sender_id: mediaOutgoing ? 'current_user' : null,
+              sender_name: mediaOutgoing ? 'Bạn' : (contactName || 'Khách hàng'),
+              // Keep a visible, persisted record even when Facebook exposes
+              // only blob: media. If a stable fbcdn/mp4 URL is present the
+              // existing downloader and video player continue unchanged.
+              content: isVideoMessage && !mediaUrl ? '[Video]' : '',
+              media_type: mediaType,
+              media_url: mediaUrl,
+              is_outgoing: mediaOutgoing ? 1 : 0,
+              sender_role: mediaOutgoing ? 'operator' : 'customer',
+              source: 'dom_history_sync',
+              timestamp_ms: tsMs + dom_order,
+              timestamp_source: tsSource,
+              dom_order,
+              sequence_order: dom_order,
+              _clock_minutes: clockMinutes,
+              _timestamp_has_explicit_date: timestampHasExplicitDate,
+              created_at: new Date(tsMs + dom_order).toISOString()
+            });
+            dom_order++;
           }
 
           let bubble_idx = 0;
@@ -3349,6 +4026,19 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
               }
             }
 
+            const robustOutgoing = /do B\u1ea1n g\u1eedi|Tin nh\u1eafn do B\u1ea1n g\u1eedi l\u00fac|B\u1ea1n \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(currentLabel);
+            const robustSender = currentLabel.match(/Tin nh\u1eafn do ([^]+?) g\u1eedi l\u00fac/i) || currentLabel.match(/Message sent by ([^]+?) at/i);
+            if (robustOutgoing) {
+              isOutgoing = true;
+              senderName = 'Bạn';
+              directionMatched = true;
+            } else if (robustSender) {
+              const rawSender = robustSender[1].trim();
+              isOutgoing = /^(?:B\u1ea1n|You)$/i.test(rawSender);
+              senderName = isOutgoing ? 'Bạn' : rawSender;
+              directionMatched = true;
+            }
+
             if (!directionMatched) {
               // Check if row contains contact's avatar (Facebook puts alt="<Contact Name>" on incoming message avatars)
               const safeName = (contactName || '').trim();
@@ -3368,11 +4058,28 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
               }
             }
 
+            // Messenger's visual alignment is the final authority. Labels can
+            // be inherited from a surrounding accessibility wrapper and refer
+            // to a neighbouring bubble, especially in grouped call/messages.
+            const directionRect = historyDirectionContainer.getBoundingClientRect();
+            const bubbleRect = leafBubble.getBoundingClientRect();
+            if (directionRect.width > 0 && bubbleRect.width > 0) {
+              const relativeCenter = (bubbleRect.left + bubbleRect.width / 2 - directionRect.left) / directionRect.width;
+              if (relativeCenter <= 0.45 || relativeCenter >= 0.55) {
+                isOutgoing = relativeCenter >= 0.55;
+                senderName = isOutgoing ? 'Bạn' : (contactName || 'Khách hàng');
+                directionMatched = true;
+              }
+            }
+
             const cleaned = cleanText(rawBubbleText);
             if (!cleaned || cleaned.length < 1 || cleaned.length > 1000 || isSystemText(cleaned)) { bubble_idx++; continue; }
             if (contactName && cleaned.toLowerCase() === String(contactName).trim().toLowerCase()) { bubble_idx++; continue; }
 
-            const nativeId = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || row.getAttribute('data-id') || null;
+            const bubbleNativeEl = leafBubble.closest('[data-message-id], [data-id], [id^="mid."]');
+            const nativeId = bubbleNativeEl?.getAttribute('data-message-id') || bubbleNativeEl?.getAttribute('data-id') || bubbleNativeEl?.getAttribute('id')
+              || nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id')
+              || row.getAttribute('data-message-id') || row.getAttribute('data-id') || null;
 
             const dirKey = isOutgoing ? 'out' : 'in';
             const textHash = stringHash(cleaned);
@@ -3381,7 +4088,8 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
             const occIndex = occurrencesMap[comboKey];
 
             const identityKey = `${targetThreadId}|${dirKey}|${textHash}`;
-            const deterministicId = nativeId || `dom_${targetThreadId}_hash_${textHash}_${occIndex - 1}`;
+            const labelHash = stringHash(currentLabel || String(tsMs));
+            const deterministicId = nativeId || `dom_${targetThreadId}_hash_${textHash}_${labelHash}_${dirKey}`;
 
             if (!messages.some(m => m.fb_message_id === deterministicId)) {
               // Preserve Facebook DOM order for messages with the same minute.
@@ -3390,7 +4098,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
 
               messages.push({
                 fb_message_id: deterministicId,
-                thread_id: currentThreadId,
+                thread_id: targetThreadId,
                 sender_id: isOutgoing ? 'current_user' : null,
                 sender_name: senderName,
                 content: cleaned,
@@ -3401,6 +4109,8 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
                 timestamp_source: tsSource,
                 dom_order,
                 sequence_order: dom_order,
+                _clock_minutes: clockMinutes,
+                _timestamp_has_explicit_date: timestampHasExplicitDate,
                 created_at: new Date(finalTsMs).toISOString()
               });
             }
@@ -3408,6 +4118,32 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
             dom_order++;
           }
         });
+
+        // Facebook labels can expose only a clock time and omit the date. Work
+        // backwards from the newest visible row so a clock rollover creates a
+        // previous day instead of flattening several days into one date.
+        let nextChronologicalAnchor = Date.now() + 60000;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const message = messages[i];
+          if (message._timestamp_has_explicit_date) {
+            nextChronologicalAnchor = Number(message.timestamp_ms || nextChronologicalAnchor);
+            continue;
+          }
+          if (Number.isFinite(Number(message._clock_minutes))) {
+            const anchorDate = new Date(nextChronologicalAnchor);
+            let inferred = new Date(
+              anchorDate.getFullYear(), anchorDate.getMonth(), anchorDate.getDate(),
+              Math.floor(Number(message._clock_minutes) / 60), Number(message._clock_minutes) % 60, 0, 0
+            ).getTime();
+            while (inferred > nextChronologicalAnchor + 60000) inferred -= 86400000;
+            message.timestamp_ms = inferred;
+            message.timestamp_source = 'dom_clock_order';
+            message.created_at = new Date(inferred).toISOString();
+            nextChronologicalAnchor = inferred;
+          } else {
+            nextChronologicalAnchor = Math.min(nextChronologicalAnchor, Number(message.timestamp_ms || nextChronologicalAnchor));
+          }
+        }
 
         // Facebook labels can expose only a clock time and omit the date. That
         // can make a later DOM row appear hours/days older than the row above
@@ -3426,16 +4162,22 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
           }
           message.timestamp_ms = currentTimestamp;
           message.created_at = new Date(currentTimestamp).toISOString();
+          delete message._clock_minutes;
+          delete message._timestamp_has_explicit_date;
           previousDomTimestamp = currentTimestamp;
         }
 
         const filteredMessages = messages.filter(m => !boundaryIds.has(m.fb_message_id));
-        return { messages: filteredMessages, skipped_count: messages.length - filteredMessages.length, boundary_reached: boundaryReached, stop_reason: stopReason };
+        return { messages: filteredMessages, skipped_count: messages.length - filteredMessages.length, boundary_reached: boundaryReached, stop_reason: stopReason, resume_marker_reached: resumeMarkerReached };
       },
-      args: [thread_id, mode, cursor, contact_name]
+      args: [navigationThreadId, mode, cursor, contact_name, Number(scroll_delta) || 0]
     });
 
     const parsedResult = results?.[0]?.result;
+    if (!isPersonalNavigationCurrent(navigationToken)) {
+      console.log(`[FB Engine] Cancelled stale history result for thread ${thread_id}: a newer conversation owns the history tab.`);
+      return { ok: false, cancelled: true };
+    }
     const parsedMessages = Array.isArray(parsedResult) ? parsedResult : (parsedResult?.messages || []);
     const parserSkipped = Array.isArray(parsedResult) ? 0 : (parsedResult?.skipped_count || 0);
 
@@ -3453,7 +4195,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
     }
 
     const messagesArray = Array.isArray(parsedMessages)
-      ? [...parsedMessages].sort((a, b) => {
+      ? parsedMessages.map((message) => ({ ...message, thread_id: String(thread_id) })).sort((a, b) => {
           const domDiff = Number(a.dom_order || 0) - Number(b.dom_order || 0);
           if (domDiff !== 0) return domDiff;
           return String(a.fb_message_id || '').localeCompare(String(b.fb_message_id || ''));
@@ -3468,9 +4210,22 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
     // thiếu field này khiến server luôn coi là SYNCED dù còn tin nhắn cũ hơn chưa lấy được.
     newCursor.boundary_reached = !!(parsedResult && parsedResult.boundary_reached);
     newCursor.stop_reason = (parsedResult && parsedResult.stop_reason) || null;
+    if (mode === 'ondemand_initial' && cursor?.oldest_message_id) {
+      newCursor.resume_message_id = cursor.oldest_message_id;
+      newCursor.resume_content = cursor.oldest_content || '';
+      newCursor.resume_timestamp_ms = Number(cursor.oldest_timestamp_ms || 0);
+      newCursor.resume_marker_reached = false;
+    }
+    if (parsedResult?.resume_marker_reached) {
+      newCursor.resume_marker_reached = true;
+    }
     if (messagesArray.length > 0) {
       newCursor.oldest_timestamp_ms = messagesArray[0].timestamp_ms;
       newCursor.oldest_message_id = messagesArray[0].fb_message_id;
+      newCursor.oldest_content = messagesArray[0].content || '';
+      newCursor.oldest_is_outgoing = messagesArray[0].is_outgoing ? 1 : 0;
+      newCursor.oldest_media_type = messagesArray[0].media_type || null;
+      newCursor.oldest_media_url = messagesArray[0].media_url || null;
       newCursor.newest_timestamp_ms = messagesArray[messagesArray.length - 1].timestamp_ms;
       newCursor.newest_message_id = messagesArray[messagesArray.length - 1].fb_message_id;
     }
@@ -3482,7 +4237,8 @@ async function handleSyncThreadMessages({ account_id, thread_id, thread_url, pag
       mode,
       checkpoint: newCursor,
       fetched_count: messagesArray.length + parserSkipped,
-      skipped_count: parserSkipped
+      skipped_count: parserSkipped,
+      scroll_delta: Number(scroll_delta) || 0
     });
     return { ok: true, checkpoint: newCursor };
   } catch (err) {
@@ -3919,58 +4675,53 @@ async function handleTriggerMessengerCall({ thread_id, account_id = user_id, cal
   }
 }
 
-async function handleAnswerIncomingCall({ action, thread_id, account_id = user_id }) {
+async function handleAnswerIncomingCall({ action, thread_id, source_tab_id, source_frame_id }) {
   try {
-    let targetTabs = [];
-    const interactionTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'interaction'))
-      || await getRegisteredTab(FbCrmMessengerTabRoles.legacyInteractionKey(account_id));
-    if (interactionTab?.id) {
-      targetTabs.push(interactionTab);
-    }
-    const allFbTabs = await chrome.tabs.query({ url: "*://*.facebook.com/*" });
-    if (Array.isArray(allFbTabs)) {
-      for (const t of allFbTabs) {
-        if (!targetTabs.some(existing => existing.id === t.id)) {
-          targetTabs.push(t);
-        }
-      }
-    }
+    console.log(`[FB Engine] 📞 Realizing call answer action=${action} for thread=${thread_id}`);
+    const message = { type: 'ANSWER_INCOMING_CALL', action, thread_id };
 
-    let success = false;
-    let errorMsg = null;
-
-    for (const tab of targetTabs) {
-      try {
-        const response = await new Promise((resolve) => {
-          chrome.tabs.sendMessage(tab.id, { type: 'ANSWER_INCOMING_CALL', action, thread_id }, (res) => {
-            if (chrome.runtime.lastError) resolve(null);
-            else resolve(res);
-          });
-        });
-        if (response && response.success) {
-          success = true;
-          console.log(`[FB Engine] ✅ Đã điều khiển ${action} cuộc gọi thành công trên tab ${tab.id}.`);
-          break;
-        }
-      } catch (e) {
-        errorMsg = e.message;
-      }
+    if (Number.isInteger(source_tab_id)) {
+      const frameId = Number.isInteger(source_frame_id) ? source_frame_id : 0;
+      let sent = false;
+      await chrome.tabs.sendMessage(source_tab_id, message, { frameId }).then(() => {
+        sent = true;
+      }).catch((err) => {
+        console.warn('[FB Engine] Direct message to source tab failed:', err.message);
+      });
+      if (sent) return;
     }
 
-    sendToBackend('ANSWER_INCOMING_CALL_RESULT', {
-      action,
-      thread_id,
-      success,
-      error: success ? null : (errorMsg || 'Không tìm thấy nút bấm cuộc gọi trên Facebook')
+    // Fallback if source_tab_id is missing or failed: send ONLY to the first Facebook tab
+    const tabs = await chrome.tabs.query({ url: '*://*.facebook.com/*' }).catch(() => []);
+    if (tabs.length > 0 && tabs[0].id) {
+      await chrome.tabs.sendMessage(tabs[0].id, message).catch(() => null);
+    }
+  } catch (error) {
+    console.error('[FB Engine] Lỗi điều khiển cuộc gọi:', error);
+  }
+}
+
+// Separate call-control helper. Keeping this name distinct is important:
+// function declarations are hoisted, and the old duplicate name overwrote
+// the message-request helper that accepts a { x, y } point object.
+async function dispatchCallTrustedMouseClick(tabId, x, y) {
+  const target = { tabId };
+  try {
+    await chrome.debugger.attach(target, '1.3');
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x, y, button: 'none'
     });
-  } catch (err) {
-    console.error('[FB Engine] ❌ Lỗi gửi lệnh điều khiển cuộc gọi:', err);
-    sendToBackend('ANSWER_INCOMING_CALL_RESULT', {
-      action,
-      thread_id,
-      success: false,
-      error: err.message
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
+      type: 'mousePressed', x, y, button: 'left', clickCount: 1
     });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x, y, button: 'left', clickCount: 1
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  } finally {
+    try { await chrome.debugger.detach(target); } catch (_) {}
   }
 }
 

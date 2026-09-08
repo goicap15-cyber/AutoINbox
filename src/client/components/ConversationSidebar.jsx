@@ -24,10 +24,11 @@ export default function ConversationSidebar({
   selectedCampaignThreadIds = [],
   onToggleCampaignThread,
   onStartCampaignSelection, onCancelCampaignSelection, onCreateCampaign,
-  onBulkHistorySync, bulkHistoryProgress
+  onBulkHistorySync, onContinueFacebookSync, onCancelFacebookSync, bulkHistoryProgress
 }) {
   const [appliedFilters, setAppliedFilters] = useState(() => normalizeFilters(createDefaultFilters()));
   const [isFilterPopoverOpen, setIsFilterPopoverOpen] = useState(false);
+  const [isSyncMenuOpen, setIsSyncMenuOpen] = useState(false);
   const filterButtonRef = useRef(null);
 
   const activeFilterCount = countActiveFilters(appliedFilters);
@@ -88,16 +89,26 @@ export default function ConversationSidebar({
           </div>
 
           <div className="flex gap-1.5 shrink-0 items-center">
-            <button
-              type="button"
-              onClick={onBulkHistorySync}
-              disabled={!isConnected || bulkHistoryProgress?.status === 'running'}
-              className="p-1.5 hover:bg-[var(--color-bg-hover)] rounded-full transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
-              title="Đồng bộ tin nhắn tất cả"
-              aria-label="Đồng bộ tin nhắn tất cả"
-            >
-              <RefreshCw size={17} className={`text-[var(--color-text-muted)] ${bulkHistoryProgress?.status === 'running' ? 'animate-spin' : ''}`} strokeWidth={1.75} />
-            </button>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setIsSyncMenuOpen((open) => !open)}
+                disabled={!isConnected}
+                className="p-1.5 hover:bg-[var(--color-bg-hover)] rounded-full transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                title="Điều khiển đồng bộ Facebook"
+                aria-label="Điều khiển đồng bộ Facebook"
+                aria-haspopup="menu"
+                aria-expanded={isSyncMenuOpen}
+              >
+                <RefreshCw size={17} className={`text-[var(--color-text-muted)] ${bulkHistoryProgress?.status === 'running' ? 'animate-spin' : ''}`} strokeWidth={1.75} />
+              </button>
+              {isSyncMenuOpen && (
+                <div role="menu" className="absolute right-0 top-9 z-50 w-40 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-panel)] p-1.5 shadow-xl">
+                  <button type="button" role="menuitem" onClick={() => { setIsSyncMenuOpen(false); onContinueFacebookSync?.(); }} className="w-full rounded-lg px-3 py-2 text-left text-xs font-semibold text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]">Đồng bộ tiếp</button>
+                  <button type="button" role="menuitem" onClick={() => { setIsSyncMenuOpen(false); onCancelFacebookSync?.(); }} className="w-full rounded-lg px-3 py-2 text-left text-xs font-semibold text-[var(--color-danger)] hover:bg-red-50">Hủy đồng bộ</button>
+                </div>
+              )}
+            </div>
             <button onClick={onOpenSearch} className="p-1.5 hover:bg-[var(--color-bg-hover)] rounded-full transition-colors cursor-pointer" title="Tìm kiếm nhanh" aria-label="Tìm kiếm nhanh">
               <Edit size={17} className="text-[var(--color-text-muted)]" strokeWidth={1.75} />
             </button>

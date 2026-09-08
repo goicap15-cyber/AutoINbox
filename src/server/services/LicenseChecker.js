@@ -2,10 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const { getMachineId } = require('../utils/machineId');
 const { APP_DATA_ROOT } = require('../utils/appDataRoot');
+const { isLocalDevRequest } = require('../utils/localDevAccess');
 
 const DATA_DIR = APP_DATA_ROOT;
 const LICENSE_FILE = path.join(DATA_DIR, 'license.json');
-const LICENSE_SERVER_URL = process.env.LICENSE_SERVER_URL || 'http://localhost:5055';
+const LICENSE_SERVER_URL = process.env.LICENSE_SERVER_URL || 'https://genblackmmoonline.online/license_server';
 
 class LicenseChecker {
   constructor() {
@@ -125,6 +126,10 @@ class LicenseChecker {
   // Middleware Express chặn tất cả API nếu chưa có bản quyền
   middleware() {
     return async (req, res, next) => {
+      if (isLocalDevRequest(req, 'LOCAL_DEV_SKIP_LICENSE')) {
+        return next();
+      }
+
       // Các đường dẫn API công khai được phép gọi khi chưa kích hoạt
       const publicPaths = [
         '/api/license/status',

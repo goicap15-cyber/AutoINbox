@@ -15,6 +15,9 @@
 const path = require('path');
 
 function computeAppDataRoot() {
+  // Explicit override is useful for isolated startup checks and managed
+  // deployments. It is never set during normal desktop usage.
+  if (process.env.CRM_DATA_ROOT) return path.resolve(process.env.CRM_DATA_ROOT);
   try {
     // require('electron') returns the app API only when actually running
     // inside an Electron process (this server is require()'d from

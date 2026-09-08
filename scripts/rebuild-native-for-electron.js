@@ -39,7 +39,7 @@ const MODULE_DIR = path.join(__dirname, '../node_modules/better-sqlite3');
 const PREBUILD_PATH = path.join(MODULE_DIR, 'prebuilds', `${process.platform}-${process.arch}.node`);
 const PREBUILD_BACKUP_PATH = `${PREBUILD_PATH}.hidden-for-electron-build`;
 const BUILD_DIR = path.join(MODULE_DIR, 'build');
-const BUILD_BACKUP_DIR = path.join(MODULE_DIR, 'build.host-node-backup');
+const BUILD_BACKUP_DIR = path.join(__dirname, '../scratch/build.host-node-backup');
 
 function getElectronVersion() {
   return require(path.join(__dirname, '../node_modules/electron/package.json')).version;

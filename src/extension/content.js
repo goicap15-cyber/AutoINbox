@@ -39,515 +39,56 @@
   // setup; full DOM/message/call observers start after setup completes and
   // the tab is reloaded once without this marker.
   try {
-    if (pendingKeyFromUrl || sessionStorage.getItem('crm_pending_account_setup') === '1') {
+    // A sessionStorage marker can survive an extension/app rebuild in the
+    // existing tab. Only the explicit setup URL may suppress realtime hooks;
+    // otherwise the marker can disable inbound messages indefinitely.
+    if (pendingKeyFromUrl) {
       console.log('[FB Content] Heavy observers skipped during account setup.');
       return;
     }
   } catch (_) {}
 
-  function findCallButton(action) {
-    var targetLabel = action === 'accept' ? 'Chấp nhận' : 'Từ chối';
-    // 1. Direct aria-label
-    var btn = document.querySelector('[aria-label="' + targetLabel + '"][role="button"]') ||
-              document.querySelector('[aria-label="' + targetLabel + '"]');
-    // 2. Fallback: English labels (Facebook sometimes uses English)
-    if (!btn) {
-      var engLabel = action === 'accept' ? 'Accept' : 'Decline';
-      btn = document.querySelector('[aria-label="' + engLabel + '"][role="button"]') ||
-            document.querySelector('[aria-label*="' + engLabel + '"]');
-    }
-    // 3. Fallback: text content search
-    if (!btn) {
-      var allButtons = document.querySelectorAll('[role="button"]');
-      for (var i = 0; i < allButtons.length; i++) {
-        var txt = (allButtons[i].textContent || '').trim();
-        if (txt === targetLabel ||
-            (action === 'accept' && (txt.includes('Chấp nhận') || txt.includes('Accept'))) ||
-            (action === 'decline' && (txt.includes('Từ chối') || txt.includes('Decline')))) {
-          btn = allButtons[i];
-          break;
+  function stopAllRingtoneAudio() {
+    try {
+      var mediaEls = document.querySelectorAll('audio, video');
+      for (var i = 0; i < mediaEls.length; i++) {
+        var el = mediaEls[i];
+        if (!el.paused) {
+          try {
+            el.pause();
+            el.currentTime = 0;
+          } catch (_) {}
         }
       }
-    }
-    return btn || null;
+    } catch (_) {}
   }
 
   function triggerCallAnswer(action, callback) {
-    console.log('[CALL_CONTROL] 🎯 Trying to click Facebook call button:', action);
-    var btn = findCallButton(action);
-    if (btn) {
-      btn.click();
-      console.log('[CALL_CONTROL] ✅ Clicked on first attempt:', action);
-      if (callback) callback(true);
-      return;
-    }
+    stopAllRingtoneAudio();
+    var deadline = Date.now() + 3000;
+    function attempt() {
+      var candidate = findIncomingCallCandidate();
+      var button = action === 'accept'
+        ? ((candidate && candidate.acceptButton) || findIncomingCallActionButton('accept'))
+        : (findIncomingCallActionButton('decline') || (candidate && candidate.declineButton));
 
-    // Button not in DOM yet — retry every 300ms for up to 3s (10 attempts)
-    console.warn('[CALL_CONTROL] ⚠️ Button not found, retrying...');
-    var attempts = 0;
-    var maxAttempts = 10;
-    var retryInterval = setInterval(function() {
-      attempts++;
-      var retryBtn = findCallButton(action);
-      if (retryBtn) {
-        clearInterval(retryInterval);
-        retryBtn.click();
-        console.log('[CALL_CONTROL] ✅ Clicked on retry attempt ' + attempts + ':', action);
-        if (callback) callback(true);
-      } else if (attempts >= maxAttempts) {
-        clearInterval(retryInterval);
-        console.warn('[CALL_CONTROL] ❌ Could not find button after ' + maxAttempts + ' attempts:', action);
-        if (callback) callback(false);
-      }
-    }, 300);
-  }
-
-  function normalizeCallControlText(value) {
-    return String(value || '')
-      .normalize('NFC')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase();
-  }
-
-  function isVisibleCallElement(el) {
-    if (!el || !el.isConnected) return false;
-    if (el.closest('[hidden], [inert]')) return false;
-    var style = window.getComputedStyle(el);
-    if (!style) return false;
-    if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') return false;
-    if (Number(style.opacity || '1') === 0) return false;
-    var rect = el.getBoundingClientRect();
-    return !!rect && rect.width > 5 && rect.height > 5;
-  }
-
-  function isDisabledCallButton(el) {
-    if (!el) return true;
-    if (el.disabled) return true;
-    var ariaDisabled = normalizeCallControlText(el.getAttribute && el.getAttribute('aria-disabled'));
-    return ariaDisabled === 'true';
-  }
-
-  function getCallActionTokens(action) {
-    return action === 'accept'
-      ? ['chấp nhận', 'accept', 'trả lời', 'answer']
-      : ['từ chối', 'decline', 'reject', 'bỏ qua', 'kết thúc', 'dismiss', 'tắt'];
-  }
-
-  function isIncomingCallSurfaceText(text) {
-    return /đang gọi cho bạn|cuộc gọi (?:thoại |video )?đến|incoming (?:audio|video) call|is calling you/i.test(String(text || ''));
-  }
-
-  function gatherIncomingCallSurfaceCandidates() {
-    var candidates = [];
-    var seen = new Set();
-
-    function pushCandidate(el) {
-      if (!el || seen.has(el)) return;
-      seen.add(el);
-      candidates.push(el);
-    }
-
-    var roots = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div, section');
-    for (var i = 0; i < roots.length; i++) {
-      var root = roots[i];
-      if (!isVisibleCallElement(root)) continue;
-      var text = (root.textContent || '').trim();
-      if (text && isIncomingCallSurfaceText(text)) pushCandidate(root);
-    }
-
-    var buttons = document.querySelectorAll('[role="button"], button, [tabindex]');
-    for (var j = 0; j < buttons.length; j++) {
-      var btn = buttons[j];
-      if (!isVisibleCallElement(btn) || isDisabledCallButton(btn)) continue;
-      var label = normalizeCallControlText((btn.getAttribute && btn.getAttribute('aria-label')) || btn.textContent);
-      if (!label) continue;
-      if (label.includes('chấp nhận') || label.includes('accept') || label.includes('answer') || label.includes('từ chối') || label.includes('decline') || label.includes('reject') || label.includes('bỏ qua') || label.includes('kết thúc')) {
-        pushCandidate(btn.closest('[role="dialog"]'));
-        pushCandidate(btn.closest('[aria-modal="true"]'));
-        pushCandidate(btn.parentElement);
-        pushCandidate(btn.parentElement && btn.parentElement.parentElement);
-      }
-    }
-
-    pushCandidate(document.body);
-    return candidates.filter(Boolean);
-  }
-
-  function findCallButtonWithinRoot(root, action) {
-    if (!root) return null;
-    var tokens = getCallActionTokens(action);
-    var elements = root.querySelectorAll('[role="button"], button, [tabindex]');
-    var best = null;
-    var bestScore = -1;
-
-    for (var i = 0; i < elements.length; i++) {
-      var el = elements[i];
-      if (!isVisibleCallElement(el) || isDisabledCallButton(el)) continue;
-      var label = normalizeCallControlText((el.getAttribute && el.getAttribute('aria-label')) || '');
-      var text = normalizeCallControlText(el.textContent || '');
-      var combined = (label + ' ' + text).trim();
-      if (!combined) continue;
-
-      var matchedToken = '';
-      for (var ti = 0; ti < tokens.length; ti++) {
-        if (combined.includes(tokens[ti])) {
-          matchedToken = tokens[ti];
-          break;
-        }
-      }
-      if (!matchedToken) continue;
-
-      var score = 0;
-      if (label === matchedToken || text === matchedToken) score += 4;
-      if (label.indexOf(matchedToken) !== -1) score += 3;
-      if (text.indexOf(matchedToken) !== -1) score += 2;
-      if (el.closest('[role="dialog"]')) score += 2;
-      if (root !== document.body && isIncomingCallSurfaceText(root.textContent || '')) score += 3;
-
-      if (score > bestScore) {
-        best = el;
-        bestScore = score;
-      }
-    }
-
-    return best;
-  }
-
-  function getIncomingCallSurface() {
-    var candidates = gatherIncomingCallSurfaceCandidates();
-    var best = null;
-    var bestScore = -1;
-
-    for (var i = 0; i < candidates.length; i++) {
-      var root = candidates[i];
-      if (!root || !isVisibleCallElement(root)) continue;
-      var text = (root.textContent || '').trim();
-      var accept = findCallButtonWithinRoot(root, 'accept');
-      var decline = findCallButtonWithinRoot(root, 'decline');
-      var score = 0;
-      if (isIncomingCallSurfaceText(text)) score += 5;
-      if (accept) score += 2;
-      if (decline) score += 2;
-      if (root.getAttribute && root.getAttribute('role') === 'dialog') score += 1;
-      if (score > bestScore) {
-        best = root;
-        bestScore = score;
-      }
-    }
-
-    return best;
-  }
-
-  function findCallButton(action) {
-    var surface = getIncomingCallSurface();
-    if (surface) {
-      var scoped = findCallButtonWithinRoot(surface, action);
-      if (scoped) return { button: scoped, surface: surface };
-    }
-
-    var fallback = findCallButtonWithinRoot(document.body, action);
-    return fallback ? { button: fallback, surface: document.body } : null;
-  }
-
-  function activateCallButton(targetButton) {
-    if (!targetButton) return false;
-    var btn = targetButton.closest('[role="button"], button, [tabindex]') || targetButton;
-    if (!isVisibleCallElement(btn) || isDisabledCallButton(btn)) return false;
-
-    try { btn.focus(); } catch (_) {}
-
-    // Dispatch Pointer + Mouse Events for React 18
-    try {
-      btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window, pointerId: 1, isPrimary: true, button: 0, buttons: 1 }));
-      btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 }));
-      btn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, view: window, pointerId: 1, isPrimary: true, button: 0, buttons: 0 }));
-      btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, button: 0, buttons: 0 }));
-    } catch (_) {}
-
-    // Dispatch Keyboard Events for role="button" tabindex="0"
-    try {
-      btn.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-      btn.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-      btn.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true, cancelable: true }));
-      btn.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true, cancelable: true }));
-    } catch (_) {}
-
-    if (typeof btn.click === 'function') {
-      btn.click();
-      return true;
-    }
-
-    try {
-      return btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0, buttons: 0 }));
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function triggerCallAnswer(action, callback) {
-    console.log('[CALL_CONTROL] ðŸŽ¯ Trying to click Facebook call button:', action);
-    var maxAttempts = 12;
-    var attempt = 0;
-
-    function finish(success) {
-      if (callback) callback(!!success);
-    }
-
-    function waitForSurfaceDismiss(surface, button) {
-      var checks = 0;
-      var dismissInterval = setInterval(function() {
-        checks++;
-        var currentSurface = getIncomingCallSurface();
-        var buttonStillVisible = button && isVisibleCallElement(button);
-        var sameSurfaceStillVisible = surface && isVisibleCallElement(surface) && currentSurface === surface;
-        if (!buttonStillVisible || !sameSurfaceStillVisible || !currentSurface) {
-          clearInterval(dismissInterval);
-          console.log('[CALL_CONTROL] âœ… Incoming call surface closed after action:', action);
-          finish(true);
-        } else if (checks >= 15) {
-          clearInterval(dismissInterval);
-          console.warn('[CALL_CONTROL] âŒ Incoming call surface still visible after click:', action);
-          finish(false);
-        }
-      }, 200);
-    }
-
-    function tryActivate() {
-      attempt++;
-      var found = findCallButton(action);
-      if (found && activateCallButton(found.button)) {
-        console.log('[CALL_CONTROL] âœ… Clicked incoming call control on attempt ' + attempt + ':', action);
-        waitForSurfaceDismiss(found.surface, found.button);
+      if (button && isVisibleCallElement(button)) {
+        try { button.focus({ preventScroll: true }); } catch (_) {}
+        var rect = button.getBoundingClientRect();
+        var eventInit = { bubbles: true, cancelable: true, composed: true, view: window, button: 0, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        if (window.PointerEvent) button.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+        button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        if (window.PointerEvent) button.dispatchEvent(new PointerEvent('pointerup', eventInit));
+        button.click();
+        stopAllRingtoneAudio();
+        callback?.(true);
         return;
       }
-
-      if (attempt >= maxAttempts) {
-        console.warn('[CALL_CONTROL] âŒ Could not find active incoming call control after ' + maxAttempts + ' attempts:', action);
-        finish(false);
-        return;
-      }
-
-      setTimeout(tryActivate, 250);
+      if (Date.now() < deadline) window.setTimeout(attempt, 150);
+      else callback?.(false);
     }
-
-    tryActivate();
-  }
-
-  function getExactCallControlLabels(action) {
-    return action === 'accept'
-      ? ['Chấp nhận', 'Accept', 'Trả lời', 'Answer', 'Chấp nhận cuộc gọi', 'Accept call']
-      : ['Từ chối', 'Decline', 'Bỏ qua', 'Dismiss', 'Tắt', 'Kết thúc', 'Reject', 'Từ chối cuộc gọi', 'Decline call', 'Bỏ qua cuộc gọi', 'Từ chối cuộc gọi thoại', 'Từ chối cuộc gọi video', 'Decline audio call', 'Decline video call'];
-  }
-
-  function getCallActionTokens(action) {
-    return action === 'accept'
-      ? ['chấp nhận', 'accept', 'answer', 'trả lời']
-      : ['từ chối', 'decline', 'reject', 'bỏ qua', 'dismiss', 'kết thúc', 'tắt'];
-  }
-
-  function isIncomingCallSurfaceText(text) {
-    return /\u0111ang g\u1ecdi cho b\u1ea1n|cu\u1ed9c g\u1ecdi (?:tho\u1ea1i |video )?\u0111\u1ebfn|incoming (?:audio|video) call|is calling you/i.test(String(text || ''));
-  }
-
-  function findExactCallButtonByLabel(root, action) {
-    var labels = getExactCallControlLabels(action);
-    var scope = root || document;
-    for (var i = 0; i < labels.length; i++) {
-      var l = labels[i];
-      var selectors = [
-        '[role="button"][aria-label="' + l + '"]',
-        'button[aria-label="' + l + '"]',
-        '[tabindex][aria-label="' + l + '"]',
-        '[role="button"][aria-label*="' + l + '"]',
-        'button[aria-label*="' + l + '"]',
-        '[tabindex][aria-label*="' + l + '"]'
-      ];
-      for (var s = 0; s < selectors.length; s++) {
-        var selector = selectors[s];
-        var btn = null;
-        if (scope && scope.matches && scope.matches(selector)) {
-          btn = scope;
-        } else if (scope && scope.querySelector) {
-          btn = scope.querySelector(selector);
-        }
-        if (btn && isVisibleCallElement(btn) && !isDisabledCallButton(btn)) return btn;
-      }
-    }
-    return null;
-  }
-
-  function matchesCallAction(el, action) {
-    if (!el) return false;
-    var label = normalizeCallControlText((el.getAttribute && el.getAttribute('aria-label')) || '');
-    var text = normalizeCallControlText(el.textContent || '');
-    var combined = (label + ' ' + text).trim();
-    var tokens = getCallActionTokens(action);
-    for (var i = 0; i < tokens.length; i++) {
-      if (label === tokens[i] || text === tokens[i] || combined.indexOf(tokens[i]) !== -1) return true;
-    }
-    return false;
-  }
-
-  function getCallButtons(root) {
-    var scope = root || document;
-    var elements = scope.querySelectorAll('[role="button"][aria-label], button[aria-label], [tabindex][aria-label], [role="button"], button');
-    var acceptButtons = [];
-    var declineButtons = [];
-    if (scope !== document && scope.matches && scope.matches('[role="button"][aria-label], button[aria-label], [tabindex][aria-label], [role="button"], button')) {
-      elements = [scope].concat(Array.from(elements));
-    }
-    for (var i = 0; i < elements.length; i++) {
-      var el = elements[i];
-      if (!isVisibleCallElement(el) || isDisabledCallButton(el)) continue;
-      if (matchesCallAction(el, 'accept')) acceptButtons.push(el);
-      if (matchesCallAction(el, 'decline')) declineButtons.push(el);
-    }
-    return { acceptButtons: acceptButtons, declineButtons: declineButtons };
-  }
-
-  function getIncomingCallSurface() {
-    var docAccept = findExactCallButtonByLabel(document, 'accept');
-    var docDecline = findExactCallButtonByLabel(document, 'decline');
-    var buttons = getCallButtons(document);
-    var acceptButton = docAccept || buttons.acceptButtons[0] || null;
-    var declineButton = docDecline || buttons.declineButtons[0] || null;
-    if (!acceptButton && !declineButton) return null;
-
-    var candidates = [];
-    var seen = new Set();
-    function push(el) {
-      if (!el || seen.has(el)) return;
-      seen.add(el);
-      candidates.push(el);
-    }
-
-    var seedButtons = [acceptButton, declineButton].filter(Boolean);
-    for (var i = 0; i < seedButtons.length; i++) {
-      var current = seedButtons[i];
-      var depth = 0;
-      while (current && depth < 8) {
-        push(current);
-        if (current.getAttribute && (current.getAttribute('role') === 'dialog' || current.getAttribute('aria-modal') === 'true')) break;
-        current = current.parentElement;
-        depth += 1;
-      }
-    }
-
-    var best = null;
-    var bestScore = -1;
-    for (var j = 0; j < candidates.length; j++) {
-      var root = candidates[j];
-      if (!isVisibleCallElement(root)) continue;
-      var score = 0;
-      var text = normalizeCallControlText(root.textContent || '');
-      if (isIncomingCallSurfaceText(text)) score += 5;
-      if (acceptButton && root.contains(acceptButton)) score += 3;
-      if (declineButton && root.contains(declineButton)) score += 3;
-      if (acceptButton && declineButton && root.contains(acceptButton) && root.contains(declineButton)) score += 6;
-      if (root.getAttribute && root.getAttribute('role') === 'dialog') score += 2;
-      if (score > bestScore) {
-        best = root;
-        bestScore = score;
-      }
-    }
-
-    return best;
-  }
-
-  function findNearestCallSurface(button) {
-    var current = button;
-    var depth = 0;
-    while (current && depth < 8) {
-      if (isVisibleCallElement(current) && isIncomingCallSurfaceText(current.textContent || '')) return current;
-      if (current.getAttribute && (current.getAttribute('role') === 'dialog' || current.getAttribute('aria-modal') === 'true')) return current;
-      current = current.parentElement;
-      depth += 1;
-    }
-    return button && button.parentElement ? button.parentElement : null;
-  }
-
-  function findCallButton(action) {
-    var exactDocumentButton = findExactCallButtonByLabel(document, action);
-    if (exactDocumentButton) {
-      return {
-        button: exactDocumentButton,
-        surface: findNearestCallSurface(exactDocumentButton)
-      };
-    }
-
-    var surface = getIncomingCallSurface();
-    if (!surface) return null;
-    var exact = findExactCallButtonByLabel(surface, action);
-    if (exact) return { button: exact, surface: surface };
-    var buttons = getCallButtons(surface);
-    var matches = action === 'accept' ? buttons.acceptButtons : buttons.declineButtons;
-    return matches.length ? { button: matches[0], surface: surface } : null;
-  }
-
-  function activateCallButton(targetButton) {
-    if (!targetButton) return false;
-    var button = targetButton.closest('[role="button"], button, [tabindex]') || targetButton;
-    if (!isVisibleCallElement(button) || isDisabledCallButton(button)) return false;
-    try { button.focus(); } catch (_) {}
-    try {
-      button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 }));
-      button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, button: 0, buttons: 0 }));
-    } catch (_) {}
-    if (typeof button.click === 'function') {
-      button.click();
-      return true;
-    }
-    try {
-      return button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0 }));
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function triggerCallAnswer(action, callback) {
-    console.log('[CALL_CONTROL] Trying to click Facebook call button:', action);
-    var attempts = 0;
-    var maxAttempts = 12;
-
-    function finish(success) {
-      if (callback) callback(!!success);
-    }
-
-    function waitForDismiss(surface, button) {
-      var checks = 0;
-      var timer = setInterval(function() {
-        checks += 1;
-        var currentSurface = getIncomingCallSurface();
-        var surfaceGone = !currentSurface || !surface || !surface.isConnected;
-        var buttonGone = !button || !button.isConnected || !isVisibleCallElement(button);
-        if (surfaceGone || buttonGone) {
-          clearInterval(timer);
-          finish(true);
-          return;
-        }
-        if (checks >= 15) {
-          clearInterval(timer);
-          finish(false);
-        }
-      }, 200);
-    }
-
-    function runAttempt() {
-      attempts += 1;
-      var found = findCallButton(action);
-      if (found && activateCallButton(found.button)) {
-        waitForDismiss(found.surface, found.button);
-        return;
-      }
-      if (attempts >= maxAttempts) {
-        finish(false);
-        return;
-      }
-      setTimeout(runAttempt, 250);
-    }
-
-    runAttempt();
+    attempt();
   }
 
   try {
@@ -561,13 +102,18 @@
           } catch (e) {}
         }
         if (msg.type === 'ANSWER_INCOMING_CALL') {
-          // Use async callback so sendResponse stays open
-          triggerCallAnswer(msg.action, function(success) {
-            if (sendResponse) {
-              try { sendResponse({ success: success }); } catch(e) {}
-            }
-          });
-          return true; // keep message channel open for async response
+          triggerCallAnswer(msg.action, (success) => sendResponse?.({ success }));
+          return true;
+        }
+        if (msg.type === 'GET_INCOMING_CALL_BUTTON_RECT') {
+          var button = findIncomingCallActionButton(msg.action);
+          if (!button || !isVisibleCallElement(button)) {
+            sendResponse?.({ success: false });
+            return;
+          }
+          var rect = button.getBoundingClientRect();
+          sendResponse?.({ success: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+          return;
         }
       });
     }
@@ -998,7 +544,9 @@
     // have this race and is sufficient proof on its own that this is a real
     // message row, not composer/avatar/unrelated UI.
     const OPEN_PHOTO_ALT_PATTERN = /^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i;
+    const OPEN_VIDEO_LABEL_PATTERN = /^(?:Phát video|Mở video|Xem video|Play video|Open video|Watch video)$/i;
     let isPhotoMessage = false;
+    let isVideoMessage = false;
     let mediaUrl = null;
     const rowImgs = messageRow.querySelectorAll?.('img[src]') || [];
     for (const img of rowImgs) {
@@ -1009,6 +557,33 @@
         isPhotoMessage = true;
         mediaUrl = /^https?:\/\/.*(?:fbcdn\.net|scontent)/i.test(src) ? src : null;
         break;
+      }
+    }
+
+    const rowVideos = messageRow.querySelectorAll?.('video') || [];
+    for (const video of rowVideos) {
+      if (video.closest(COMPOSER_EXCLUDE)) continue;
+      const label = (video.getAttribute('aria-label') || video.getAttribute('title') || '').trim();
+      const source = video.currentSrc || video.getAttribute('src') || video.querySelector('source[src]')?.getAttribute('src') || '';
+      const poster = video.poster || video.getAttribute('poster') || '';
+      if (source || OPEN_VIDEO_LABEL_PATTERN.test(label) || video.closest('[aria-label*="video" i]')) {
+        isVideoMessage = true;
+        mediaUrl = /^(?:https?:\/\/|data:image\/)/i.test(source)
+          ? source
+          : (/^(?:https?:\/\/|data:image\/)/i.test(poster) ? poster : null);
+        break;
+      }
+    }
+    if (!isVideoMessage) {
+      const videoControl = Array.from(messageRow.querySelectorAll?.('[aria-label], a[href]') || []).find((element) => {
+        const label = (element.getAttribute('aria-label') || '').trim();
+        const href = element.getAttribute('href') || '';
+        return OPEN_VIDEO_LABEL_PATTERN.test(label) || /\/(?:watch|videos|reel)\//i.test(href) || /\.mp4(?:\?|$)/i.test(href);
+      });
+      if (videoControl) {
+        isVideoMessage = true;
+        const href = videoControl.href || videoControl.getAttribute('href') || '';
+        mediaUrl = /^https?:\/\/.*\.mp4(?:\?|$)/i.test(href) ? href : null;
       }
     }
 
@@ -1025,10 +600,10 @@
     const nativeIdEl = messageRow.querySelector?.('[data-message-id], [data-id], [id^="mid."]');
     const hasNativeId = !!nativeIdEl;
 
-    if (!hasMessageLabel && !hasNativeId && !isPhotoMessage) return []; // Không phải message row
+    if (!hasMessageLabel && !hasNativeId && !isPhotoMessage && !isVideoMessage) return []; // Không phải message row
 
     const rawText = (node.textContent || '').trim();
-    if (!isPhotoMessage) {
+    if (!isPhotoMessage && !isVideoMessage) {
       if (!rawText) return [];
 
       for (const pat of EXCLUDED_PATTERNS) {
@@ -1072,7 +647,7 @@
       });
     }
 
-    if (finalBubbles.length === 0 && !isPhotoMessage) return [];
+    if (finalBubbles.length === 0 && !isPhotoMessage && !isVideoMessage) return [];
 
     let sender_name = '';
     let is_outgoing = false;
@@ -1141,7 +716,7 @@
     // image-only article (finalBubbles is empty there), so caption always
     // comes back '' here; the caption's own article runs through the normal
     // per-bubble loop below as its own independent text event, unaffected.
-    if (isPhotoMessage) {
+    if (isPhotoMessage || isVideoMessage) {
       let caption = '';
       for (const bubble of finalBubbles) {
         const cleaned = cleanBubbleText(bubble.textContent);
@@ -1152,13 +727,13 @@
       }
       return [{
         sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
-        content: caption,
+        content: caption || (isVideoMessage && !mediaUrl ? '[Video]' : ''),
         is_outgoing,
         native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
         effective_label: effectiveLabel,
         is_valid: true,
         bubble_idx: 0,
-        media_type: 'image',
+        media_type: isVideoMessage ? 'video' : 'image',
         media_url: mediaUrl
       }];
     }
@@ -1382,6 +957,68 @@
     }));
   });
 
+  // React sometimes hydrates an already-mounted Messenger article by changing
+  // text/attributes instead of adding a new element. Reconcile only the tail
+  // of the active log and only confirmed incoming bubbles; the existing
+  // baseline/dedupe map prevents old history from being replayed.
+  function reconcileLatestIncomingMessages() {
+    if (observerPaused) return;
+    const thread_id = extractThreadIdFromUrl();
+    if (!thread_id || !/^\d+$/.test(thread_id) || thread_id !== currentBaselineThreadId) return;
+    const log = document.querySelector('[role="log"][aria-label*="Tin nh\u1eafn trong cu\u1ed9c tr\u00f2 chuy\u1ec7n"], [role="log"][aria-label*="Messages in the conversation"]')
+      || document.querySelector('div[role="main"] [role="log"]');
+    if (!log) return;
+    const rows = Array.from(log.querySelectorAll('div[role="row"], div[role="article"]')).slice(-24);
+    for (const row of rows) {
+      for (const parsed of parseMessagesFromDOMNode(row, true)) {
+        if (parsed.is_outgoing) continue;
+        const fbMessageId = makeDomMessageId(thread_id, parsed);
+        if (lastObservedMessages.get(fbMessageId) === false) continue;
+        const networkTime = recentNetworkEmits.get(`${thread_id}:${parsed.content}`);
+        if (networkTime && Date.now() - networkTime < 2500) {
+          lastObservedMessages.set(fbMessageId, false);
+          continue;
+        }
+        let tsMs = null;
+        const timeMatch = String(parsed.effective_label || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
+        if (timeMatch) {
+          let hours = Number(timeMatch[1]);
+          const minutes = Number(timeMatch[2]);
+          const ampm = String(timeMatch[3] || '').toUpperCase();
+          if ((ampm === 'PM' || ampm === 'CH') && hours < 12) hours += 12;
+          if ((ampm === 'AM' || ampm === 'SA') && hours === 12) hours = 0;
+          const observed = new Date();
+          observed.setHours(hours, minutes, 0, 0);
+          if (observed.getTime() > Date.now() + 60000) observed.setDate(observed.getDate() - 1);
+          tsMs = observed.getTime();
+        }
+        lastObservedMessages.set(fbMessageId, false);
+        try {
+          if (chrome?.runtime?.id) chrome.runtime.sendMessage({
+            type: 'NEW_MESSAGE_FROM_FB',
+            data: {
+              thread_id,
+              sender_id: null,
+              sender_name: parsed.sender_name,
+              content: parsed.content,
+              is_outgoing: false,
+              sender_role: 'customer',
+              fb_message_id: fbMessageId,
+              media_type: parsed.media_type || 'text',
+              media_url: parsed.media_url || null,
+              timestamp_ms: tsMs,
+              timestamp_source: tsMs ? 'facebook_label' : 'realtime_fallback',
+              created_at: new Date(tsMs || Date.now()).toISOString(),
+              source: 'dom_observer',
+              contact_avatar: extractContactAvatarFromNode(row) || ''
+            }
+          });
+        } catch (_) {}
+      }
+    }
+    while (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
+  }
+
   // Initialize everything
   patchXHR(); patchFetch(); patchWebSocket();
   extractFbTokensFromDOM(); setInterval(extractFbTokensFromDOM, 3000);
@@ -1412,6 +1049,7 @@
       observerPaused = false;
     }, 3000);
   }, 1000);
+  setInterval(reconcileLatestIncomingMessages, 750);
 
   // ── Call Log Scanner ────────────────────────────────────────────────────────
   // Quét span[dir="auto"] chứa text cuộc gọi mỗi 2 giây.
@@ -1652,90 +1290,186 @@
 
   setInterval(scanCallLogsNow, 500);
 
-  // ── Incoming Call Ringing Scanner ───────────────────────────────────────────
-  // Detect the real Facebook controls; incoming-call overlays do not always keep
-  // /messages/t/<id> in the active URL, so thread_id is optional for this event.
-  //
-  // Facebook's own call overlay shows the caller's name twice (once as a
-  // heading, once inside "<name> đang gọi cho bạn") plus a "Cuộc gọi đến"
-  // label - grabbing dialogRoot.textContent wholesale concatenates all of
-  // that with no separators ("Cuộc gọi đếnLê Văn KhangLê Văn Khang đang gọi
-  // cho bạn..."). This trims the known leading/trailing labels and collapses
-  // an exact-duplicate name back down to one copy.
-  function extractCallerNameFromDialogText(rawText) {
-    if (!rawText) return '';
-    let working = rawText
-      .replace(/^Cuộc gọi (?:thoại |video )?đến/i, '')
-      .trim();
-    const cutIdx = working.search(/đang gọi cho bạn|cuộc gọi (?:thoại|video) đến|incoming (?:audio|video) call/i);
-    if (cutIdx !== -1) working = working.slice(0, cutIdx).trim();
-    if (working.length > 0 && working.length % 2 === 0) {
-      const half = working.length / 2;
-      const firstHalf = working.slice(0, half);
-      if (firstHalf === working.slice(half)) working = firstHalf;
-    }
-    return working;
+  // Incoming-call detector. A candidate is valid only when Facebook exposes a
+  // visible modal dialog containing BOTH call action buttons and an SVG icon in
+  // each button. Never scan page text: call-log messages also contain call words.
+  function normalizeCallText(value) {
+    return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[đĐ]/g, 'd').toLowerCase().replace(/\s+/g, ' ').trim();
   }
 
-  var _lastRingingKey = null;
-  setInterval(function() {
-    try {
-      var acceptButton = document.querySelector(
-        '[role="button"][aria-label="Chấp nhận"], [role="button"][aria-label*="Accept"], [aria-label="Chấp nhận"]'
-      );
-      var declineButton = document.querySelector(
-        '[role="button"][aria-label="Từ chối"], [role="button"][aria-label*="Decline"], [aria-label="Từ chối"]'
-      );
-      // Require Facebook's two explicit ringing controls together. The more
-      // permissive call-control helper also recognizes words such as "Trả
-      // lời", which occur on ordinary message reply actions.
-      var callDialog = acceptButton && declineButton
-        ? (acceptButton.closest('[role="dialog"]') || declineButton.closest('[role="dialog"]') || acceptButton.parentElement)
-        : null;
-      var callerText = '';
+  function isVisibleCallElement(element) {
+    if (!element || !element.isConnected) return false;
+    var style = window.getComputedStyle(element);
+    var rect = element.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+  }
 
-      if (callDialog) {
-        callerText = ((callDialog.closest && callDialog.closest('[role="dialog"]')) || callDialog).textContent.trim();
+  function callButtonIntent(button) {
+    if (!button) return null;
+    var ariaLabel = normalizeCallText(button.getAttribute('aria-label') || '');
+    var visibleText = normalizeCallText(button.textContent || '');
+    var combined = ariaLabel + ' ' + visibleText;
+
+    if (/chap nhan|accept|answer|tra loi|nghe|nhac may/.test(combined)) return 'accept';
+    if (/tu choi|decline|reject/.test(combined)) return 'decline';
+    return null;
+  }
+
+  // Control lookup is intentionally independent from ringing detection. Once
+  // the CRM popup exists, Facebook may re-render the two control columns at
+  // different times. Requiring both buttons again here made either action miss.
+  function findIncomingCallActionButton(action) {
+    var allButtons = document.querySelectorAll('[role="button"], button, a');
+    for (var i = 0; i < allButtons.length; i++) {
+      var target = allButtons[i];
+      if (!isVisibleCallElement(target)) continue;
+      if (callButtonIntent(target) === action) {
+        return target;
       }
-
-      // Never infer a live call from arbitrary page text. Call-history rows,
-      // quoted replies and accessibility containers retain phrases such as
-      // "incoming audio call" after a call has ended. Only Facebook's real
-      // call surface or its Accept/Decline controls are authoritative.
-
-      if (callDialog) {
-        var threadId = extractThreadIdFromUrl();
-        var ringingKey = (threadId || 'unknown') + '|' + callerText.substring(0, 80);
-        if (_lastRingingKey !== ringingKey) {
-          _lastRingingKey = ringingKey;
-          console.log('[CALL_RINGING] 📞 Phát hiện cuộc gọi ĐANG REO trên Facebook: thread=' + (threadId || 'unknown'));
-          if (chrome && chrome.runtime && chrome.runtime.id) {
-            chrome.runtime.sendMessage({
-              type: 'INCOMING_CALL_RINGING',
-              data: {
-                thread_id: threadId || null,
-                caller_name: extractCallerNameFromDialogText(callerText).substring(0, 60) || 'Khách hàng',
-                timestamp: Date.now()
-              }
-            });
-          }
-        }
-      } else {
-        if (_lastRingingKey !== null) {
-          console.log('[CALL_RINGING] 📴 Cuộc gọi đã ngừng reo trên Facebook.');
-          if (chrome && chrome.runtime && chrome.runtime.id) {
-            chrome.runtime.sendMessage({
-              type: 'INCOMING_CALL_ENDED',
-              data: { timestamp: Date.now() }
-            });
-          }
-        }
-        _lastRingingKey = null;
-      }
-    } catch(e) {
-      console.warn('[CALL_RINGING] Detector error:', e);
     }
-  }, 750);
+    return null;
+  }
+
+  function extractCallerNameFromDialog(dialog) {
+    var nodes = dialog.querySelectorAll('h1, h2, h3, span, div');
+    for (var i = 0; i < nodes.length; i++) {
+      var raw = (nodes[i].textContent || '').replace(/\s+/g, ' ').trim();
+      if (!raw || raw.length > 120) continue;
+      var normalized = normalizeCallText(raw);
+      var marker = normalized.indexOf(' dang goi cho ban');
+      if (marker > 0) {
+        var directMatch = raw.match(/^(.+?)\s+đang gọi cho bạn(?:\s|$)/i);
+        return (directMatch ? directMatch[1] : raw.slice(0, marker)).trim().substring(0, 60);
+      }
+    }
+    return '';
+  }
+
+  function findIncomingCallCandidate() {
+    var isAudioRinging = false;
+    try {
+      var audioElements = document.querySelectorAll('audio, video');
+      for (var a = 0; a < audioElements.length; a++) {
+        var mediaEl = audioElements[a];
+        if (!mediaEl.paused && mediaEl.currentTime > 0 && /ring|call|audio|voice/i.test(mediaEl.src || '')) {
+          isAudioRinging = true;
+          break;
+        }
+      }
+    } catch (_) {}
+
+    var candidateSelectors = [
+      '[role="dialog"]',
+      '[role="alertdialog"]',
+      '[role="banner"]',
+      'div[aria-label*="gọi"]',
+      'div[aria-label*="call"]',
+      'div[aria-label*="GỌI"]',
+      'div[class*="call"]',
+      'div[class*="Call"]',
+      'div[class*="ring"]',
+      'div[class*="Ring"]'
+    ];
+    var candidates = document.querySelectorAll(candidateSelectors.join(', '));
+    for (var i = 0; i < candidates.length; i++) {
+      var dialog = candidates[i];
+      if (!isVisibleCallElement(dialog)) continue;
+
+      // Never match elements inside main chat transcript grid/feed
+      if (dialog.closest && dialog.closest('[role="main"], [role="grid"], [role="feed"]')) {
+        continue;
+      }
+
+      var rawAria = dialog.getAttribute('aria-label') || '';
+      var rawText = dialog.textContent || '';
+      var combinedText = normalizeCallText(rawAria + ' ' + rawText);
+
+      // Must be an active incoming call indicator or active audio ringtone
+      var isCallIndicator = isAudioRinging || /cuoc goi|incoming call|dang goi cho ban|is calling/.test(combinedText);
+      if (!isCallIndicator) continue;
+
+      // The supplied Facebook DOM exposes these exact aria-labels on the
+      // clickable role=button nodes. Prefer them before fuzzy text matching.
+      var acceptButton = dialog.querySelector(
+        '[role="button"][aria-label="Chấp nhận"], [role="button"][aria-label="Accept"], [role="button"][aria-label="Answer"]'
+      );
+      var declineButton = dialog.querySelector(
+        '[role="button"][aria-label="Từ chối"], [role="button"][aria-label="Decline"], [role="button"][aria-label="Reject"]'
+      );
+      var buttons = dialog.querySelectorAll('[role="button"], button, a');
+      for (var j = 0; j < buttons.length; j++) {
+        if (!isVisibleCallElement(buttons[j])) continue;
+        var intent = callButtonIntent(buttons[j]);
+        if (!acceptButton && intent === 'accept') acceptButton = buttons[j];
+        if (!declineButton && intent === 'decline') declineButton = buttons[j];
+      }
+
+      // Do not return a nested half of the controls. The previous OR condition
+      // commonly returned the Accept column before the Decline column existed
+      // in that candidate, making Accept reliable and Decline a null target.
+      if (acceptButton || declineButton) {
+        return { dialog: dialog, acceptButton: acceptButton, declineButton: declineButton, callerName: extractCallerNameFromDialog(dialog) };
+      }
+    }
+    return null;
+  }
+
+  var incomingCallState = { phase: 'IDLE', signature: null, stableScans: 0, callId: null, callerName: '' };
+  function scanIncomingCallDialog() {
+    try {
+      var candidate = findIncomingCallCandidate();
+      if (!candidate) {
+        if (incomingCallState.phase === 'RINGING') {
+          stopAllRingtoneAudio();
+          chrome.runtime.sendMessage({ type: 'INCOMING_CALL_ENDED', data: { call_id: incomingCallState.callId, timestamp: Date.now() } });
+        }
+        incomingCallState = { phase: 'IDLE', signature: null, stableScans: 0, callId: null, callerName: '' };
+        return;
+      }
+
+      var threadId = extractThreadIdFromUrl();
+      // Do not include caller name: Facebook inserts it after the dialog shell,
+      // and changing the signature here would restart detection mid-ring.
+      var signature = (threadId || 'unknown') + '|incoming-dialog';
+      if (incomingCallState.signature !== signature) {
+        incomingCallState = { phase: 'CANDIDATE', signature: signature, stableScans: 1, callId: null, callerName: candidate.callerName || '' };
+        return;
+      }
+      incomingCallState.stableScans += 1;
+      if (incomingCallState.phase !== 'RINGING' && incomingCallState.stableScans >= 2) {
+        incomingCallState.phase = 'RINGING';
+        incomingCallState.callId = 'incoming_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+        incomingCallState.callerName = candidate.callerName || '';
+        chrome.runtime.sendMessage({
+          type: 'INCOMING_CALL_RINGING',
+          data: { call_id: incomingCallState.callId, thread_id: threadId || null, caller_name: incomingCallState.callerName, timestamp: Date.now() }
+        });
+      } else if (incomingCallState.phase === 'RINGING' && candidate.callerName && candidate.callerName !== incomingCallState.callerName) {
+        // Update the existing CRM popup as soon as the delayed caller name is mounted.
+        incomingCallState.callerName = candidate.callerName;
+        chrome.runtime.sendMessage({
+          type: 'INCOMING_CALL_RINGING',
+          data: { call_id: incomingCallState.callId, thread_id: threadId || null, caller_name: incomingCallState.callerName, timestamp: Date.now(), update: true }
+        });
+      }
+    } catch (error) {
+      console.warn('[CALL_RINGING] Detector error:', error);
+    }
+  }
+
+  // MutationObserver catches Facebook's short-lived mount transitions; the
+  // interval remains as a fallback when React mutates attributes in place.
+  var incomingCallScanQueued = false;
+  var incomingCallObserver = new MutationObserver(function () {
+    if (incomingCallScanQueued) return;
+    incomingCallScanQueued = true;
+    window.setTimeout(function () {
+      incomingCallScanQueued = false;
+      scanIncomingCallDialog();
+    }, 50);
+  });
+  incomingCallObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'aria-modal', 'role'] });
+  setInterval(scanIncomingCallDialog, 300);
   // ── End Call Log Scanner ────────────────────────────────────────────────────
 })();
 

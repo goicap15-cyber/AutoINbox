@@ -870,6 +870,201 @@ if (isBusiness) {
         } else if (bubbleAncestor && pendingNoIdBubbles.has(bubbleAncestor)) {
             pendingNoIdBubbles.delete(bubbleAncestor); // resolved - the real id showed up
         }
+    }
+
+    // Shared identity/dedup/forward tail for both entry points: the
+    // text-node TreeWalker pass (via processPotentialMessage) and the
+    // per-wrapper media pass (in scanForMessages, for wrappers with no text
+    // node at all). isInsideMessageBubble/inChatContainer are passed in
+    // rather than recomputed here so each entry point only walks the
+    // ancestor chain once (see walkBubbleAncestors).
+    function forwardResolvedMessage(messageIdNode, anchorElement, fbMessageId, isInsideMessageBubble, inChatContainer, resolvedContent, messageListContainer) {
+        if (resolvedContent.kind === 'none') return;
+
+        const directionEvidence = getDirectionEvidence(messageIdNode || anchorElement, messageListContainer);
+        const isOutgoing = directionEvidence.direction === true || directionEvidence.direction === false
+            ? directionEvidence.direction
+            : null;
+        const threadId = resolveCurrentThreadId();
+        const urlParams = new URLSearchParams(window.location.search);
+        const assetId = urlParams.get('asset_id'); // Page ID
+
+        // Timestamp: DOM-order-derived for identified messages (see
+        // assignOrderedTimestamps); backlog-aware capture-time fallback otherwise.
+        let parsedTs;
+        let tsSource;
+        if (fbMessageId && knownMessageTimestamps.has(fbMessageId)) {
+            parsedTs = knownMessageTimestamps.get(fbMessageId);
+            tsSource = 'dom_order';
+        } else if (isLikelyBacklog(threadId)) {
+            parsedTs = 0;
+            tsSource = 'unknown';
+        } else {
+            parsedTs = Date.now();
+            tsSource = 'realtime_fallback';
+        }
+
+        const isMedia = resolvedContent.kind === 'media';
+        const text = isMedia ? (resolvedContent.caption || '') : resolvedContent.text;
+
+        const isCallLog = Boolean(text && (
+            text.includes('Cuộc gọi thoại') ||
+            text.includes('Cuộc gọi video') ||
+            text.includes('cuộc gọi') ||
+            text.includes('bỏ lỡ')
+        ));
+
+        // Keep identity stable across pending -> confirmed direction updates.
+        const dedupKey = fbMessageId || text + '_' + (isOutgoing === null ? 'unknown' : isOutgoing);
+        const hash = threadId + '_' + dedupKey;
+        if (processedHashes.has(hash)) return;
+
+        // ==========================================
+        // ROBUST DOM STRUCTURAL FILTERING (V2)
+        // ==========================================
+        // Strict enforcement: MUST be inside the chat container
+        if (!inChatContainer) {
+            return;
+        }
+
+        // Also ignore simple UI elements inside the chat container (like date
+        // headers, "Seen" receipts). Actual text messages are usually wrapped
+        // in dir="auto" - but a media wrapper's dir="auto" node may be a
+        // descendant we can't see from an upward-only ancestor walk starting
+        // at the wrapper, so this text-shaped heuristic is skipped for media
+        // (its identity/container check above already gates it).
+        if (!isMedia) {
+            const lowerText = text.toLowerCase();
+            if (!isInsideMessageBubble && !isCallLog) {
+                const sysTexts = ['xem thêm', 'đang tải...', 'chưa đọc'];
+                if (sysTexts.some(t => lowerText.includes(t))) return;
+            }
+
+            // Feature 023: known Business Suite account/page-switcher panel
+            // strings, observed leaking in as fake messages. Checked
+            // regardless of isInsideMessageBubble (unlike sysTexts above) -
+            // live inspection confirmed the switcher panel's text is itself
+            // wrapped in dir="auto", the same signal real message bubbles
+            // use, so gating this on !isInsideMessageBubble would never catch
+            // it. Independent of the inChatContainer containment check above:
+            // the real message-list container's own aria-label admits it can
+            // hold non-message content too, so containment alone is not
+            // guaranteed to exclude this panel.
+            const switcherPanelTexts = ['tài sản doanh nghiệp', 'tài khoản của bạn', 'trang quản lý tài sản doanh nghiệp'];
+            if (switcherPanelTexts.some(t => lowerText.includes(t))) return;
+
+            // "Thêm tin nhắn được cá nhân hóa." ("Add a personalized message.")
+            // is Facebook's own suggested-reply CTA rendered under a shared
+            // post/marketplace-listing attachment card, not a message - live
+            // report (2026-08-20) showed it repeating as its own fake row with
+            // a real timestamp each scan tick. Checked unconditionally, same
+            // reasoning as switcherPanelTexts above: it's wrapped in the same
+            // dir="auto" structure real bubbles use, so isInsideMessageBubble
+            // does not reliably exclude it. Matches both the standard "hóa"
+            // spelling (confirmed live) and the "hoá" variant defensively.
+            if (/thêm tin nhắn được cá nhân h(?:óa|oá)/i.test(text)) return;
+
+            // Date-separator header Business Suite renders between message
+            // groups - either a short "20 Tháng 4" (day + month, no time/year)
+            // or the full "13:52 6 Tháng 8, 2026" form. Live report
+            // (2026-08-20) confirmed the short form leaking in as its own fake
+            // row, appearing once per group boundary it's re-detected at.
+            // page_content.js has never called the shared FbCrmTextFilter (it
+            // isn't even loaded alongside this content script in manifest.json
+            // - a separate gap from the one that let this leak through), so
+            // this needs its own check here rather than relying on that filter.
+            // Checked unconditionally for the same reason as the CTA text
+            // above: the separator is wrapped in the same dir="auto" structure
+            // real bubbles use.
+            if (/^\d{1,2}:\d{2}\s+\d{1,2}\s+Tháng\s+\d{1,2},?\s+\d{4}$/i.test(text) ||
+                /^\d{1,2}\s+Tháng\s+\d{1,2}(?:,?\s*\d{4})?$/i.test(text)) return;
+
+            // Short day-of-week / relative-day separator, same family as the
+            // date separator above (e.g. "Thứ Ba", "Hôm nay") - live evidence
+            // (2026-08-20) found these leaking in as fake messages with a
+            // stale synthetic timestamp (spec 047), same mechanism as "20
+            // Tháng 4".
+            if (/^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i.test(text)) return;
+        }
+
+        // Unknown direction remains eligible for later scans. Once geometry is
+        // high-confidence, the stable fb_message_id is marked processed.
+        if (isOutgoing !== null) {
+            processedHashes.add(hash);
+            unresolvedHashFirstSeenTick.delete(hash);
+        } else {
+            const firstSeen = unresolvedHashFirstSeenTick.get(hash);
+            if (firstSeen === undefined) {
+                unresolvedHashFirstSeenTick.set(hash, currentTick);
+            } else if (currentTick - firstSeen >= MAX_UNRESOLVED_DIRECTION_TICKS) {
+                // Direction never resolved within the window - stop re-forwarding.
+                processedHashes.add(hash);
+                unresolvedHashFirstSeenTick.delete(hash);
+            }
+        }
+
+        console.log('[PageContent] Detected new message in thread ' + threadId + ': ' + (text || '').substring(0, 30) + ' (Outgoing: ' + (isOutgoing === null ? 'unknown' : isOutgoing) + ', ts=' + tsSource + ', kind=' + resolvedContent.kind + ')');
+
+        const payloadData = {
+            thread_id: threadId,
+            fb_message_id: fbMessageId,
+            content: text,
+            // null is a transport-level unknown. The backend stores 0 only as
+            // a compatibility placeholder and uses direction_status as truth.
+            is_outgoing: isOutgoing,
+            direction_status: isOutgoing === null ? 'pending' : 'confirmed',
+            direction_source: directionEvidence.source,
+            direction_confidence: directionEvidence.confidence,
+            page_id: assetId,
+            source: 'page_dom_observer',
+            timestamp_ms: parsedTs,
+            timestamp_source: tsSource
+        };
+        if (isMedia) {
+            payloadData.media_type = 'image';
+            payloadData.media_url = resolvedContent.mediaUrl;
+        }
+        if (currentContactName) payloadData.contact_name = currentContactName;
+        if (currentAvatarUrl) payloadData.avatar_url = currentAvatarUrl;
+
+        chrome.runtime.sendMessage({
+            type: 'NEW_PAGE_MESSAGE_FROM_DOM',
+            data: payloadData
+        });
+    }
+
+    function processPotentialMessage(element, text, processedWrappersThisTick, messageListContainer) {
+        // 1. Identity
+        let messageIdNode = element.closest('[data-message-id]');
+        let fbMessageId = messageIdNode ? messageIdNode.getAttribute('data-message-id') : null;
+
+        if (messageIdNode) {
+            if (processedWrappersThisTick.has(messageIdNode)) return; // already handled this wrapper this tick
+            processedWrappersThisTick.add(messageIdNode);
+        }
+
+        const { bubbleAncestor, isInsideMessageBubble, inChatContainer } = walkBubbleAncestors(element, messageListContainer);
+
+        // Pending-id handling (feature 017): a bubble with no data-message-id
+        // yet might just be caught mid-render - give it up to MAX_PENDING_TICKS
+        // scan ticks to get its real id attached before forwarding, so it
+        // never lands on the backend twice under two different identities.
+        if (!fbMessageId) {
+            if (bubbleAncestor) {
+                const pending = pendingNoIdBubbles.get(bubbleAncestor);
+                if (!pending) {
+                    pendingNoIdBubbles.set(bubbleAncestor, { firstSeenTick: currentTick });
+                    return; // first sighting without an id - wait for it to attach
+                }
+                if (currentTick - pending.firstSeenTick < MAX_PENDING_TICKS) {
+                    return; // still within the wait window
+                }
+                pendingNoIdBubbles.delete(bubbleAncestor); // wait expired - fall through, forward with null id as before
+            }
+            // no bubbleAncestor at all: fall through unchanged (today's behavior)
+        } else if (bubbleAncestor && pendingNoIdBubbles.has(bubbleAncestor)) {
+            pendingNoIdBubbles.delete(bubbleAncestor); // resolved - the real id showed up
+        }
 
         // 2. Content: the full wrapper's text/emoji/media (feature 018), or
         // the raw text node value when there's no wrapper at all (rare).
@@ -877,4 +1072,6 @@ if (isBusiness) {
 
         forwardResolvedMessage(messageIdNode, element, fbMessageId, isInsideMessageBubble, inChatContainer, resolvedContent, messageListContainer);
     }
+
+    // Incoming calls are handled exclusively by content.js.
 } // End isBusiness block

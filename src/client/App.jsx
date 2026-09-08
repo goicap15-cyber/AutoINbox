@@ -96,6 +96,8 @@ export default function App() {
   const [richCapabilities, setRichCapabilities] = useState(null);
   const [bulkHistoryProgress, setBulkHistoryProgress] = useState(null);
   const [accountSyncing, setAccountSyncing] = useState(null);
+  const [historySyncingThreadId, setHistorySyncingThreadId] = useState(null);
+  const historySyncTimeoutRef = useRef(null);
   const requestedFacebookSyncRef = useRef(null);
 
   const [campaignSelectionMode, setCampaignSelectionMode] = useState(false);
@@ -284,6 +286,21 @@ export default function App() {
     setActiveThreadId(thread.id);
   }, []);
 
+  const requestThreadMessageSync = useCallback((threadId, direction = 'initial', scrollDelta = 0) => {
+    if (!socket || !isConnected || !threadId) return;
+    setHistorySyncingThreadId(String(threadId));
+    if (historySyncTimeoutRef.current) clearTimeout(historySyncTimeoutRef.current);
+    historySyncTimeoutRef.current = setTimeout(() => {
+      setHistorySyncingThreadId((current) => String(current || '') === String(threadId) ? null : current);
+      historySyncTimeoutRef.current = null;
+    }, 15000);
+    socket.emit('REQUEST_SYNC_THREAD_MESSAGES', {
+      thread_id: String(threadId),
+      direction,
+      scroll_delta: direction === 'viewport' ? Number(scrollDelta) || 0 : 0
+    });
+  }, [socket, isConnected]);
+
   useEffect(() => {
     if (!activeThreadId) return;
     const threadIdStr = String(activeThreadId);
@@ -297,6 +314,11 @@ export default function App() {
       .catch(() => {});
 
   }, [activeThreadId]);
+
+  useEffect(() => {
+    if (!activeThreadId || !isConnected) return;
+    requestThreadMessageSync(activeThreadId, 'initial');
+  }, [activeThreadId, isConnected, requestThreadMessageSync]);
 
   useEffect(() => {
     if (!activeThreadId) return;
@@ -582,8 +604,13 @@ export default function App() {
       });
     });
 
-    socket.on('THREAD_MESSAGES_UPDATED', ({ thread_id, thread_key, account_id, messages: syncedMsgs }) => {
+    socket.on('THREAD_MESSAGES_UPDATED', ({ thread_id, thread_key, account_id, messages: syncedMsgs, authoritative = false }) => {
       const tidStr = String(thread_id);
+      if (historySyncTimeoutRef.current) {
+        clearTimeout(historySyncTimeoutRef.current);
+        historySyncTimeoutRef.current = null;
+      }
+      setHistorySyncingThreadId((current) => String(current || '') === tidStr ? null : current);
       setMessages(prev => {
         const existing = prev[tidStr] || [];
         const mergedMap = new Map();
@@ -604,7 +631,8 @@ export default function App() {
         // Giữ lại các tin nhắn pending/failed/realtime chưa có trong bản sync
         existing.forEach(m => {
           const key = messageKey(m);
-          if (!mergedMap.has(key)) {
+          const keepOptimistic = m.status === 'sending' || m.status === 'failed' || m.delivery_status === 'pending';
+          if (!mergedMap.has(key) && (!authoritative || keepOptimistic)) {
             mergedMap.set(key, m);
           } else if (m.status === 'sending' || m.status === 'failed') {
             mergedMap.set(key, { ...mergedMap.get(key), status: m.status, error: m.error });
@@ -1208,6 +1236,11 @@ export default function App() {
               activeThread={selectedThread}
               onSyncThread={undefined}
               onRetryMessage={handleRetryMessage}
+              historySyncing={String(historySyncingThreadId || '') === String(activeThreadId)}
+              onViewportScroll={(scrollDelta) => {
+                if (selectedThread.source_type === 'page_messenger') return;
+                requestThreadMessageSync(activeThreadId, 'viewport', scrollDelta);
+              }}
             />
             {['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(selectedThread.inbox_folder) ? (
               <MessageRequestActions

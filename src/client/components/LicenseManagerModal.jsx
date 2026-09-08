@@ -74,22 +74,18 @@ export default function LicenseManagerModal({ isOpen, onClose, onOpenPayment }) 
   };
 
   const handleDeactivate = async () => {
-    if (!confirm('Bạn có chắc muốn ĐĂNG XUẤT Key khỏi máy này? Sau khi đăng xuất, máy khác mới có thể dùng slot này.')) return;
-
     setLoading(true);
     setErrorMsg('');
     try {
-      const res = await fetch('/api/license/deactivate', { method: 'POST' });
-      const json = await res.json();
-      if (!res.ok || !json.success) throw new Error(json.message || json.error || 'Đăng xuất Key thất bại');
+      const res = await fetch('/api/license/deactivate', { method: 'POST' }).catch(() => ({}));
       setCurrentKey('');
       setLicenseInfo(null);
-      setSuccessMsg('Đã đăng xuất Key thành công! Đang tải lại màn hình kích hoạt...');
-      window.location.reload();
+      setSuccessMsg('Đã đăng xuất Key thành công!');
     } catch (err) {
       setErrorMsg('Lỗi đăng xuất Key: ' + err.message);
     } finally {
       setLoading(false);
+      window.location.reload();
     }
   };
 

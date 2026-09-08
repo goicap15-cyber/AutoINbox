@@ -9,7 +9,10 @@
   // Facebook" launch receives the full interceptor as usual.
   try {
     const pendingFromUrl = new URL(window.location.href).searchParams.has('crm_pending_key');
-    if (pendingFromUrl || sessionStorage.getItem('crm_pending_account_setup') === '1') {
+    // Do not trust the session marker on its own: it survives extension
+    // reloads and used to leave the network interceptor disabled until the
+    // operator sent an outbound message. The setup URL is authoritative.
+    if (pendingFromUrl) {
       console.log('[FB Interceptor] Skipped during new-account secure setup.');
       return;
     }
@@ -140,6 +143,17 @@
         const text = decoder.decode(data);
         extractMessagesFromRawText(text);
       } catch (e) {}
+    } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
+      // Chrome delivers Facebook/Messenger realtime frames as Blob by
+      // default. The old interceptor handled only string/ArrayBuffer, so
+      // genuine customer messages on an already-open socket were silently
+      // ignored until another action caused a HTTP/DOM refresh.
+      data.arrayBuffer().then((buffer) => {
+        try {
+          const text = new TextDecoder('utf-8').decode(buffer);
+          parseWebSocketData(text);
+        } catch (_) {}
+      }).catch(() => {});
     }
   }
 
@@ -171,7 +185,16 @@
       for (const item of obj) extractMessagesFromJSON(item, depth + 1);
     } else {
       for (const key of Object.keys(obj)) {
-        if (typeof obj[key] === 'object') extractMessagesFromJSON(obj[key], depth + 1);
+        const value = obj[key];
+        if (typeof value === 'object') {
+          extractMessagesFromJSON(value, depth + 1);
+        } else if (typeof value === 'string' && value.length > 1 && value.length < 100000
+          && (value[0] === '{' || value[0] === '[')) {
+          // MQTT/GraphQL envelopes commonly carry the actual message JSON in
+          // a string-valued payload. Decode only JSON-looking bounded values
+          // and retain the existing recursive depth guard.
+          try { extractMessagesFromJSON(JSON.parse(value), depth + 1); } catch (_) {}
+        }
       }
     }
   }

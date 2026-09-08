@@ -826,6 +826,18 @@ const migrations = [
       `);
       console.log('[DB] Migration v55: Rebuilt messages table to allow media_type="call".');
     }
+  },
+  {
+    version: 56,
+    name: 'add_inbox_folder_to_threads',
+    up: (db) => {
+      try {
+        db.exec("ALTER TABLE threads ADD COLUMN inbox_folder TEXT CHECK(inbox_folder IN ('INBOX', 'MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')) DEFAULT 'INBOX';");
+        console.log('[DB] Migration v56: Added threads.inbox_folder column.');
+      } catch (e) {
+        console.log('[DB] Migration v56: threads.inbox_folder already exists, skipped.');
+      }
+    }
   }
 ];
 

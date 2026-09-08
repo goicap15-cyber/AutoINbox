@@ -1,13 +1,61 @@
 const { spawn, exec, spawnSync } = require('child_process');
-const puppeteer = require('puppeteer-core');
 const path = require('path');
 const fs = require('fs');
 const { resolveChromePath } = require('../../../chrome-bundling/resolveChromePath');
 const { resolveExtensionPath, resolveBinRoot } = require('../utils/appResourceRoot');
 const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 
+// Older databases store Chrome profiles as repo-relative paths such as
+// `data/profiles/<account>`. In a packaged Electron app, resolving those from
+// __dirname points inside app.asar, which is a file rather than a writable
+// directory and causes ENOTDIR. Keep valid absolute profiles intact and map
+// legacy relative values onto the per-user application data directory.
+function resolveAccountProfileDir(storedProfileDir, accountId) {
+  const fallback = path.join(APP_DATA_ROOT, 'profiles', String(accountId));
+  if (!storedProfileDir || typeof storedProfileDir !== 'string') return fallback;
+
+  if (path.isAbsolute(storedProfileDir)) {
+    const normalized = path.normalize(storedProfileDir);
+    if (normalized.toLowerCase().includes(`${path.sep}app.asar${path.sep}`)) {
+      return fallback;
+    }
+    // If the path root or parent directory does not exist on this machine, remap via profiles marker
+    const normalizedSlash = storedProfileDir.replace(/\\/g, '/');
+    const profileMarker = 'profiles/';
+    const markerIndex = normalizedSlash.toLowerCase().indexOf(profileMarker);
+    if (markerIndex >= 0) {
+      const rootDir = path.parse(normalized).root;
+      if (!fs.existsSync(rootDir) || !fs.existsSync(path.dirname(normalized))) {
+        const profileSuffix = normalizedSlash.slice(markerIndex + profileMarker.length);
+        return profileSuffix ? path.join(APP_DATA_ROOT, 'profiles', profileSuffix) : fallback;
+      }
+    }
+    return normalized;
+  }
+
+  const normalizedRelative = storedProfileDir.replace(/\\/g, '/').replace(/^\.\//, '');
+  const profileMarker = 'profiles/';
+  const markerIndex = normalizedRelative.toLowerCase().indexOf(profileMarker);
+  if (markerIndex >= 0) {
+    const profileSuffix = normalizedRelative.slice(markerIndex + profileMarker.length);
+    return profileSuffix ? path.join(APP_DATA_ROOT, 'profiles', profileSuffix) : fallback;
+  }
+
+  return fallback;
+}
+
+// puppeteer-core v25 is ESM. Load it through the supported CommonJS-to-ESM
+// bridge only when a managed Chrome process is actually started.
+let puppeteerPromise = null;
+function getPuppeteer() {
+  if (!puppeteerPromise) {
+    puppeteerPromise = import('puppeteer-core').then((module) => module.default || module);
+  }
+  return puppeteerPromise;
+}
+
 // Ẩn cửa sổ Chrome khỏi màn hình và taskbar Windows bằng Win32 API
-function hideFromTaskbar(pid, profileDir = '', delayMs = 2500) {
+function hideFromTaskbar(pid, profileDir = '', delayMs = 2500, keepWindowOnScreen = false) {
   if (process.platform !== 'win32') return;
   const psScript = `
 Add-Type -TypeDefinition @'
@@ -17,7 +65,9 @@ public class WinHelper {
   [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n);
   [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 }
+
 '@ -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds ${delayMs}
 
@@ -42,7 +92,11 @@ foreach ($p in $allChrome) {
       $ex = [WinHelper]::GetWindowLong($hwnd, -20)
       $ex = ($ex -band -bnot 0x00040000) -bor 0x00000080
       [WinHelper]::SetWindowLong($hwnd, -20, $ex) | Out-Null
-      [WinHelper]::ShowWindow($hwnd, 0) | Out-Null
+      # Keep Chrome's top-level window shown so Chromium continues rendering
+      # Messenger DOM in background tabs. SW_HIDE made document visibility
+      # hidden and caused request/history scrapes to return partial results.
+      [WinHelper]::ShowWindow($hwnd, 4) | Out-Null
+      ${keepWindowOnScreen ? '' : '[WinHelper]::SetWindowPos($hwnd, [IntPtr]::Zero, -32000, -32000, 0, 0, 0x0015) | Out-Null'}
     }
   }
 }
@@ -51,6 +105,29 @@ foreach ($p in $allChrome) {
   exec(`powershell -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`, (err) => {
     if (err) console.error('[ProcessManager] Lỗi ẩn Chrome khỏi màn hình/taskbar:', err.message);
   });
+}
+
+// Keep Chrome as a normal taskbar application while minimizing its window.
+// This is the two-minute sync presentation mode, distinct from BACKGROUND.
+function minimizeToTaskbar(pid, profileDir = '') {
+  if (process.platform !== 'win32') return;
+  const profile = String(profileDir || '').replace(/'/g, "''").replace(/\\/g, '/');
+  const psScript = `
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class SyncWindowHelper { [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int n); [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n); [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v); }' -ErrorAction SilentlyContinue
+$profile = '${profile}'
+$targetPids = @(${pid || 0})
+if ($profile) {
+  Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue | Where-Object { ($_.CommandLine -replace '\\','/') -like "*$profile*" } | ForEach-Object { $targetPids += $_.ProcessId }
+}
+Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $targetPids -contains $_.Id -and $_.MainWindowHandle -ne 0 } | ForEach-Object {
+  $h = $_.MainWindowHandle
+  $style = [SyncWindowHelper]::GetWindowLong($h, -20)
+  $style = ($style -band -bnot 0x00000080) -bor 0x00040000
+  [SyncWindowHelper]::SetWindowLong($h, -20, $style) | Out-Null
+  [SyncWindowHelper]::ShowWindowAsync($h, 6) | Out-Null
+}`;
+  const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+  exec(`powershell -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`, () => {});
 }
 
 // Tự động cấp quyền (Micro, Camera, Popups, Notifications) cho Facebook trong Chrome Profile Preferences
@@ -201,12 +278,16 @@ class ProcessManager {
   }
 
   // Khởi chạy Chrome Portable hiển thị cho tài khoản FB
-  async startAccountProcess(accountId, customProfileDir = null) {
+  async startAccountProcess(accountId, customProfileDir = null, options = {}) {
+    const forceExtensionReload = options?.forceExtensionReload === true;
     if (this.processes.has(accountId)) {
       const existing = this.processes.get(accountId);
       const isAlive = existing.pid &&
         (() => { try { process.kill(existing.pid, 0); return true; } catch { return false; } })();
-      if (isAlive) {
+      if (isAlive && forceExtensionReload) {
+        console.log(`[ProcessManager] Extension account ${accountId} offline; restarting its managed Chrome to reload the extension.`);
+        this.stopAccountProcess(accountId);
+      } else if (isAlive) {
         existing.displayMode = 'VISIBLE';
         this.unhideWindow(accountId);
         console.log(`[ProcessManager] Tài khoản ${accountId} đã đang chạy (PID ${existing.pid}).`);
@@ -223,16 +304,12 @@ class ProcessManager {
         const db = require('../database/db');
         const acc = db.prepare('SELECT profile_dir FROM accounts WHERE id = ?').get(accountId);
         if (acc?.profile_dir) {
-          profileDir = path.isAbsolute(acc.profile_dir)
-            ? acc.profile_dir
-            : path.join(__dirname, '../../../', acc.profile_dir);
+          profileDir = resolveAccountProfileDir(acc.profile_dir, accountId);
         }
       } catch (e) {}
     }
 
-    if (!profileDir) {
-      profileDir = path.join(APP_DATA_ROOT, `profiles/${accountId}`);
-    }
+    profileDir = resolveAccountProfileDir(profileDir, accountId);
 
     if (!fs.existsSync(profileDir)) {
       fs.mkdirSync(profileDir, { recursive: true });
@@ -244,7 +321,19 @@ class ProcessManager {
     const absProfileDir = path.resolve(profileDir).replace(/\\/g, '/');
 
     const runningProfilePid = findBundledChromePidByProfile(absProfileDir, chromeExecutable);
-    if (runningProfilePid) {
+    if (runningProfilePid && forceExtensionReload) {
+      console.log(`[ProcessManager] Chrome profile ${accountId} is alive but its extension is offline; stopping PID ${runningProfilePid}.`);
+      if (process.platform === 'win32') {
+        const result = spawnSync('taskkill.exe', ['/PID', String(runningProfilePid), '/T', '/F'], {
+          windowsHide: true,
+          encoding: 'utf8'
+        });
+        if (result.error || (result.status !== 0 && result.status !== 128)) {
+          console.error(`[ProcessManager] Could not restart Chrome profile ${accountId}:`, result.error?.message || result.stderr || result.stdout);
+          return false;
+        }
+      }
+    } else if (runningProfilePid) {
       this.processes.set(accountId, {
         process: null,
         profileDir: absProfileDir,
@@ -259,6 +348,7 @@ class ProcessManager {
 
     console.log(`[ProcessManager] Khởi chạy Chrome Stable + tự cài extension cho account ${accountId} (Profile: ${absProfileDir})...`);
     try {
+      const puppeteer = await getPuppeteer();
       const browser = await puppeteer.launch({
         executablePath: chromeExecutable,
         headless: false,
@@ -313,8 +403,24 @@ class ProcessManager {
 
   // Khởi chạy Chrome Portable cho phiên thêm tài khoản mới (pending session)
   async startNewAccountProcess(pendingKey) {
+    const setupUrl = `https://www.facebook.com/messages/?crm_pending_key=${encodeURIComponent(pendingKey)}`;
     if (this.processes.has(pendingKey)) {
       console.log(`[ProcessManager] Phiên pending ${pendingKey} đã đang chạy.`);
+      const existing = this.processes.get(pendingKey);
+      try {
+        if (existing?.browser?.connected) {
+          const page = await existing.browser.newPage();
+          await page.goto(setupUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        } else {
+          spawn(this.getInteractiveSetupChromeExecutable(), [
+            `--user-data-dir=${path.resolve(existing?.profileDir || path.join(APP_DATA_ROOT, `profiles/${pendingKey}`))}`,
+            setupUrl
+          ], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+        }
+      } catch (error) {
+        console.warn(`[ProcessManager] Không thể mở lại URL liên kết cho ${pendingKey}:`, error.message);
+      }
+      this.unhideWindow(pendingKey);
       return true;
     }
 
@@ -342,13 +448,23 @@ class ProcessManager {
         displayMode: 'VISIBLE'
       });
       this.unhideWindow(pendingKey);
+      // Chrome can outlive the backend. Reopening the exact setup URL lets
+      // the extension capture the ownership token again after a restart.
+      try {
+        spawn(chromeExecutable, [
+          `--user-data-dir=${absProfileDir}`,
+          setupUrl
+        ], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+      } catch (error) {
+        console.warn(`[ProcessManager] Không thể khôi phục URL liên kết cho ${pendingKey}:`, error.message);
+      }
       console.log(`[ProcessManager] Reused pending Chrome ${pendingKey} (PID ${runningProfilePid}).`);
       return true;
     }
 
-    const setupUrl = `https://www.facebook.com/messages/?crm_pending_key=${encodeURIComponent(pendingKey)}`;
     console.log(`[ProcessManager] Khởi chạy Chrome Stable + tự cài extension cho phiên [${pendingKey}]: ${chromeExecutable}`);
     try {
+      const puppeteer = await getPuppeteer();
       const browser = await puppeteer.launch({
         executablePath: chromeExecutable,
         headless: false,
@@ -429,7 +545,7 @@ class ProcessManager {
 
     if (process.platform === 'win32') {
       const psScript = `
-try { Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32Helper { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int m); [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n); [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v); }' } catch {}
+try { Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32Helper { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int m); [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n); [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags); }' } catch {}
 $targetPids = @(${pid || 0})
 $profile = '${escapedProfileDir}'
 if ($profile) {
@@ -442,6 +558,7 @@ foreach ($app in $apps) {
   $style = [Win32Helper]::GetWindowLong($handle, -20)
   $style = ($style -band -bnot 0x00000080) -bor 0x00040000
   [Win32Helper]::SetWindowLong($handle, -20, $style) | Out-Null
+  [Win32Helper]::SetWindowPos($handle, [IntPtr]::Zero, 80, 80, 0, 0, 0x0015) | Out-Null
   [Win32Helper]::ShowWindowAsync($handle, 9) | Out-Null
   [Win32Helper]::SetForegroundWindow($handle) | Out-Null
 }
@@ -493,6 +610,26 @@ if (-not $apps -and $profile) {
   getStatus(accountId) {
     const procInfo = this.processes.get(accountId);
     return procInfo ? procInfo.status : 'STOPPED';
+  }
+
+  hideAccountFromTaskbarForSync(accountId) {
+    const procInfo = this.processes.get(accountId);
+    if (!procInfo?.pid) return false;
+    this.cancelScheduledHides(accountId);
+    procInfo.displayMode = 'VISIBLE';
+    hideFromTaskbar(procInfo.pid, procInfo.profileDir, 0, true);
+    console.log(`[ProcessManager] Chrome account ${accountId} remains visible for sync but is removed from taskbar.`);
+    return true;
+  }
+
+  minimizeAccountForSync(accountId) {
+    const procInfo = this.processes.get(accountId);
+    if (!procInfo?.pid) return false;
+    this.cancelScheduledHides(accountId);
+    procInfo.displayMode = 'SYNC_MINIMIZED';
+    minimizeToTaskbar(procInfo.pid, procInfo.profileDir);
+    console.log(`[ProcessManager] Chrome account ${accountId} minimized to taskbar for the two-minute sync window.`);
+    return true;
   }
 
   getDisplayMode(accountId) {

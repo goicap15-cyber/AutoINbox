@@ -10,6 +10,7 @@ directories:
 asar: true
 asarUnpack:
   - "**/*.node"
+  - "node_modules/better-sqlite3/build/**/*"
 
 # ─── Files to bundle ───────────────────────────────────────────────────
 files:
@@ -19,6 +20,7 @@ files:
   - chrome-bundling/resolveChromePath.js
   - .env
   - src/electron.js
+  - src/preload.js
   - data/.gitkeep
   - node_modules/**/*
   - package.json
@@ -27,18 +29,6 @@ files:
   - "!**/*.md"
   - "!scripts/**/*"
   - "!node_modules/better-sqlite3/prebuilds/**"
-  # Spec 046 (installer size): build/dev-only packages that are never
-  # require()'d at runtime - electron-builder's own devDependency pruning is
-  # bypassed by the explicit node_modules/**/* glob above, so these need an
-  # explicit exclude or they get bundled uselessly.
-  - "!node_modules/electron-builder/**"
-  - "!node_modules/electron-winstaller/**"
-  - "!node_modules/app-builder-lib/**"
-  # Spec 046 (installer size): client-only React libraries. Vite already
-  # bundles the code they actually use into dist/client/**/* above - the raw
-  # node_modules copies are never require()'d by the Electron main process or
-  # server at runtime, so shipping them again here is pure duplication.
-  - "!node_modules/lucide-react/**"
   - "!node_modules/emoji-picker-react/**"
   - "!node_modules/react/**"
   - "!node_modules/react-dom/**"

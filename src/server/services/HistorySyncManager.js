@@ -32,6 +32,7 @@ class HistorySyncManager {
   // downgraded to PARTIAL by this change.
   static resolveStatusFromCheckpoint(checkpoint) {
     if (!checkpoint || !checkpoint.stop_reason) return 'SYNCED';
+    if (checkpoint.stop_reason === 'on_demand_page') return 'PARTIAL';
     if (checkpoint.boundary_reached || checkpoint.stop_reason === 'no_scroll_growth') return 'SYNCED';
     if (checkpoint.stop_reason === 'max_rounds_hit') return 'PARTIAL';
     return 'SYNCED';

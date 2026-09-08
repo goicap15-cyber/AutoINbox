@@ -9,7 +9,7 @@ class CentralAuthError extends Error {
 }
 
 class CentralAuthClient {
-  constructor(baseUrl = process.env.LICENSE_SERVER_URL || 'http://localhost:5055') {
+  constructor(baseUrl = process.env.LICENSE_SERVER_URL || 'https://genblackmmoonline.online/license_server') {
     this.baseUrl = String(baseUrl).replace(/\/$/, '');
   }
 

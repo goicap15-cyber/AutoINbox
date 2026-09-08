@@ -21,3 +21,7 @@ test('legacy checkpoint without stop_reason -> SYNCED (backward-compatible, neve
   assert.equal(HistorySyncManager.resolveStatusFromCheckpoint({ mode: 'initial' }), 'SYNCED');
   assert.equal(HistorySyncManager.resolveStatusFromCheckpoint(null), 'SYNCED');
 });
+
+test('on-demand page remains partial until scrolling reaches the real beginning', () => {
+  assert.equal(HistorySyncManager.resolveStatusFromCheckpoint({ stop_reason: 'on_demand_page' }), 'PARTIAL');
+});
