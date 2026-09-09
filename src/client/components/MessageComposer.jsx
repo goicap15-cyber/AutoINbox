@@ -26,6 +26,7 @@ export default function MessageComposer({
   const fileInputRef = useRef(null);
   const selectionRef = useRef({ start: 0, end: 0 });
   const dragDepthRef = useRef(0);
+  const restoreFocusAfterSendRef = useRef(false);
 
   const quickTemplates = [
     'Dạ chào bạn! Shop có thể hỗ trợ gì cho bạn ạ?',
@@ -58,12 +59,24 @@ export default function MessageComposer({
     if (disabled) closeEmojiPicker();
   }, [disabled, closeEmojiPicker]);
 
+  useEffect(() => {
+    if (sending || disabled || !restoreFocusAfterSendRef.current) return;
+    restoreFocusAfterSendRef.current = false;
+    // The textarea is disabled while sending. Wait until React has committed
+    // the enabled state before restoring keyboard focus for the next message.
+    const frame = requestAnimationFrame(() => {
+      textareaRef.current?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [sending, disabled]);
+
   const submitContent = async (rawContent) => {
     const content = String(rawContent || '').trim();
     if ((!content && !attachment) || sending || disabled || uploadingAttachment) return;
 
     const clientMessageId = 'client_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
     const submittedAttachment = attachment;
+    restoreFocusAfterSendRef.current = true;
     setSending(true);
     setError(null);
     try {
