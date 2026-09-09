@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Send, Image, Paperclip, Smile, FileText, Loader2, AlertCircle, WifiOff, ThumbsUp } from 'lucide-react';
+import { Send, Image, Paperclip, Smile, FileText, Loader2, AlertCircle, WifiOff, ThumbsUp, Plus, Trash2, RefreshCw } from 'lucide-react';
 import EmojiPickerPopover from './EmojiPickerPopover.jsx';
 import AttachmentPreview from './AttachmentPreview.jsx';
 
@@ -15,6 +15,13 @@ export default function MessageComposer({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [templates, setTemplates] = useState([]);
+  const [templatesLoaded, setTemplatesLoaded] = useState(false);
+  const [templateLoadError, setTemplateLoadError] = useState(null);
+  const [isAddingTemplate, setIsAddingTemplate] = useState(false);
+  const [newTemplateContent, setNewTemplateContent] = useState('');
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [deletingTemplateId, setDeletingTemplateId] = useState(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [attachment, setAttachment] = useState(null);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
@@ -27,12 +34,78 @@ export default function MessageComposer({
   const selectionRef = useRef({ start: 0, end: 0 });
   const dragDepthRef = useRef(0);
 
-  const quickTemplates = [
-    'Dạ chào bạn! Shop có thể hỗ trợ gì cho bạn ạ?',
-    'Sản phẩm hiện đang có sẵn hàng, shop ship ngay trong ngày nha anh/chị!',
-    'Bạn cho shop xin SĐT và địa chỉ để tạo đơn ngay nhé ạ!',
-    'Shop xin cảm ơn và chúc bạn một ngày tốt lành!'
-  ];
+  const loadTemplates = useCallback(async () => {
+    try {
+      setTemplateLoadError(null);
+      const res = await fetch('/api/quick-templates');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setTemplates(data);
+          setTemplateLoadError(null);
+        } else {
+          setTemplateLoadError('Dữ liệu mẫu câu không đúng định dạng');
+        }
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        setTemplateLoadError(errData.error || `Lỗi máy chủ (${res.status})`);
+      }
+    } catch (err) {
+      setTemplateLoadError(err.message || 'Không thể kết nối máy chủ');
+    } finally {
+      setTemplatesLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadTemplates();
+  }, [loadTemplates]);
+
+  const handleCreateTemplate = async (e) => {
+    e?.preventDefault();
+    const content = newTemplateContent.trim();
+    if (!content || savingTemplate) return;
+
+    setSavingTemplate(true);
+    try {
+      const res = await fetch('/api/quick-templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content })
+      });
+      const data = await res.json();
+      if (res.ok && data.template) {
+        setTemplates((prev) => [...prev, data.template]);
+        setNewTemplateContent('');
+        setIsAddingTemplate(false);
+      } else {
+        setError(data.error || 'Không thể tạo mẫu câu mới');
+      }
+    } catch (err) {
+      setError(err.message || 'Lỗi khi lưu mẫu câu');
+    } finally {
+      setSavingTemplate(false);
+    }
+  };
+
+  const handleDeleteTemplate = async (e, id) => {
+    e?.stopPropagation();
+    if (deletingTemplateId) return;
+
+    setDeletingTemplateId(id);
+    try {
+      const res = await fetch(`/api/quick-templates/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Không thể xóa mẫu câu');
+      }
+      setTemplates((prev) => prev.filter((t) => t.id !== id));
+    } catch (err) {
+      setError(err.message || 'Lỗi khi xóa mẫu câu');
+    } finally {
+      setDeletingTemplateId(null);
+    }
+  };
 
   const resizeInput = useCallback((target) => {
     if (!target) return;
@@ -124,12 +197,14 @@ export default function MessageComposer({
   };
 
   const chooseTemplate = (template) => {
-    setInputText(template);
+    const text = typeof template === 'string' ? template : (template?.content || '');
+    setInputText(text);
     setShowTemplates(false);
-    selectionRef.current = { start: template.length, end: template.length };
+    setIsAddingTemplate(false);
+    selectionRef.current = { start: text.length, end: text.length };
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
-      textareaRef.current?.setSelectionRange(template.length, template.length);
+      textareaRef.current?.setSelectionRange(text.length, text.length);
       resizeInput(textareaRef.current);
     });
   };
@@ -265,21 +340,121 @@ export default function MessageComposer({
       )}
 
       {showTemplates && (
-        <div className="p-2 bg-[var(--color-bg-panel)] rounded-xl border border-[var(--color-border)] space-y-1 text-xs mb-2.5 shadow-md">
-          <div className="flex justify-between items-center text-xs text-[var(--color-text-muted)] font-medium pb-1 border-b border-[var(--color-border)]">
-            <span>Mẫu nhanh</span>
-            <button type="button" onClick={() => setShowTemplates(false)} className="hover:text-[var(--color-text-primary)] transition-colors focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40 rounded">Đóng</button>
-          </div>
-          {quickTemplates.map((template) => (
+        <div className="p-2.5 bg-[var(--color-bg-panel)] rounded-xl border border-[var(--color-border)] text-xs mb-2.5 shadow-lg max-h-80 flex flex-col">
+          <div className="flex justify-between items-center text-xs text-[var(--color-text-muted)] font-medium pb-2 mb-1.5 border-b border-[var(--color-border)]">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-[var(--color-text-primary)]">Mẫu nhanh</span>
+              <button
+                type="button"
+                onClick={() => setIsAddingTemplate((prev) => !prev)}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 px-2 py-0.5 rounded-full transition-colors"
+                title="Tạo mẫu câu trả lời mới"
+              >
+                <Plus size={12} strokeWidth={2} />
+                <span>{isAddingTemplate ? 'Đóng form' : 'Thêm mẫu'}</span>
+              </button>
+            </div>
             <button
-              key={template}
               type="button"
-              onClick={() => chooseTemplate(template)}
-              className="w-full text-left p-2 hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] rounded-lg transition-colors text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40"
+              onClick={() => {
+                setShowTemplates(false);
+                setIsAddingTemplate(false);
+              }}
+              className="text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40 rounded px-1"
             >
-              {template}
+              Đóng
             </button>
-          ))}
+          </div>
+
+          {isAddingTemplate && (
+            <form onSubmit={handleCreateTemplate} className="mb-2 p-2 bg-[var(--color-bg-surface)] rounded-lg border border-[var(--color-border)] space-y-2">
+              <textarea
+                value={newTemplateContent}
+                onChange={(e) => setNewTemplateContent(e.target.value)}
+                placeholder="Nhập nội dung mẫu câu trả lời (VD: Báo giá, STK, địa chỉ...)"
+                rows={2}
+                className="w-full text-xs p-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-panel)] text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)] resize-none"
+                autoFocus
+              />
+              <div className="flex justify-end gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAddingTemplate(false);
+                    setNewTemplateContent('');
+                  }}
+                  className="px-2.5 py-1 text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] rounded-md transition-colors"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={!newTemplateContent.trim() || savingTemplate}
+                  className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-[var(--color-text-on-accent)] rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-xs"
+                >
+                  {savingTemplate && <Loader2 size={11} className="animate-spin" />}
+                  <span>Lưu mẫu</span>
+                </button>
+              </div>
+            </form>
+          )}
+
+          <div className="overflow-y-auto space-y-1 pr-0.5 max-h-56">
+            {!templatesLoaded ? (
+              <div className="flex items-center justify-center py-4 text-[var(--color-text-muted)] gap-1.5">
+                <Loader2 size={13} className="animate-spin" />
+                <span>Đang tải mẫu câu...</span>
+              </div>
+            ) : templateLoadError ? (
+              <div className="text-center py-4 px-2 space-y-2 select-none">
+                <p className="text-xs text-[var(--color-danger)] leading-relaxed">{templateLoadError}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTemplatesLoaded(false);
+                    loadTemplates();
+                  }}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 rounded-md transition-colors"
+                >
+                  <RefreshCw size={12} strokeWidth={1.75} />
+                  <span>Thử lại</span>
+                </button>
+              </div>
+            ) : templates.length === 0 ? (
+              <div className="text-center py-4 text-[var(--color-text-muted)]">
+                Chưa có mẫu câu nào. Bấm <b>"+ Thêm mẫu"</b> để tạo câu mới.
+              </div>
+            ) : (
+              templates.map((tpl) => {
+                const templateText = typeof tpl === 'string' ? tpl : tpl.content;
+                const templateId = typeof tpl === 'string' ? tpl : tpl.id;
+                const isDeleting = deletingTemplateId === templateId;
+
+                return (
+                  <div
+                    key={templateId}
+                    className="group flex items-center justify-between gap-2 p-2 hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] rounded-lg transition-colors text-xs cursor-pointer"
+                    onClick={() => chooseTemplate(templateText)}
+                  >
+                    <span className="flex-1 text-left line-clamp-2 leading-relaxed">{templateText}</span>
+                    <button
+                      type="button"
+                      disabled={isDeleting}
+                      onClick={(e) => handleDeleteTemplate(e, templateId)}
+                      className="opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 text-[var(--color-text-muted)] hover:text-[var(--color-danger)] p-1 rounded hover:bg-[var(--color-danger)]/10 transition-all shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-danger)]/40"
+                      title="Xóa mẫu câu này"
+                    >
+                      {isDeleting ? (
+                        <Loader2 size={13} className="animate-spin text-[var(--color-danger)]" />
+                      ) : (
+                        <Trash2 size={13} strokeWidth={1.75} />
+                      )}
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       )}
 

@@ -3,6 +3,36 @@ import MessageBubble from './MessageBubble.jsx';
 import { MessageSquare, RefreshCw } from 'lucide-react';
 import { collapseMessengerMediaCompanions } from '../utils/messageDedup.js';
 
+const AVATAR_COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#ec4899', '#f97316', '#14b8a6', '#6366f1', '#ef4444'];
+
+function getMessageDateKey(msg) {
+  if (!msg) return null;
+  const ts = Number(msg.timestamp_ms);
+  const date = new Date(Number.isFinite(ts) && ts > 0 ? ts : (msg.created_at || msg.time || 0));
+  if (Number.isNaN(date.getTime()) || date.getTime() === 0) return null;
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function formatDateSeparatorLabel(msg) {
+  if (!msg) return '';
+  const ts = Number(msg.timestamp_ms);
+  const date = new Date(Number.isFinite(ts) && ts > 0 ? ts : (msg.created_at || msg.time || 0));
+  if (Number.isNaN(date.getTime()) || date.getTime() === 0) return '';
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+
+  if (date.toDateString() === today.toDateString()) return 'Hôm nay';
+  if (date.toDateString() === yesterday.toDateString()) return 'Hôm qua';
+
+  return date.toLocaleDateString('vi-VN', {
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric'
+  });
+}
+
 export default function MessageList({ messages = [], activeThread, onSyncThread, onRetryMessage, onViewportScroll, historySyncing = false }) {
   const containerRef = useRef(null);
   const previousThreadIdRef = useRef(null);
@@ -172,12 +202,27 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
             )}
           </div>
         ) : (
-          <div className="py-2 space-y-4">
+          <div className="py-2 space-y-1.5">
             {displayMessages.map((msg, index) => {
+              const currentDateKey = getMessageDateKey(msg);
+              const prevDateKey = index > 0 ? getMessageDateKey(displayMessages[index - 1]) : null;
+              const showDateDivider = currentDateKey && currentDateKey !== prevDateKey;
+
               return (
-                <div key={msg.id || msg.client_message_id || `${msg.fb_message_id}-${msg.created_at || msg.time || index}`}>
-                  <MessageBubble msg={msg} activeThread={activeThread} onRetry={onRetryMessage} />
-                </div>
+                <React.Fragment key={msg.id || msg.client_message_id || `${msg.fb_message_id}-${msg.created_at || msg.time || index}`}>
+                  {showDateDivider && (
+                    <div className="flex items-center gap-3 my-4 select-none">
+                      <div className="flex-1 h-px bg-[var(--color-border)]/60" />
+                      <span className="text-[11px] font-medium text-[var(--color-text-muted)] px-3 py-0.5 rounded-full bg-[var(--color-bg-panel)] border border-[var(--color-border)] shadow-xs capitalize">
+                        {formatDateSeparatorLabel(msg)}
+                      </span>
+                      <div className="flex-1 h-px bg-[var(--color-border)]/60" />
+                    </div>
+                  )}
+                  <div>
+                    <MessageBubble msg={msg} activeThread={activeThread} onRetry={onRetryMessage} />
+                  </div>
+                </React.Fragment>
               );
             })}
           </div>

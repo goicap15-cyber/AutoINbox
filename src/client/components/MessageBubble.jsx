@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { AlertTriangle, Check, CheckCheck, RefreshCw, Loader2, Phone, Video, PhoneMissed, PhoneCall, PhoneIncoming } from 'lucide-react';
 import MediaViewer from './MediaViewer.jsx';
 
@@ -19,6 +19,7 @@ function formatDisplayTime(value) {
 }
 
 export default function MessageBubble({ msg, activeThread, onRetry }) {
+  const [isTimePinned, setIsTimePinned] = useState(false);
   const isOutgoing = Boolean(msg.is_outgoing || msg.from === 'me' || msg.sender_type === 'staff' || msg.sender_type === 'ai');
   const isUnsent = Boolean(msg.is_unsent || msg.unsent);
   const content = msg.content || msg.text || msg.message || '';
@@ -55,7 +56,10 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   if (!content && !hasMedia && !isUnsent) return null;
 
   return (
-    <div className={`flex ${isOutgoing ? 'justify-end' : 'justify-start'} items-end gap-2`}>
+    <div
+      onClick={() => setIsTimePinned(prev => !prev)}
+      className={`group flex ${isOutgoing ? 'justify-end' : 'justify-start'} items-end gap-2 cursor-pointer select-none`}
+    >
       {!isOutgoing && (
         <div className="relative flex-shrink-0">
           {avatarUrl ? (
@@ -103,14 +107,28 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
           ) : (
             <>
               <MediaViewer mediaType={msg.media_type} mediaUrl={msg.media_url} localMediaPath={msg.local_media_path} />
-              {visibleContent && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words ${hasMedia ? 'mt-1.5' : ''}`}>{visibleContent}</p>}
+              {visibleContent && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words select-text ${hasMedia ? 'mt-1.5' : ''}`}>{visibleContent}</p>}
             </>
           )}
         </div>
 
-        <div className={`flex items-center gap-1 mt-1 text-xs text-[var(--color-text-muted)] ${isOutgoing ? 'justify-end' : 'justify-start'}`}>
+        <div
+          className={`flex items-center gap-1 text-xs text-[var(--color-text-muted)] transition-all duration-200 ease-out overflow-hidden ${
+            isTimePinned || status === 'sending' || status === 'pending' || status === 'failed'
+              ? 'max-h-6 opacity-100 mt-1 translate-y-0'
+              : 'max-h-0 opacity-0 mt-0 -translate-y-1 group-hover:max-h-6 group-hover:opacity-100 group-hover:mt-1 group-hover:translate-y-0'
+          } ${isOutgoing ? 'justify-end' : 'justify-start'}`}
+        >
           {isOutgoing && <span className="font-medium">{senderName}</span>}
-          {displayTime && <time className="font-mono" dateTime={msg.created_at || undefined}>{displayTime}</time>}
+          {displayTime && (
+            <time
+              className="font-mono"
+              title={new Date(Number(msg.timestamp_ms) || msg.created_at || 0).toLocaleString('vi-VN')}
+              dateTime={msg.created_at || undefined}
+            >
+              {displayTime}
+            </time>
+          )}
           {isOutgoing && (status === 'sending' || status === 'pending') && (
             <span className="inline-flex items-center gap-1">
               <Loader2 size={12} className="animate-spin text-[var(--color-accent)]" />

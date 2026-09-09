@@ -806,7 +806,7 @@ function enqueueCampaignMessage({ campaign, recipient, attempt, content, attachm
     error.code = 'SOURCE_UNAVAILABLE';
     throw error;
   }
-  if (CampaignRepository.countAccountSentToday(recipient.account_id) >= config.accountDailyCap) {
+  if (CampaignRepository.countAccountSentToday(recipient.account_id, db, { excludeAttemptId: attempt?.id }) >= config.accountDailyCap) {
     const error = new Error("Tài khoản đã đạt giới hạn gửi trong ngày");
     error.code = "SEND_LIMIT_REACHED";
     throw error;
@@ -3453,6 +3453,62 @@ app.delete('/api/lead-statuses/:id', (req, res) => {
   });
   const unassignedCount = txn();
   res.json({ success: true, unassigned_count: unassignedCount });
+});
+
+// Quick Templates — staff-created canned responses saved in SQLite
+app.get('/api/quick-templates', (req, res) => {
+  try {
+    const templates = db.prepare('SELECT id, title, content, sort_order, created_at FROM quick_templates ORDER BY sort_order ASC, id ASC').all();
+    res.json(templates);
+  } catch (error) {
+    console.error('[QuickTemplates] Get all failed:', error);
+    res.status(500).json({ error: 'Không thể lấy danh sách mẫu câu.' });
+  }
+});
+
+app.post('/api/quick-templates', (req, res) => {
+  try {
+    const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim() : null;
+    if (!content) {
+      return res.status(400).json({ error: 'Nội dung mẫu câu không được để trống.' });
+    }
+    if (content.length > 2000) {
+      return res.status(400).json({ error: 'Nội dung mẫu câu không được vượt quá 2000 ký tự.' });
+    }
+    const allTemplates = db.prepare('SELECT id, content FROM quick_templates').all();
+    const normalizedNew = content.toLowerCase();
+    const isDuplicate = allTemplates.some(t => String(t.content || '').trim().toLowerCase() === normalizedNew);
+    if (isDuplicate) {
+      return res.status(400).json({ error: 'Mẫu câu này đã tồn tại trong danh sách.' });
+    }
+    const maxOrderRow = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM quick_templates').get();
+    const nextOrder = (maxOrderRow?.max_order || 0) + 1;
+    const stmt = db.prepare('INSERT INTO quick_templates (title, content, sort_order) VALUES (?, ?, ?)');
+    const info = stmt.run(title, content, nextOrder);
+    const created = db.prepare('SELECT id, title, content, sort_order, created_at FROM quick_templates WHERE id = ?').get(info.lastInsertRowid);
+    res.json({ success: true, template: created });
+  } catch (error) {
+    console.error('[QuickTemplates] Create failed:', error);
+    res.status(500).json({ error: 'Không thể tạo mẫu câu mới.' });
+  }
+});
+
+app.delete('/api/quick-templates/:id', (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'id mẫu câu không hợp lệ' });
+    }
+    const result = db.prepare('DELETE FROM quick_templates WHERE id = ?').run(id);
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Không tìm thấy mẫu câu để xóa.' });
+    }
+    res.json({ success: true, deleted: true });
+  } catch (error) {
+    console.error('[QuickTemplates] Delete failed:', error);
+    res.status(500).json({ error: 'Không thể xóa mẫu câu.' });
+  }
 });
 
 // Avatar serving - serves local avatar files

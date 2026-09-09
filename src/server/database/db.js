@@ -838,6 +838,35 @@ const migrations = [
         console.log('[DB] Migration v56: threads.inbox_folder already exists, skipped.');
       }
     }
+  },
+  {
+    version: 57,
+    name: 'create_quick_templates_table',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS quick_templates (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT,
+          content TEXT NOT NULL,
+          sort_order INTEGER DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_quick_templates_sort ON quick_templates(sort_order, id);
+      `);
+      const count = db.prepare('SELECT COUNT(*) as count FROM quick_templates').get().count;
+      if (count === 0) {
+        const insert = db.prepare('INSERT INTO quick_templates (content, sort_order) VALUES (?, ?)');
+        const defaults = [
+          'Dạ chào bạn! Shop có thể hỗ trợ gì cho bạn ạ?',
+          'Sản phẩm hiện đang có sẵn hàng, shop ship ngay trong ngày nha anh/chị!',
+          'Bạn cho shop xin SĐT và địa chỉ để tạo đơn ngay nhé ạ!',
+          'Shop xin cảm ơn và chúc bạn một ngày tốt lành!'
+        ];
+        defaults.forEach((content, idx) => insert.run(content, idx + 1));
+      }
+      console.log('[DB] Migration v57: Created quick_templates table and seeded defaults.');
+    }
   }
 ];
 

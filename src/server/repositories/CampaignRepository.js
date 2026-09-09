@@ -367,7 +367,12 @@ class CampaignRepository {
     `).get(campaignId);
   }
 
-  static createAttempt(recipientId, messageId, database = getDefaultDb()) {
+  static createAttempt(recipientId, messageId, database = getDefaultDb(), options = {}) {
+    if (database && typeof database.prepare !== 'function') {
+      const temp = database;
+      database = (options && typeof options.prepare === 'function') ? options : getDefaultDb();
+      options = temp;
+    }
     const transaction = database.transaction(() => {
       const recipient = database.prepare('SELECT * FROM campaign_recipients WHERE id = ?').get(recipientId);
       if (!recipient) throw new Error('RECIPIENT_NOT_FOUND');
@@ -383,6 +388,15 @@ class CampaignRepository {
         WHERE id = ? AND status = 'pending'
       `).run(attemptNumber, recipientId);
       if (!claimed.changes) throw new Error('RECIPIENT_NOT_PENDING');
+
+      const dailyCap = Number(options?.accountDailyCap || process.env.CAMPAIGN_ACCOUNT_DAILY_CAP || 50);
+      const sentToday = this.countAccountSentToday(recipient.account_id, database);
+      if (sentToday >= dailyCap) {
+        const error = new Error('Tài khoản đã đạt giới hạn gửi trong ngày');
+        error.code = 'SEND_LIMIT_REACHED';
+        throw error;
+      }
+
       const hasAttachment = database.prepare(`
         SELECT 1 AS found FROM campaign_attachments
         WHERE campaign_message_id = ? AND validation_status = 'valid' LIMIT 1
@@ -601,12 +615,28 @@ class CampaignRepository {
     return database.prepare('SELECT * FROM campaign_audit_events WHERE id = ?').get(result.lastInsertRowid);
   }
 
-  static countAccountSentToday(accountId, database = getDefaultDb()) {
-    return database.prepare(`
-      SELECT COUNT(*) AS count
-      FROM campaign_recipients
-      WHERE account_id = ? AND status = 'sent' AND date(sent_at) = date('now')
-    `).get(accountId).count;
+  static countAccountSentToday(accountId, database = getDefaultDb(), options = {}) {
+    const excludeAttemptId = options?.excludeAttemptId || null;
+    const query = excludeAttemptId
+      ? `SELECT COUNT(*) AS count
+         FROM campaign_attempts ca
+         JOIN campaign_recipients cr ON cr.id = ca.campaign_recipient_id
+         WHERE cr.account_id = ?
+           AND ca.id != ?
+           AND ca.status IN ('confirmed', 'dispatched', 'unknown', 'created')
+           AND date(COALESCE(ca.confirmed_at, ca.created_at)) = date('now')`
+      : `SELECT COUNT(*) AS count
+         FROM campaign_attempts ca
+         JOIN campaign_recipients cr ON cr.id = ca.campaign_recipient_id
+         WHERE cr.account_id = ?
+           AND ca.status IN ('confirmed', 'dispatched', 'unknown', 'created')
+           AND date(COALESCE(ca.confirmed_at, ca.created_at)) = date('now')`;
+
+    const row = excludeAttemptId
+      ? database.prepare(query).get(accountId, excludeAttemptId)
+      : database.prepare(query).get(accountId);
+
+    return row?.count || 0;
   }
 
   static getAttachment(attachmentId, database = getDefaultDb()) {

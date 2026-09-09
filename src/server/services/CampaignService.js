@@ -145,9 +145,7 @@ class CampaignService {
     if (!['asc', 'desc'].includes(direction)) {
       throw new CampaignError(CAMPAIGN_ERROR_CODES.INVALID_ORDER, 'direction phải là asc hoặc desc.');
     }
-    const normalizedMessages = Array.isArray(messages) && messages.length
-      ? messages.slice(0, 5).map((item) => ({ text_content: normalizedText(item?.text_content) }))
-      : [{ text_content: normalizedText(message) }];
+    const normalizedMessages = this.validateAndNormalizeMessages(messages, message);
     const recipients = CampaignEligibilityService.inspectThreads(ids, database, {
       getConnection: typeof options.getConnection === "function" ? options.getConnection : null
     });
@@ -177,6 +175,45 @@ class CampaignService {
     }, database);
   }
 
+  static validateAndNormalizeMessages(messages, fallbackSingleMessage = null) {
+    if (messages !== undefined) {
+      if (!Array.isArray(messages) || messages.length === 0) {
+        throw new CampaignError(
+          CAMPAIGN_ERROR_CODES.MESSAGE_INVALID,
+          'Chiến dịch cần ít nhất 1 tin nhắn.'
+        );
+      }
+      if (messages.length > 5) {
+        throw new CampaignError(
+          CAMPAIGN_ERROR_CODES.SEND_LIMIT_REACHED,
+          'Một chiến dịch chỉ được có tối đa 5 tin nhắn.',
+          { maximum: 5, provided: messages.length }
+        );
+      }
+      return messages.map((item, index) => {
+        const text = typeof item?.text_content === 'string'
+          ? item.text_content.trim()
+          : (typeof item === 'string' ? item.trim() : '');
+        if (text.length > 2000) {
+          throw new CampaignError(
+            CAMPAIGN_ERROR_CODES.MESSAGE_INVALID,
+            `Tin nhắn số ${index + 1} không được vượt quá 2000 ký tự.`
+          );
+        }
+        return { text_content: text };
+      });
+    }
+
+    const text = typeof fallbackSingleMessage === 'string' ? fallbackSingleMessage.trim() : '';
+    if (text.length > 2000) {
+      throw new CampaignError(
+        CAMPAIGN_ERROR_CODES.MESSAGE_INVALID,
+        'Nội dung tin nhắn không được vượt quá 2000 ký tự.'
+      );
+    }
+    return [{ text_content: text }];
+  }
+
   static updateDraft(campaignId, payload = {}, database = getDefaultDb(), options = {}) {
     const campaign = CampaignRepository.getCampaign(campaignId, database);
     if (!campaign) {
@@ -198,8 +235,8 @@ class CampaignService {
     if (!['asc', 'desc'].includes(direction)) {
       throw new CampaignError(CAMPAIGN_ERROR_CODES.INVALID_ORDER, 'direction phải là asc hoặc desc.');
     }
-    const messages = Array.isArray(payload.messages)
-      ? payload.messages.slice(0, 5).map((item) => ({ text_content: normalizedText(item?.text_content) }))
+    const messages = payload.messages !== undefined
+      ? this.validateAndNormalizeMessages(payload.messages)
       : undefined;
     const phoneCaptureStatusId = payload.phone_capture_status_id === undefined
       ? campaign.phone_capture_status_id
@@ -403,14 +440,54 @@ class CampaignService {
       throw new CampaignError(CAMPAIGN_ERROR_CODES.QUIET_HOURS_ACTIVE, 'Campaign đang trong quiet hours.');
     }
     const accounts = [...new Set(planned.map((recipient) => recipient.account_id))];
+    const messageCount = Math.max(1, campaign.messages?.length || 1);
     for (const accountId of accounts) {
       const sentToday = CampaignRepository.countAccountSentToday(accountId, database);
-      const plannedForAccount = planned.filter((recipient) => recipient.account_id === accountId).length;
-      if (sentToday + plannedForAccount > config.accountDailyCap) {
+      const otherRunningRow = database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM campaign_recipients cr
+        JOIN campaigns c ON c.id = cr.campaign_id
+        JOIN campaign_messages cm ON cm.campaign_id = c.id
+        WHERE cr.account_id = ?
+          AND c.id != ?
+          AND c.status IN ('running', 'pausing')
+          AND cr.eligibility_status = 'eligible'
+          AND cr.status IN ('pending', 'processing')
+          AND NOT EXISTS (
+            SELECT 1 FROM campaign_attempts ca
+            WHERE ca.campaign_recipient_id = cr.id AND ca.campaign_message_id = cm.id
+              AND ca.status IN ('confirmed', 'dispatched', 'unknown', 'created')
+          )
+      `).get(accountId, campaign.id);
+      const otherRunning = otherRunningRow?.count || 0;
+
+      const plannedRow = database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM campaign_recipients cr
+        JOIN campaign_messages cm ON cm.campaign_id = cr.campaign_id
+        WHERE cr.campaign_id = ?
+          AND cr.account_id = ?
+          AND cr.eligibility_status = 'eligible'
+          AND cr.status IN ('pending', 'processing')
+          AND NOT EXISTS (
+            SELECT 1 FROM campaign_attempts ca
+            WHERE ca.campaign_recipient_id = cr.id AND ca.campaign_message_id = cm.id
+              AND ca.status IN ('confirmed', 'dispatched', 'unknown', 'created')
+          )
+      `).get(campaign.id, accountId);
+      const plannedForAccount = plannedRow?.count || 0;
+
+      if (sentToday + otherRunning + plannedForAccount > config.accountDailyCap) {
         throw new CampaignError(
           CAMPAIGN_ERROR_CODES.SEND_LIMIT_REACHED,
           'Account daily cap không đủ cho campaign.',
-          { account_id: accountId, sent_today: sentToday, planned: plannedForAccount, cap: config.accountDailyCap }
+          {
+            account_id: accountId,
+            sent_today: sentToday,
+            other_running: otherRunning,
+            planned: plannedForAccount,
+            cap: config.accountDailyCap
+          }
         );
       }
     }

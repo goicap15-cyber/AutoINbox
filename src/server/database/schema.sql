@@ -499,3 +499,14 @@ CREATE INDEX IF NOT EXISTS idx_campaign_audit_campaign ON campaign_audit_events(
 CREATE INDEX IF NOT EXISTS idx_campaign_attachments_message ON campaign_attachments(campaign_message_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_attachments_checksum ON campaign_attachments(checksum);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_message_queue_idempotency ON message_queue(idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS quick_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT,
+    content TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_quick_templates_sort ON quick_templates(sort_order, id);
+

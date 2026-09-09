@@ -30,7 +30,8 @@ class CampaignRunner {
     sleep,
     pollIntervalMs,
     confirmationTimeoutMs,
-    database
+    database,
+    accountDailyCap
   } = {}) {
     if (enqueueMessage) this.enqueueMessage = enqueueMessage;
     if (emit) this.emit = emit;
@@ -40,6 +41,9 @@ class CampaignRunner {
     if (Number.isFinite(pollIntervalMs)) this.pollIntervalMs = Math.max(1, pollIntervalMs);
     if (Number.isFinite(confirmationTimeoutMs)) {
       this.confirmationTimeoutMs = Math.max(10, confirmationTimeoutMs);
+    }
+    if (Number.isFinite(accountDailyCap)) {
+      this.accountDailyCap = accountDailyCap;
     }
   }
 
@@ -51,6 +55,15 @@ class CampaignRunner {
         eventType,
         payload,
         recipientId,
+        this.database || undefined,
+        options
+      );
+    }
+    if (method === 'createAttempt') {
+      const [recipientId, messageId, options = {}] = args;
+      return CampaignRepository.createAttempt(
+        recipientId,
+        messageId,
         this.database || undefined,
         options
       );
@@ -220,7 +233,8 @@ class CampaignRunner {
         attempt = this.repositoryCall(
           'createAttempt',
           recipient.id,
-          recipient.campaign_message_id
+          recipient.campaign_message_id,
+          { accountDailyCap: this.accountDailyCap }
         );
         // Spec 040: a message may have a manifest (several files, or one
         // folder ZIP) instead of/alongside spec 039's single attachment.
@@ -266,6 +280,45 @@ class CampaignRunner {
         const processingRow = this.repositoryCall('getProcessingRecipient', campaignId);
         if (processingRow) this.finishProcessingAttempt(campaign, processingRow, result, false);
       } catch (error) {
+        const isDailyCapReached = error?.code === 'SEND_LIMIT_REACHED' ||
+          error?.message === 'SEND_LIMIT_REACHED' ||
+          (typeof error?.message === 'string' && (
+            error.message.includes('SEND_LIMIT_REACHED') ||
+            error.message.includes('giới hạn gửi trong ngày') ||
+            error.message.includes('giới hạn gửi')
+          ));
+
+        if (isDailyCapReached) {
+          if (attempt) {
+            this.finishAttempt(
+              attempt.id,
+              'failed',
+              'SEND_LIMIT_REACHED',
+              error.message
+            );
+            this.repositoryCall(
+              'addAudit',
+              campaignId,
+              'delivery_failed',
+              { attempt_id: attempt.id, error: error.message, error_code: 'SEND_LIMIT_REACHED' },
+              recipient.id
+            );
+            this.repositoryCall('resetRecipientForRetry', recipient.id);
+          }
+          this.repositoryCall('updateCampaignStatus', campaignId, ['running', 'pausing'], 'paused');
+          this.repositoryCall(
+            'addAudit',
+            campaignId,
+            'paused',
+            {
+              reason: 'SEND_LIMIT_REACHED',
+              message: error.message || 'Tài khoản đã đạt giới hạn gửi trong ngày'
+            }
+          );
+          this.emitState(campaignId, recipient.id);
+          return;
+        }
+
         if (attempt) {
           this.finishAttempt(
             attempt.id,
@@ -280,6 +333,17 @@ class CampaignRunner {
             { attempt_id: attempt.id, error: error.message, error_code: error.code || 'DISPATCH_FAILED' },
             recipient.id
           );
+        } else {
+          this.repositoryCall(
+            'addAudit',
+            campaignId,
+            'delivery_failed',
+            { error: error.message, error_code: error.code || 'ATTEMPT_CREATION_FAILED' },
+            recipient.id
+          );
+          this.repositoryCall('updateCampaignStatus', campaignId, ['running', 'pausing'], 'paused');
+          this.emitState(campaignId, recipient.id);
+          return;
         }
       }
 
