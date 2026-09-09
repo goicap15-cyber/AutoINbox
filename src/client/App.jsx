@@ -760,6 +760,27 @@ export default function App() {
       loadAccounts();
     });
 
+    socket.on('ACCOUNT_REMOVED', ({ account_id }) => {
+      const removedAccountId = String(account_id || '');
+      const removedThreadIds = new Set(
+        threadsRef.current
+          .filter((thread) => String(thread.account_id || '') === removedAccountId)
+          .map((thread) => String(thread.id))
+      );
+      setAccounts((previous) => {
+        const nextAccounts = previous.filter((account) => String(account.id) !== removedAccountId);
+        accountsRef.current = nextAccounts;
+        return nextAccounts;
+      });
+      setThreads((previous) => previous.filter((thread) => String(thread.account_id || '') !== removedAccountId));
+      setMessages((previous) => Object.fromEntries(
+        Object.entries(previous).filter(([threadId]) => !removedThreadIds.has(String(threadId)))
+      ));
+      setActiveThreadId((previous) => removedThreadIds.has(String(previous || '')) ? null : previous);
+      loadThreadsRef.current();
+      loadWaitingCount();
+    });
+
     socket.on('FACEBOOK_SYNC_STARTED', ({ account_id, tab_count }) => {
       if (String(requestedFacebookSyncRef.current || '') !== String(account_id || '')) return;
       setAccountSyncing({ accountId: String(account_id), tabCount: Math.max(0, Number(tab_count) || 0) });
@@ -842,6 +863,7 @@ export default function App() {
       socket.off('EXTENSION_CONNECTION_CHANGED');
       socket.off('MESSAGE_UNSENT');
       socket.off('ACCOUNT_STATUS_CHANGED');
+      socket.off('ACCOUNT_REMOVED');
       socket.off('FACEBOOK_SYNC_STARTED');
       socket.off('AI_PAUSED');
       socket.off('THREAD_ASSIGNED');

@@ -3126,12 +3126,20 @@ app.delete('/api/accounts/:id', (req, res) => {
 // Threads
 app.get('/api/threads/waiting-count', (req, res) => {
   try {
+    // Count only Facebook accounts that this signed-in user can access. This
+    // keeps the badge identical to the WAITING conversation list and ignores
+    // stale or unassigned account data.
+    const accessibleAccountIds = enterpriseAccess.listAccounts(req.user).map((account) => String(account.id));
+    res.setHeader('Cache-Control', 'no-store');
+    if (accessibleAccountIds.length === 0) return res.json({ count: 0 });
+    const placeholders = accessibleAccountIds.map(() => '?').join(',');
     const row = db.prepare(`
       SELECT COUNT(*) as count FROM threads t
       JOIN accounts a ON a.id = t.account_id
       WHERE COALESCE(t.inbox_folder, 'INBOX') IN ('MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')
       AND t.archived_at IS NULL
-    `).get();
+      AND t.account_id IN (${placeholders})
+    `).get(...accessibleAccountIds);
     res.json({ count: row?.count || 0 });
   } catch (error) {
     res.json({ count: 0 });
