@@ -1,6 +1,14 @@
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
 const IMAGE_MIME_TYPES = Object.freeze(['image/jpeg', 'image/png', 'image/webp']);
-const FILE_MIME_TYPES = Object.freeze(['application/pdf']);
+const FILE_MIME_TYPES = Object.freeze([
+  'application/pdf', 'text/plain', 'text/csv', 'application/json', 'application/xml',
+  'text/html', 'text/markdown', 'application/zip', 'application/vnd.rar',
+  'application/x-7z-compressed', 'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'audio/mpeg', 'audio/wav', 'video/mp4', 'video/quicktime', 'video/x-msvideo'
+]);
 
 class RichMessageCapabilityError extends Error {
   constructor(code, message, httpStatus = 400) {
@@ -18,12 +26,12 @@ class RichMessageCapabilityService {
       maxBytes: Number(process.env.RICH_MESSAGE_MAX_BYTES) || DEFAULT_MAX_BYTES,
       adapters: {
         page_messenger: {
-          image: process.env.RICH_MESSAGE_PAGE_IMAGE_ENABLED === 'true',
-          file: process.env.RICH_MESSAGE_PAGE_FILE_ENABLED === 'true'
+          image: process.env.RICH_MESSAGE_PAGE_IMAGE_ENABLED !== 'false',
+          file: process.env.RICH_MESSAGE_PAGE_FILE_ENABLED !== 'false'
         },
         personal_messenger: {
-          image: process.env.RICH_MESSAGE_PERSONAL_IMAGE_ENABLED === 'true',
-          file: process.env.RICH_MESSAGE_PERSONAL_FILE_ENABLED === 'true'
+          image: process.env.RICH_MESSAGE_PERSONAL_IMAGE_ENABLED !== 'false',
+          file: process.env.RICH_MESSAGE_PERSONAL_FILE_ENABLED !== 'false'
         }
       }
     };

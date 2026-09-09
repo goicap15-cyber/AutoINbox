@@ -14,12 +14,12 @@ class CampaignRouteService {
       maxBytes: Number(process.env.RICH_MESSAGE_MAX_BYTES) || DEFAULT_MAX_BYTES,
       adapters: {
         page_messenger: {
-          image: process.env.RICH_MESSAGE_PAGE_IMAGE_ENABLED === 'true',
-          file: process.env.RICH_MESSAGE_PAGE_FILE_ENABLED === 'true'
+          image: process.env.RICH_MESSAGE_PAGE_IMAGE_ENABLED !== 'false',
+          file: process.env.RICH_MESSAGE_PAGE_FILE_ENABLED !== 'false'
         },
         personal_messenger: {
-          image: process.env.RICH_MESSAGE_PERSONAL_IMAGE_ENABLED === 'true',
-          file: process.env.RICH_MESSAGE_PERSONAL_FILE_ENABLED === 'true'
+          image: process.env.RICH_MESSAGE_PERSONAL_IMAGE_ENABLED !== 'false',
+          file: process.env.RICH_MESSAGE_PERSONAL_FILE_ENABLED !== 'false'
         }
       }
     };
@@ -31,9 +31,9 @@ class CampaignRouteService {
       return CampaignService.getConfig();
     } catch {
       return {
-        enabled: process.env.CAMPAIGN_FEATURE_ENABLED === 'true',
-        imageEnabled: process.env.CAMPAIGN_IMAGE_ENABLED === 'true',
-        fileEnabled: process.env.CAMPAIGN_FILE_ENABLED === 'true'
+        enabled: process.env.CAMPAIGN_FEATURE_ENABLED !== 'false',
+        imageEnabled: process.env.CAMPAIGN_IMAGE_ENABLED !== 'false',
+        fileEnabled: process.env.CAMPAIGN_FILE_ENABLED !== 'false'
       };
     }
   }

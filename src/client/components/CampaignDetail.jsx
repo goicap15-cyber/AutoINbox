@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Ban,
+  BarChart3,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
@@ -20,6 +21,7 @@ import {
 } from 'lucide-react';
 import CampaignComposer from './CampaignComposer.jsx';
 import CampaignRecipientTable from './CampaignRecipientTable.jsx';
+import CampaignResponseStatsModal from './CampaignResponseStatsModal.jsx';
 
 const labels = {
   draft: 'Nháp',
@@ -88,6 +90,7 @@ export default function CampaignDetail({ campaignId, refreshVersion = 0, onClose
   const [expandedLog, setExpandedLog] = useState(0);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState('');
+  const [responseStatsOpen, setResponseStatsOpen] = useState(false);
 
   const loadCampaign = useCallback(async () => {
     try {
@@ -112,11 +115,13 @@ export default function CampaignDetail({ campaignId, refreshVersion = 0, onClose
 
   useEffect(() => {
     const closeOnEscape = (event) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key !== 'Escape') return;
+      if (responseStatsOpen) setResponseStatsOpen(false);
+      else onClose();
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [onClose]);
+  }, [onClose, responseStatsOpen]);
 
   const runAction = async (action) => {
     setBusyAction(action);
@@ -218,6 +223,10 @@ export default function CampaignDetail({ campaignId, refreshVersion = 0, onClose
               </div>
             </div>
           </div>
+          <button type="button" onClick={() => setResponseStatsOpen(true)} aria-label="Thống kê phản hồi" title="Thống kê phản hồi" className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-600 transition-colors hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
+            <BarChart3 size={18} />
+            <span>Thống kê</span>
+          </button>
           <button type="button" onClick={loadCampaign} aria-label="Làm mới" title="Làm mới" className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-blue-50 hover:text-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300">
             <RefreshCw size={17} />
           </button>
@@ -322,6 +331,13 @@ export default function CampaignDetail({ campaignId, refreshVersion = 0, onClose
           </div>
         </main>
       </div>
+      {responseStatsOpen && (
+        <CampaignResponseStatsModal
+          campaignId={campaignId}
+          campaignName={campaign?.name}
+          onClose={() => setResponseStatsOpen(false)}
+        />
+      )}
     </div>
   );
 }

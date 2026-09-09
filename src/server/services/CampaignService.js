@@ -79,9 +79,9 @@ class CampaignService {
   static getConfig(environment = process.env) {
     const maxRecipients = parseInteger(environment.CAMPAIGN_MAX_RECIPIENTS, 50, 1, 500);
     return {
-      enabled: environment.CAMPAIGN_FEATURE_ENABLED === 'true',
-      imageEnabled: environment.CAMPAIGN_IMAGE_ENABLED === 'true',
-      fileEnabled: environment.CAMPAIGN_FILE_ENABLED === 'true',
+      enabled: environment.CAMPAIGN_FEATURE_ENABLED !== 'false',
+      imageEnabled: environment.CAMPAIGN_IMAGE_ENABLED !== 'false',
+      fileEnabled: environment.CAMPAIGN_FILE_ENABLED !== 'false',
       maxAttachmentBytes: parseInteger(environment.CAMPAIGN_MAX_FILE_BYTES, 25 * 1024 * 1024, 1, 100 * 1024 * 1024),
       testMode: environment.CAMPAIGN_TEST_MODE === 'true',
       testSourceIds: String(environment.CAMPAIGN_TEST_SOURCE_IDS || '').split(',').map((value) => value.trim()).filter(Boolean),

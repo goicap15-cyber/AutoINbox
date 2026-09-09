@@ -1,6 +1,23 @@
 // AutoChatbot FB Engine - MAIN World Interceptor
 (function() {
   if (window.__AUTOCHATBOT_INJECTED__) return;
+
+  // A newly-added account may need Facebook's encrypted-history PIN flow.
+  // Keep that setup tab pristine: wrapping Fetch/XHR/WebSocket during Secure
+  // Storage initialization can leave Facebook's dialog stuck on skeletons.
+  // sessionStorage lasts only for this tab; the later normal "Kết nối
+  // Facebook" launch receives the full interceptor as usual.
+  try {
+    const pendingFromUrl = new URL(window.location.href).searchParams.has('crm_pending_key');
+    // Do not trust the session marker on its own: it survives extension
+    // reloads and used to leave the network interceptor disabled until the
+    // operator sent an outbound message. The setup URL is authoritative.
+    if (pendingFromUrl) {
+      console.log('[FB Interceptor] Skipped during new-account secure setup.');
+      return;
+    }
+  } catch (_) {}
+
   window.__AUTOCHATBOT_INJECTED__ = true;
 
   console.log('[FB Interceptor] 🚀 MAIN World Interceptor initialized at document_start');
@@ -35,6 +52,17 @@
   // 1. Intercept Fetch API
   const originalFetch = window.fetch;
   window.fetch = async function(...args) {
+    try {
+      if (args[1]?.body) {
+        const body = args[1].body;
+        if (typeof body === 'string' && body.includes('fb_dtsg=')) {
+          const m = body.match(/fb_dtsg=([^&]+)/);
+          if (m && m[1]) {
+            window.postMessage({ type: 'FB_TOKEN_DISCOVERED', fb_dtsg: decodeURIComponent(m[1]) }, '*');
+          }
+        }
+      }
+    } catch (_) {}
     const response = await originalFetch.apply(this, args);
     try {
       const url = args[0] ? (typeof args[0] === 'string' ? args[0] : args[0].url) : '';
@@ -115,6 +143,17 @@
         const text = decoder.decode(data);
         extractMessagesFromRawText(text);
       } catch (e) {}
+    } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
+      // Chrome delivers Facebook/Messenger realtime frames as Blob by
+      // default. The old interceptor handled only string/ArrayBuffer, so
+      // genuine customer messages on an already-open socket were silently
+      // ignored until another action caused a HTTP/DOM refresh.
+      data.arrayBuffer().then((buffer) => {
+        try {
+          const text = new TextDecoder('utf-8').decode(buffer);
+          parseWebSocketData(text);
+        } catch (_) {}
+      }).catch(() => {});
     }
   }
 
@@ -146,7 +185,16 @@
       for (const item of obj) extractMessagesFromJSON(item, depth + 1);
     } else {
       for (const key of Object.keys(obj)) {
-        if (typeof obj[key] === 'object') extractMessagesFromJSON(obj[key], depth + 1);
+        const value = obj[key];
+        if (typeof value === 'object') {
+          extractMessagesFromJSON(value, depth + 1);
+        } else if (typeof value === 'string' && value.length > 1 && value.length < 100000
+          && (value[0] === '{' || value[0] === '[')) {
+          // MQTT/GraphQL envelopes commonly carry the actual message JSON in
+          // a string-valued payload. Decode only JSON-looking bounded values
+          // and retain the existing recursive depth guard.
+          try { extractMessagesFromJSON(JSON.parse(value), depth + 1); } catch (_) {}
+        }
       }
     }
   }

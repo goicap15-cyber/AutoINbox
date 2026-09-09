@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { isInvalidContactName } = require('../utils/textFilter');
 let defaultDb;
 function getDefaultDb() {
   if (!defaultDb) defaultDb = require('../database/db');
@@ -35,58 +36,71 @@ function shouldCommitDirectionFlip(stableMessageId, existingIsOutgoing, proposed
 
 class ConversationRepository {
   static upsertThread(threadData, database = getDefaultDb()) {
-    const { id, account_id, thread_url, contact_name, last_message, is_unread, source_id } = threadData;
+    const { id, account_id, thread_url, contact_name, last_message, is_unread, source_id, inbox_folder } = threadData;
     const external_thread_id = String(threadData.external_thread_id || threadData.thread_id || id);
     const preferredId = String(id || external_thread_id);
+    const cleanIncomingName = isInvalidContactName(contact_name) ? null : contact_name.trim();
+    const normalizedInboxFolder = ['INBOX', 'MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(String(inbox_folder || '').trim())
+      ? String(inbox_folder).trim()
+      : null;
 
     let existing = null;
     if (source_id && external_thread_id) {
       existing = database.prepare(`
-        SELECT id FROM threads
+        SELECT id, contact_name FROM threads
         WHERE source_id = ? AND COALESCE(external_thread_id, id) = ?
       `).get(source_id, external_thread_id);
     }
     if (!existing && account_id && external_thread_id) {
       existing = database.prepare(`
-        SELECT id FROM threads
+        SELECT id, contact_name FROM threads
         WHERE account_id = ? AND COALESCE(external_thread_id, id) = ?
       `).get(account_id, external_thread_id);
     }
     if (!existing) {
-      existing = database.prepare('SELECT id FROM threads WHERE id = ?').get(preferredId);
+      existing = database.prepare('SELECT id, contact_name FROM threads WHERE id = ?').get(preferredId);
     }
 
     if (existing) {
+      const existingIsInvalid = isInvalidContactName(existing.contact_name);
+      let targetName = existing.contact_name;
+      if (cleanIncomingName && cleanIncomingName !== 'Khách hàng') {
+        targetName = cleanIncomingName;
+      } else if (existingIsInvalid || !existing.contact_name) {
+        targetName = cleanIncomingName || 'Khách hàng';
+      }
+
       database.prepare(`
         UPDATE threads
         SET external_thread_id = COALESCE(external_thread_id, ?),
             source_id = COALESCE(?, source_id),
-            contact_name = CASE
-              WHEN ? IS NULL THEN contact_name
-              WHEN ? != 'Khách hàng' THEN ?
-              WHEN contact_name IS NULL THEN ?
-              ELSE contact_name
-            END,
+            contact_name = ?,
             thread_url = COALESCE(?, thread_url),
             last_message = COALESCE(?, last_message),
-            is_unread = COALESCE(?, is_unread)
+            is_unread = COALESCE(?, is_unread),
+            inbox_folder = CASE
+              WHEN inbox_folder = 'INBOX' AND ? IN ('MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE') THEN inbox_folder
+              ELSE COALESCE(?, inbox_folder)
+            END
         WHERE id = ?
       `).run(
           external_thread_id, 
           source_id || null, 
-          contact_name, contact_name, contact_name, contact_name, 
+          targetName,
           thread_url, 
           last_message, 
           is_unread === undefined ? null : (is_unread ? 1 : 0), 
+          normalizedInboxFolder,
+          normalizedInboxFolder,
           existing.id
       );
       return this.getThread(existing.id, database);
     }
 
     database.prepare(`
-      INSERT INTO threads (id, external_thread_id, account_id, source_id, thread_url, contact_name, last_message, is_unread)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(preferredId, external_thread_id, account_id, source_id || null, thread_url, contact_name, last_message, is_unread === undefined ? 1 : (is_unread ? 1 : 0));
+      INSERT INTO threads (id, external_thread_id, account_id, source_id, thread_url, contact_name, last_message, is_unread, inbox_folder)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(preferredId, external_thread_id, account_id, source_id || null, thread_url, cleanIncomingName || 'Khách hàng', last_message, is_unread === undefined ? 1 : (is_unread ? 1 : 0), normalizedInboxFolder || 'INBOX');
     return this.getThread(preferredId, database);
   }
 
@@ -112,6 +126,21 @@ class ConversationRepository {
 
   static touchThread(threadId, lastMessage, database = getDefaultDb()) {
     database.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = CURRENT_TIMESTAMP WHERE id = ?').run(lastMessage, threadId);
+  }
+
+  // History crawling must not make an old conversation look newly active.
+  // Advance the sidebar only when the observed Facebook timestamp is newer
+  // than the timestamp already stored for the thread.
+  static touchThreadFromHistory(threadId, lastMessage, observedTimestampMs, database = getDefaultDb()) {
+    const timestampMs = Number(observedTimestampMs || 0);
+    if (!Number.isFinite(timestampMs) || timestampMs <= 0) return false;
+    const thread = database.prepare('SELECT last_activity FROM threads WHERE id = ?').get(threadId);
+    if (!thread) return false;
+    const currentTimestampMs = Date.parse(thread.last_activity || '') || 0;
+    if (currentTimestampMs >= timestampMs) return false;
+    database.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = ? WHERE id = ?')
+      .run(lastMessage, new Date(timestampMs).toISOString(), threadId);
+    return true;
   }
 
   // Writes a resolved avatar to the contacts row only when no real avatar is
@@ -148,24 +177,28 @@ class ConversationRepository {
     return database.prepare(`
       SELECT * FROM messages
       WHERE thread_id = ?
-      ORDER BY timestamp_ms DESC, created_at DESC, id DESC
+      ORDER BY COALESCE(sequence_order, id) DESC, id DESC
       LIMIT ? OFFSET ?
     `).all(threadId, limit, offset).reverse();
   }
 
   static saveMessagesTransaction(threadId, messages = [], database = getDefaultDb()) {
     const insertMsg = database.prepare(`
-      INSERT INTO messages (thread_id, fb_message_id, sender_id, content, timestamp_ms, timestamp_source, is_outgoing, direction_status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (thread_id, fb_message_id, sender_id, content, media_type, media_url, timestamp_ms, timestamp_source, is_outgoing, sender_role, sequence_order, direction_status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(fb_message_id) DO UPDATE SET
         content = CASE WHEN excluded.content IS NOT NULL AND excluded.content <> '' THEN excluded.content ELSE messages.content END,
-        timestamp_ms = CASE WHEN excluded.timestamp_ms > messages.timestamp_ms THEN excluded.timestamp_ms ELSE messages.timestamp_ms END,
-        timestamp_source = CASE WHEN excluded.timestamp_source <> 'fallback' THEN excluded.timestamp_source ELSE messages.timestamp_source END,
-        created_at = CASE WHEN excluded.timestamp_ms > 0 THEN excluded.created_at ELSE messages.created_at END,
+        media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
+        media_url = COALESCE(excluded.media_url, messages.media_url),
+        timestamp_ms = excluded.timestamp_ms,
+        timestamp_source = excluded.timestamp_source,
+        created_at = excluded.created_at,
         is_outgoing = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.is_outgoing ELSE messages.is_outgoing END,
+        sender_role = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.sender_role ELSE messages.sender_role END,
+        sequence_order = CASE WHEN excluded.sequence_order IS NOT NULL THEN excluded.sequence_order ELSE messages.sequence_order END,
         direction_status = CASE WHEN excluded.direction_status = 'confirmed' THEN 'confirmed' ELSE messages.direction_status END
     `);
-    const rank = { facebook_payload: 6, facebook_label: 5, dom_order: 5, facebook_dom: 4, realtime_fallback: 3, sync: 3, fallback: 2, unknown: 1 };
+    const rank = { facebook_payload: 6, facebook_timestamp: 6, facebook_label: 5, dom_clock_order: 5, dom_order: 5, facebook_dom: 4, realtime_fallback: 3, sync: 3, fallback: 2, unknown: 1 };
     const transaction = database.transaction((msgs) => {
       const result = { insertedIds: [], updatedIds: [], skippedCount: 0 };
       for (const msg of msgs) {
@@ -174,30 +207,100 @@ class ConversationRepository {
           ? 'pending'
           : 'confirmed';
         const senderId = msg.sender_id || msg.sender || (isOutgoing ? String(msg.account_id || 'SYSTEM') : 'CONTACT');
-        const stableId = msg.fb_message_id || msg.messageId || msg.client_message_id || ConversationRepository.fingerprint(threadId, msg);
-        const timestampMs = msg.timestamp_ms || msg.timestamp || 0;
-        const timestampSource = msg.timestamp_source || 'sync';
+        const senderRole = isOutgoing ? 'operator' : 'customer';
+        const observedSequence = Number.isFinite(Number(msg.sequence_order ?? msg.dom_order))
+          ? Number(msg.sequence_order ?? msg.dom_order)
+          : null;
+        let stableId = msg.fb_message_id || msg.messageId || msg.client_message_id || ConversationRepository.fingerprint(threadId, msg);
+        const observedTimestampMs = Number(msg.timestamp_ms || msg.timestamp || 0);
+        const observedTimestampSource = msg.timestamp_source || 'sync';
         const content = msg.content ?? msg.text ?? msg.cleaned ?? null;
-        const createdAt = msg.created_at || (timestampMs > 0 ? new Date(timestampMs).toISOString() : new Date().toISOString());
-        const existing = database.prepare('SELECT content, timestamp_ms, timestamp_source, is_outgoing, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+        const mediaType = msg.media_type || (msg.media_url ? 'image' : 'text');
+        const mediaUrl = msg.media_url || null;
+        const observedCreatedAt = msg.created_at || (observedTimestampMs > 0 ? new Date(observedTimestampMs).toISOString() : new Date().toISOString());
+        let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+        // Facebook sometimes omits data-message-id during a partial/reloaded DOM
+        // render. The extension then generates an occurrence-based dom_* id,
+        // whose suffix can change when fewer older rows are mounted. Reuse one
+        // unambiguous historical row with the same payload and nearby timestamp
+        // instead of inserting that old message again under the changed id.
+        if (!existing && /^dom_.+_hash_.+_\d+$/.test(String(stableId)) && observedTimestampMs > 0) {
+          const candidates = database.prepare(`
+            SELECT fb_message_id, content, media_type, media_url, timestamp_ms, timestamp_source, created_at,
+                   is_outgoing, sender_role, sequence_order, direction_status
+            FROM messages
+            WHERE thread_id = ? AND content = ? AND is_outgoing = ?
+              AND timestamp_ms > 0 AND ABS(timestamp_ms - ?) <= 90000
+            ORDER BY ABS(timestamp_ms - ?) ASC
+            LIMIT 2
+          `).all(threadId, content, isOutgoing, observedTimestampMs, observedTimestampMs);
+          if (candidates.length === 1) {
+            stableId = candidates[0].fb_message_id;
+            existing = candidates[0];
+          }
+        }
+        let timestampMs = observedTimestampMs;
+        let timestampSource = observedTimestampSource;
+        let createdAt = observedCreatedAt;
         if (existing) {
+          const oldRank = rank[existing.timestamp_source] || 1;
+          const newRank = rank[observedTimestampSource] || 1;
+          // History sync adds a deterministic millisecond DOM offset to
+          // Facebook's minute-only label.  Older rows may already have the
+          // same `facebook_label` provenance but not that offset, so requiring
+          // a strictly better source would leave their incorrect order frozen
+          // forever.  Only let the canonical history pass correct an
+          // equal-rank timestamp; realtime/fallback replays must not move it.
+          const isCanonicalHistoryCorrection = msg.source === 'dom_history_sync'
+            && observedTimestampSource === existing.timestamp_source
+            && observedTimestampMs !== Number(existing.timestamp_ms || 0);
+          const shouldUpgradeTimestamp = observedTimestampMs > 0
+            && (newRank > oldRank || isCanonicalHistoryCorrection);
+          if (!shouldUpgradeTimestamp) {
+            timestampMs = existing.timestamp_ms || 0;
+            timestampSource = existing.timestamp_source || 'unknown';
+            createdAt = existing.created_at;
+          }
           const directionChanged = directionStatus === 'confirmed'
             && (existing.direction_status !== 'confirmed' || existing.is_outgoing !== isOutgoing);
-          const changed = existing.content !== content
-            || timestampMs > (existing.timestamp_ms || 0)
-            || (rank[timestampSource] || 1) > (rank[existing.timestamp_source] || 1)
-            || directionChanged;
+          const timestampChanged = shouldUpgradeTimestamp && (
+            timestampMs !== (existing.timestamp_ms || 0) || timestampSource !== existing.timestamp_source
+          );
+          const sequenceChanged = observedSequence !== null
+            && observedSequence !== Number(existing.sequence_order);
+          const roleChanged = existing.sender_role !== senderRole;
+          const mediaChanged = (mediaUrl && existing.media_url !== mediaUrl) || (mediaType !== 'text' && existing.media_type !== mediaType);
+          const changed = existing.content !== content || mediaChanged || timestampChanged || directionChanged || sequenceChanged || roleChanged;
           if (!changed) { result.skippedCount += 1; continue; }
-          insertMsg.run(threadId, stableId, senderId, content, timestampMs, timestampSource, isOutgoing, directionStatus, createdAt);
+          insertMsg.run(threadId, stableId, senderId, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
           result.updatedIds.push(stableId);
           continue;
         }
-        insertMsg.run(threadId, stableId, senderId, content, timestampMs, timestampSource, isOutgoing, directionStatus, createdAt);
+        insertMsg.run(threadId, stableId, senderId, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
         result.insertedIds.push(stableId);
       }
       return result;
     });
     return transaction(messages);
+  }
+
+  static normalizeMessageSequence(threadId, database = getDefaultDb()) {
+    const rows = database.prepare(`
+      SELECT id
+      FROM messages
+      WHERE thread_id = ?
+      ORDER BY
+        CASE WHEN COALESCE(timestamp_ms, 0) > 0 THEN 0 ELSE 1 END ASC,
+        COALESCE(NULLIF(timestamp_ms, 0), CAST(strftime('%s', created_at) AS INTEGER) * 1000, id) ASC,
+        COALESCE(sequence_order, id) ASC,
+        id ASC
+    `).all(threadId);
+    const update = database.prepare('UPDATE messages SET sequence_order = ? WHERE id = ?');
+    const normalize = database.transaction((orderedRows) => {
+      orderedRows.forEach((row, index) => update.run(index + 1, row.id));
+    });
+    normalize(rows);
+    return rows.length;
   }
   // Test-only: clears direction-flip hysteresis state between test cases so
   // one test's pending candidate can't leak into another's assertions.
@@ -212,7 +315,7 @@ class ConversationRepository {
   // is_outgoing when it disagrees with what's stored - but only once that
   // disagreement is confirmed twice (see shouldCommitDirectionFlip). Never
   // inserts a second row and never throws on repeated identical re-scans.
-  static reconcileExistingMessage(stableMessageId, { source, isOutgoing, directionStatus, direction_status, directionConfidence, direction_confidence, tsMs, tsSource, createdAt } = {}, database = getDefaultDb()) {
+  static reconcileExistingMessage(stableMessageId, { source, isOutgoing, directionStatus, direction_status, directionConfidence, direction_confidence, tsMs, tsSource, createdAt, content = null } = {}, database = getDefaultDb()) {
     const existingMsg = database.prepare('SELECT timestamp_source, is_outgoing, direction_status FROM messages WHERE fb_message_id = ?').get(stableMessageId);
     if (!existingMsg) return { updated: false, reason: 'not_found' };
 

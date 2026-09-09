@@ -5,10 +5,20 @@
 // ConversationRepository.upsertThread already relies on elsewhere, rather
 // than inventing a new lookup.
 function resolveInternalThreadId(database, accountId, rawThreadId) {
-  const row = database.prepare(
-    'SELECT id FROM threads WHERE account_id = ? AND COALESCE(external_thread_id, id) = ?'
-  ).get(accountId, String(rawThreadId));
-  return row ? row.id : String(rawThreadId);
+  if (!rawThreadId) return null;
+  const rawStr = String(rawThreadId);
+  let row;
+  if (accountId) {
+    row = database.prepare(
+      'SELECT id FROM threads WHERE account_id = ? AND (id = ? OR COALESCE(external_thread_id, id) = ? OR id LIKE ?)'
+    ).get(accountId, rawStr, rawStr, `%:${rawStr}`);
+  }
+  if (!row) {
+    row = database.prepare(
+      'SELECT id FROM threads WHERE id = ? OR COALESCE(external_thread_id, id) = ? OR id LIKE ?'
+    ).get(rawStr, rawStr, `%:${rawStr}`);
+  }
+  return row ? row.id : rawStr;
 }
 
 module.exports = { resolveInternalThreadId };

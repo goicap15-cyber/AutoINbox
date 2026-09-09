@@ -4,7 +4,34 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     role TEXT CHECK(role IN ('ADMIN', 'STAFF')) NOT NULL DEFAULT 'STAFF',
+    company_id INTEGER,
+    company_role TEXT NOT NULL DEFAULT 'ADMIN' CHECK(company_role IN ('ADMIN', 'EMPLOYEE')),
+    google_id TEXT,
+    email TEXT,
+    avatar_url TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS account_user_assignments (
+    account_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    assigned_by INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(account_id, user_id),
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(assigned_by) REFERENCES users(id) ON DELETE CASCADE
 );
 
 -- 2. Bảng Tài khoản Facebook cá nhân
@@ -17,7 +44,17 @@ CREATE TABLE IF NOT EXISTS accounts (
     broadcast_daily_count INTEGER DEFAULT 0,
     last_broadcast_date DATE DEFAULT (DATE('now')),
     status TEXT CHECK(status IN ('ACTIVE', 'DISCONNECTED', 'CHECKPOINT')) DEFAULT 'ACTIVE',
+    owner_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    company_id INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Persistent tombstones prevent a detached/stale Chrome extension from
+-- recreating an account after the backend restarts. A deliberate new-account
+-- login removes the matching tombstone.
+CREATE TABLE IF NOT EXISTS removed_accounts (
+    account_id TEXT PRIMARY KEY,
+    removed_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 2b. Bảng Nguồn inbox hợp nhất: personal Messenger account hoặc Facebook Page
@@ -46,6 +83,7 @@ CREATE TABLE IF NOT EXISTS threads (
     last_message TEXT,
     last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
     is_unread BOOLEAN DEFAULT 1,
+    inbox_folder TEXT CHECK(inbox_folder IN ('INBOX', 'MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')) DEFAULT 'INBOX',
     status TEXT CHECK(status IN ('UNPROCESSED', 'ASSIGNED', 'COMPLETED')) DEFAULT 'UNPROCESSED',
     assigned_user_id INTEGER,
     ai_paused_until DATETIME,
@@ -77,7 +115,7 @@ CREATE TABLE IF NOT EXISTS messages (
     client_message_id TEXT,
     sender_id TEXT NOT NULL,
     content TEXT,
-    media_type TEXT CHECK(media_type IN ('text', 'image', 'video', 'voice', 'file')) DEFAULT 'text',
+    media_type TEXT CHECK(media_type IN ('text', 'image', 'video', 'voice', 'file', 'call')) DEFAULT 'text',
     media_url TEXT,
     local_media_path TEXT,
     attachment_id TEXT REFERENCES outbound_attachments(id),
@@ -86,6 +124,8 @@ CREATE TABLE IF NOT EXISTS messages (
     media_mime_type TEXT,
     media_size INTEGER CHECK(media_size IS NULL OR media_size >= 0),
     is_outgoing BOOLEAN NOT NULL DEFAULT 0,
+    sender_role TEXT NOT NULL DEFAULT 'customer' CHECK(sender_role IN ('customer', 'operator')),
+    sequence_order INTEGER,
     direction_status TEXT NOT NULL DEFAULT 'confirmed' CHECK(direction_status IN ('confirmed', 'pending')),
     is_unsent BOOLEAN NOT NULL DEFAULT 0,
     delivery_status TEXT CHECK(delivery_status IN ('pending', 'sent', 'failed')) DEFAULT 'sent',
@@ -138,6 +178,7 @@ CREATE TABLE IF NOT EXISTS phone_capture_automation_settings (
 CREATE TABLE IF NOT EXISTS contacts (
     thread_id TEXT PRIMARY KEY,
     name TEXT,
+    nickname TEXT,
     avatar_url TEXT,
     phone TEXT,
     email TEXT,

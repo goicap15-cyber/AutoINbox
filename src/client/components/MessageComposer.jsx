@@ -8,7 +8,8 @@ export default function MessageComposer({
   onStageAttachment,
   onDiscardAttachment,
   capabilities = null,
-  disabled = false
+  disabled = false,
+  disabledReason = 'Không thể gửi - tài khoản Facebook chưa kết nối'
 }) {
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
@@ -18,11 +19,13 @@ export default function MessageComposer({
   const [attachment, setAttachment] = useState(null);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [removingAttachment, setRemovingAttachment] = useState(false);
+  const [draggingAttachment, setDraggingAttachment] = useState(false);
   const textareaRef = useRef(null);
   const emojiButtonRef = useRef(null);
   const imageInputRef = useRef(null);
   const fileInputRef = useRef(null);
   const selectionRef = useRef({ start: 0, end: 0 });
+  const dragDepthRef = useRef(0);
 
   const quickTemplates = [
     'Dạ chào bạn! Shop có thể hỗ trợ gì cho bạn ạ?',
@@ -65,7 +68,7 @@ export default function MessageComposer({
     setError(null);
     try {
       await onSendMessage({
-        contract_version: 2,
+        contract_version: submittedAttachment ? 2 : 1,
         content,
         client_message_id: clientMessageId,
         attachment_id: submittedAttachment?.id || null,
@@ -173,16 +176,91 @@ export default function MessageComposer({
     }
   };
 
+  const attachmentKind = (file) => String(file?.type || '').toLowerCase().startsWith('image/') ? 'image' : 'file';
+
+  const composerRef = useRef(null);
+
+  const isFileDragEvent = (event) => {
+    if (!event.dataTransfer?.types) return false;
+    const types = Array.from(event.dataTransfer.types);
+    return types.some((t) => t.toLowerCase() === 'files' || t.toLowerCase().startsWith('image/'));
+  };
+
+  const handleDragEnter = useCallback((event) => {
+    if (!isFileDragEvent(event)) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setDraggingAttachment(true);
+  }, []);
+
+  const handleDragOver = useCallback((event) => {
+    if (!isFileDragEvent(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = attachment || disabled ? 'none' : 'copy';
+  }, [attachment, disabled]);
+
+  const handleDragLeave = useCallback((event) => {
+    if (!isFileDragEvent(event)) return;
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDraggingAttachment(false);
+  }, []);
+
+  const handleDrop = useCallback((event) => {
+    if (!isFileDragEvent(event)) return;
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setDraggingAttachment(false);
+    let files = Array.from(event.dataTransfer?.files || []);
+    if (files.length === 0 && event.dataTransfer?.items) {
+      files = Array.from(event.dataTransfer.items)
+        .filter((item) => item.kind === 'file')
+        .map((item) => item.getAsFile())
+        .filter(Boolean);
+    }
+    if (files.length === 0) return;
+    if (files.length > 1) {
+      setError('Mỗi tin nhắn chỉ đính kèm được 1 file.');
+      return;
+    }
+    selectAttachment(files[0], attachmentKind(files[0]));
+  }, [attachment, disabled, capabilities]);
+
+  useEffect(() => {
+    const target = composerRef.current?.closest('.chat-thread') || composerRef.current;
+    if (!target) return;
+
+    target.addEventListener('dragenter', handleDragEnter);
+    target.addEventListener('dragover', handleDragOver);
+    target.addEventListener('dragleave', handleDragLeave);
+    target.addEventListener('drop', handleDrop);
+
+    return () => {
+      target.removeEventListener('dragenter', handleDragEnter);
+      target.removeEventListener('dragover', handleDragOver);
+      target.removeEventListener('dragleave', handleDragLeave);
+      target.removeEventListener('drop', handleDrop);
+    };
+  }, [handleDragEnter, handleDragOver, handleDragLeave, handleDrop]);
+
   const hasText = inputText.trim().length > 0;
   const hasSendableContent = hasText || Boolean(attachment);
   const iconButtonClass = 'w-8 h-8 inline-flex items-center justify-center hover:bg-[var(--color-bg-hover)] rounded-full transition-colors flex-shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40 disabled:opacity-40 disabled:cursor-not-allowed';
 
   return (
-    <div className="chat-composer px-4 pt-2.5 pb-2.5 bg-[var(--color-bg-panel)] border-t border-[var(--color-border)] select-none shrink-0 w-full sticky bottom-0">
+    <div
+      ref={composerRef}
+      className="chat-composer relative px-4 pt-2.5 pb-2.5 bg-[var(--color-bg-panel)] border-t border-[var(--color-border)] select-none shrink-0 w-full sticky bottom-0"
+    >
+      {draggingAttachment && (
+        <div className="fixed inset-0 lg:absolute lg:inset-0 z-30 flex items-center justify-center rounded-xl border-2 border-dashed border-[var(--color-accent)] bg-[var(--color-bg-panel)]/95 text-sm font-semibold text-[var(--color-accent)] pointer-events-none">
+          {attachment ? 'Gỡ file hiện tại trước khi thêm file mới' : 'Thả ảnh hoặc file vào đây'}
+        </div>
+      )}
       {disabled && (
         <div className="flex items-center gap-2 px-3 py-2 bg-[var(--color-danger-subtle)] border border-[var(--color-danger)]/20 rounded-lg text-xs font-medium text-[var(--color-danger)] mb-2.5">
           <WifiOff size={14} className="shrink-0" strokeWidth={1.75} />
-          <span>Không thể gửi - account Facebook chưa kết nối</span>
+          <span>{disabledReason}</span>
         </div>
       )}
 
@@ -248,7 +326,7 @@ export default function MessageComposer({
         <input
           ref={fileInputRef}
           type="file"
-          accept="application/pdf,.pdf"
+          accept=".pdf,.txt,.csv,.json,.xml,.html,.md,.zip,.rar,.7z,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.mp3,.wav,.mp4,.mov,.avi"
           className="hidden"
           onChange={(event) => selectAttachment(event.target.files?.[0], 'file')}
         />
@@ -313,7 +391,7 @@ export default function MessageComposer({
           onKeyDown={handleKeyDown}
           disabled={disabled || sending}
           aria-label="Nội dung tin nhắn"
-          placeholder={disabled ? 'Đã ngắt kết nối extension...' : 'Nhập tin nhắn...'}
+          placeholder={disabled ? disabledReason : 'Nhập tin nhắn...'}
           className="flex-1 bg-transparent text-sm focus:outline-none text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] resize-none disabled:opacity-50 leading-5 py-2 max-h-32 min-h-9"
           style={{ height: 36 }}
         />

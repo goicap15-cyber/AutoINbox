@@ -10,10 +10,11 @@ function pickAvatarColor(value) {
   return AVATAR_COLORS[total % AVATAR_COLORS.length];
 }
 
-function formatTime(value) {
+function formatDisplayTime(value) {
   if (!value) return '';
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+  const numericValue = Number(value);
+  const date = new Date(Number.isFinite(numericValue) && numericValue > 0 ? numericValue : value);
+  if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
 }
 
@@ -23,7 +24,7 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   const content = msg.content || msg.text || msg.message || '';
   const senderName = msg.sender_name || (isOutgoing ? (msg.is_ai || msg.sender_type === 'ai' ? 'AI' : 'Bạn') : activeThread?.contact_name || 'Khách hàng');
   const status = msg.status || msg.delivery_status || (msg.is_failed ? 'failed' : msg.is_sending ? 'sending' : 'sent');
-  const timeLabel = formatTime(msg.timestamp_ms || msg.created_at || msg.time);
+  const displayTime = formatDisplayTime(msg.timestamp_ms || msg.created_at || msg.time);
   const avatarUrl = msg.sender_avatar || activeThread?.avatar_url;
   const avatarInitial = (senderName || activeThread?.contact_name || 'K').charAt(0).toUpperCase();
   const avatarColor = pickAvatarColor(activeThread?.id || senderName);
@@ -31,14 +32,26 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   const lowerContent = content.toLowerCase();
   const isCallMessage = Boolean(
     msg.media_type === 'call' ||
+    (msg.fb_message_id && String(msg.fb_message_id).startsWith('call_')) ||
     lowerContent.includes('cuộc gọi') ||
     lowerContent.includes('gọi thoại') ||
-    lowerContent.includes('bỏ lỡ cuộc gọi')
+    lowerContent.includes('bỏ lỡ cuộc gọi') ||
+    lowerContent.includes('nhỡ cuộc') ||
+    lowerContent.includes('audio call') ||
+    lowerContent.includes('video call') ||
+    lowerContent.includes('missed call') ||
+    lowerContent.includes('missed audio') ||
+    lowerContent.includes('missed video') ||
+    lowerContent.includes('call ended') ||
+    /\bcall\b/.test(lowerContent)
   );
   const isMissedCall = lowerContent.includes('bỏ lỡ') || lowerContent.includes('nhỡ') || lowerContent.includes('missed');
   const isVideoCall = lowerContent.includes('video');
 
   const hasMedia = Boolean(msg.local_media_path || msg.media_url);
+  // Messenger can echo stale composer text as an image caption even though
+  // CRM sent the image separately. Hide that transport artefact.
+  const visibleContent = isOutgoing && hasMedia && msg.media_type === 'image' ? '' : content;
   if (!content && !hasMedia && !isUnsent) return null;
 
   return (
@@ -85,20 +98,19 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
               </div>
               <div className="flex flex-col">
                 <span className="font-semibold text-xs leading-tight">{content}</span>
-                {timeLabel && <span className="text-[11px] opacity-75 font-mono mt-0.5">{timeLabel}</span>}
               </div>
             </div>
           ) : (
             <>
               <MediaViewer mediaType={msg.media_type} mediaUrl={msg.media_url} localMediaPath={msg.local_media_path} />
-              {content && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words ${hasMedia ? 'mt-1.5' : ''}`}>{content}</p>}
+              {visibleContent && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words ${hasMedia ? 'mt-1.5' : ''}`}>{visibleContent}</p>}
             </>
           )}
         </div>
 
         <div className={`flex items-center gap-1 mt-1 text-xs text-[var(--color-text-muted)] ${isOutgoing ? 'justify-end' : 'justify-start'}`}>
           {isOutgoing && <span className="font-medium">{senderName}</span>}
-          {timeLabel && <span className="font-mono">{timeLabel}</span>}
+          {displayTime && <time className="font-mono" dateTime={msg.created_at || undefined}>{displayTime}</time>}
           {isOutgoing && (status === 'sending' || status === 'pending') && (
             <span className="inline-flex items-center gap-1">
               <Loader2 size={12} className="animate-spin text-[var(--color-accent)]" />

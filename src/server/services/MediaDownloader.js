@@ -2,10 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 
 class MediaDownloader {
   constructor() {
-    this.mediaBaseDir = path.join(__dirname, '../../../data/media');
+    this.mediaBaseDir = path.join(APP_DATA_ROOT, 'media');
     if (!fs.existsSync(this.mediaBaseDir)) {
       fs.mkdirSync(this.mediaBaseDir, { recursive: true });
     }

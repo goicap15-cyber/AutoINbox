@@ -1,15 +1,21 @@
 import { useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 
-const SOCKET_URL = 'http://localhost:5050';
+const SOCKET_URL = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5050';
 
-export function useSocket() {
+export function useSocket(enabled = true) {
   const [socket, setSocket] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
 
   useEffect(() => {
+    if (!enabled) {
+      setSocket(null);
+      setIsConnected(false);
+      return undefined;
+    }
     const newSocket = io(SOCKET_URL, {
       transports: ['websocket', 'polling'],
+      withCredentials: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 2000
     });
@@ -29,7 +35,7 @@ export function useSocket() {
     return () => {
       newSocket.close();
     };
-  }, []);
+  }, [enabled]);
 
   return { socket, isConnected };
 }

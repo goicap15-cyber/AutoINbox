@@ -140,6 +140,7 @@ class MessageQueueRepository {
     const transaction = database.transaction(() => {
       const row = database.prepare(`
         SELECT m.id, m.thread_id, m.account_id, m.content, m.status,
+               t.thread_url, t.contact_name AS expected_contact_name,
                CASE WHEN m.campaign_id IS NOT NULL THEN m.source_id
                     ELSE COALESCE(m.source_id, t.source_id) END AS source_id,
                CASE WHEN m.campaign_id IS NOT NULL THEN m.source_type

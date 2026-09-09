@@ -3,8 +3,9 @@ const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const { ensureMessageDirectionStatus } = require('./messageDirectionMigration');
+const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 
-const DATA_DIR = path.join(__dirname, '../../../data');
+const DATA_DIR = APP_DATA_ROOT;
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -15,8 +16,17 @@ if (!fs.existsSync(MEDIA_DIR)) {
 }
 
 const DB_PATH = path.join(DATA_DIR, 'database.db');
-const dbExistedBeforeOpen = fs.existsSync(DB_PATH) && fs.statSync(DB_PATH).size > 0;
-const db = new Database(DB_PATH);
+// Capture this before opening SQLite because opening a missing database creates
+// the file immediately. Migration backups should only run for existing data.
+const dbExistedBeforeOpen = fs.existsSync(DB_PATH);
+let dbOpts = {};
+if (process.resourcesPath) {
+  const unpackedBinding = path.join(process.resourcesPath, 'app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node');
+  if (fs.existsSync(unpackedBinding)) {
+    dbOpts.nativeBinding = unpackedBinding;
+  }
+}
+const db = new Database(DB_PATH, dbOpts);
 
 // Bật WAL Mode & Synchronous Normal cho hiệu năng tối đa
 db.pragma('journal_mode = WAL');
@@ -62,6 +72,16 @@ if (existingAttachmentColumns.length > 0 && !existingAttachmentColumns.includes(
 }
 db.exec(initializationSql);
 
+// CREATE TABLE IF NOT EXISTS does not evolve an existing SQLite table. Keep
+// this additive compatibility guard independent from migration version state:
+// some long-lived databases can already contain higher/custom migration rows,
+// which would otherwise make MAX(version) skip the nickname migration.
+const contactColumns = db.prepare('PRAGMA table_info(contacts)').all().map((column) => column.name);
+if (!contactColumns.includes('nickname')) {
+  db.exec('ALTER TABLE contacts ADD COLUMN nickname TEXT;');
+  console.log('[DB] Added missing contacts.nickname column.');
+}
+
 // Initialize migrations table
 db.exec(`
   CREATE TABLE IF NOT EXISTS migrations (
@@ -76,31 +96,31 @@ const migrations = [
     version: 1,
     name: 'add_client_message_id',
     up: (db) => {
-      try { db.exec("ALTER TABLE messages ADD COLUMN client_message_id TEXT;"); } catch(e) {}
+      try { db.exec("ALTER TABLE messages ADD COLUMN client_message_id TEXT;"); } catch (e) { }
     }
   },
   {
     version: 2,
     name: 'add_thread_url',
     up: (db) => {
-      try { db.exec("ALTER TABLE threads ADD COLUMN thread_url TEXT;"); } catch(e) {}
+      try { db.exec("ALTER TABLE threads ADD COLUMN thread_url TEXT;"); } catch (e) { }
     }
   },
   {
     version: 3,
     name: 'add_timestamp_ms',
     up: (db) => {
-      try { db.exec("ALTER TABLE messages ADD COLUMN timestamp_ms INTEGER DEFAULT 0;"); } catch(e) {}
-      try { db.exec("ALTER TABLE messages ADD COLUMN timestamp_source TEXT DEFAULT 'unknown';"); } catch(e) {}
+      try { db.exec("ALTER TABLE messages ADD COLUMN timestamp_ms INTEGER DEFAULT 0;"); } catch (e) { }
+      try { db.exec("ALTER TABLE messages ADD COLUMN timestamp_source TEXT DEFAULT 'unknown';"); } catch (e) { }
     }
   },
   {
     version: 4,
     name: 'add_sync_fields_threads',
     up: (db) => {
-      try { db.exec("ALTER TABLE threads ADD COLUMN sync_status TEXT DEFAULT 'LOCAL';"); } catch(e) {}
-      try { db.exec("ALTER TABLE threads ADD COLUMN sync_cursor TEXT;"); } catch(e) {}
-      try { db.exec("ALTER TABLE threads ADD COLUMN sync_error TEXT;"); } catch(e) {}
+      try { db.exec("ALTER TABLE threads ADD COLUMN sync_status TEXT DEFAULT 'LOCAL';"); } catch (e) { }
+      try { db.exec("ALTER TABLE threads ADD COLUMN sync_cursor TEXT;"); } catch (e) { }
+      try { db.exec("ALTER TABLE threads ADD COLUMN sync_error TEXT;"); } catch (e) { }
     }
   },
   {
@@ -161,8 +181,8 @@ const migrations = [
     version: 8,
     name: 'add_outbound_delivery_state',
     up: (db) => {
-      try { db.exec("ALTER TABLE messages ADD COLUMN delivery_status TEXT DEFAULT 'sent';"); } catch (e) {}
-      try { db.exec("ALTER TABLE messages ADD COLUMN delivery_error TEXT;"); } catch (e) {}
+      try { db.exec("ALTER TABLE messages ADD COLUMN delivery_status TEXT DEFAULT 'sent';"); } catch (e) { }
+      try { db.exec("ALTER TABLE messages ADD COLUMN delivery_error TEXT;"); } catch (e) { }
       db.exec("UPDATE messages SET delivery_status = CASE WHEN fb_message_id LIKE 'pending_%' THEN 'pending' ELSE 'sent' END WHERE delivery_status IS NULL;");
     }
   },
@@ -170,7 +190,7 @@ const migrations = [
     version: 9,
     name: 'add_external_thread_id',
     up: (db) => {
-      try { db.exec("ALTER TABLE threads ADD COLUMN external_thread_id TEXT;"); } catch (e) {}
+      try { db.exec("ALTER TABLE threads ADD COLUMN external_thread_id TEXT;"); } catch (e) { }
       db.exec("UPDATE threads SET external_thread_id = id WHERE external_thread_id IS NULL OR external_thread_id = '';");
       db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_threads_account_external ON threads(account_id, external_thread_id);");
     }
@@ -196,7 +216,7 @@ const migrations = [
         )
       `);
       // Add source_id to threads
-      try { db.exec("ALTER TABLE threads ADD COLUMN source_id TEXT;"); } catch (e) {}
+      try { db.exec("ALTER TABLE threads ADD COLUMN source_id TEXT;"); } catch (e) { }
       // Auto-create personal_messenger sources for existing accounts
       const accounts = db.prepare('SELECT id, name FROM accounts').all();
       const insertSource = db.prepare(`
@@ -243,7 +263,7 @@ const migrations = [
           UNIQUE(source_type, external_id)
         )
       `);
-      try { db.exec("ALTER TABLE threads ADD COLUMN source_id TEXT;"); } catch (e) {}
+      try { db.exec("ALTER TABLE threads ADD COLUMN source_id TEXT;"); } catch (e) { }
       const accounts = db.prepare('SELECT id, name FROM accounts').all();
       const insertSource = db.prepare(`
         INSERT OR IGNORE INTO inbox_sources (id, source_type, owner_account_id, external_id, display_name, status)
@@ -279,7 +299,7 @@ const migrations = [
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
       `);
-      try { db.exec("ALTER TABLE contacts ADD COLUMN status_id INTEGER REFERENCES lead_statuses(id);"); } catch (e) {}
+      try { db.exec("ALTER TABLE contacts ADD COLUMN status_id INTEGER REFERENCES lead_statuses(id);"); } catch (e) { }
       const seedStatuses = db.prepare('SELECT COUNT(*) AS count FROM lead_statuses').get().count;
       if (seedStatuses === 0) {
         const insert = db.prepare('INSERT INTO lead_statuses (name, color) VALUES (?, ?)');
@@ -303,7 +323,7 @@ const migrations = [
     name: "add_bulk_campaigns",
     up: (db) => {
       for (const [name, type] of [["campaign_id", "TEXT"], ["campaign_recipient_id", "TEXT"], ["campaign_attempt_id", "TEXT"], ["idempotency_key", "TEXT"]]) {
-        try { db.exec("ALTER TABLE message_queue ADD COLUMN " + name + " " + type + ";"); } catch (e) {}
+        try { db.exec("ALTER TABLE message_queue ADD COLUMN " + name + " " + type + ";"); } catch (e) { }
       }
       db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_message_queue_idempotency ON message_queue(idempotency_key) WHERE idempotency_key IS NOT NULL;");
       db.exec(fs.readFileSync(path.join(__dirname, "campaignSchema.sql"), "utf8"));
@@ -315,7 +335,7 @@ const migrations = [
     name: 'complete_bulk_campaigns',
     up: (db) => {
       const addColumn = (table, name, type) => {
-        try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type};`); } catch (error) {}
+        try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type};`); } catch (error) { }
       };
       addColumn('contacts', 'campaign_opt_out', 'BOOLEAN NOT NULL DEFAULT 0');
       addColumn('campaigns', 'send_cap', 'INTEGER NOT NULL DEFAULT 50');
@@ -343,7 +363,7 @@ const migrations = [
     name: 'add_crm_rich_messaging',
     up: (db) => {
       const addColumn = (table, name, type) => {
-        try { db.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + name + ' ' + type + ';'); } catch (error) {}
+        try { db.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + name + ' ' + type + ';'); } catch (error) { }
       };
       addColumn('messages', 'attachment_id', 'TEXT REFERENCES outbound_attachments(id)');
       addColumn('messages', 'latest_attempt_id', 'TEXT REFERENCES outbound_attempts(id)');
@@ -369,7 +389,7 @@ const migrations = [
     version: 17,
     name: 'add_contact_custom_fields',
     up: (db) => {
-      try { db.exec("ALTER TABLE contacts ADD COLUMN custom_fields TEXT DEFAULT '[]';"); } catch (e) {}
+      try { db.exec("ALTER TABLE contacts ADD COLUMN custom_fields TEXT DEFAULT '[]';"); } catch (e) { }
       console.log('[DB] Migration v17: Added contacts.custom_fields.');
     }
   },
@@ -377,7 +397,7 @@ const migrations = [
     version: 18,
     name: 'add_contact_address',
     up: (db) => {
-      try { db.exec('ALTER TABLE contacts ADD COLUMN address TEXT;'); } catch (e) {}
+      try { db.exec('ALTER TABLE contacts ADD COLUMN address TEXT;'); } catch (e) { }
       console.log('[DB] Migration v18: Added contacts.address.');
     }
   },
@@ -385,7 +405,7 @@ const migrations = [
     version: 19,
     name: 'add_followup_archive',
     up: (db) => {
-      try { db.exec('ALTER TABLE threads ADD COLUMN archived_at DATETIME;'); } catch (e) {}
+      try { db.exec('ALTER TABLE threads ADD COLUMN archived_at DATETIME;'); } catch (e) { }
       db.exec("CREATE TABLE IF NOT EXISTS conversation_reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL UNIQUE, due_at DATETIME NOT NULL, note TEXT, status TEXT NOT NULL DEFAULT 'active', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE); CREATE INDEX IF NOT EXISTS idx_conversation_reminders_due ON conversation_reminders(status, due_at);");
       console.log('[DB] Migration v19: Added CRM follow-up reminders and archive state.');
     }
@@ -411,9 +431,9 @@ const migrations = [
       `);
       db.exec('CREATE INDEX IF NOT EXISTS idx_contact_phone_captures_thread ON contact_phone_captures(thread_id, message_timestamp_ms);');
 
-      try { db.exec('ALTER TABLE contacts ADD COLUMN phone_source TEXT;'); } catch (e) {}
-      try { db.exec('ALTER TABLE contacts ADD COLUMN phone_capture_id INTEGER REFERENCES contact_phone_captures(id);'); } catch (e) {}
-      try { db.exec('ALTER TABLE contacts ADD COLUMN phone_captured_at DATETIME;'); } catch (e) {}
+      try { db.exec('ALTER TABLE contacts ADD COLUMN phone_source TEXT;'); } catch (e) { }
+      try { db.exec('ALTER TABLE contacts ADD COLUMN phone_capture_id INTEGER REFERENCES contact_phone_captures(id);'); } catch (e) { }
+      try { db.exec('ALTER TABLE contacts ADD COLUMN phone_captured_at DATETIME;'); } catch (e) { }
 
       db.exec(`
         CREATE TABLE IF NOT EXISTS campaign_phone_capture_actions (
@@ -435,14 +455,14 @@ const migrations = [
         );
       `);
 
-      try { db.exec("ALTER TABLE campaigns ADD COLUMN phone_capture_policy TEXT NOT NULL DEFAULT 'continue';"); } catch (e) {}
-      try { db.exec('ALTER TABLE campaigns ADD COLUMN phone_capture_thank_you_text TEXT;'); } catch (e) {}
+      try { db.exec("ALTER TABLE campaigns ADD COLUMN phone_capture_policy TEXT NOT NULL DEFAULT 'continue';"); } catch (e) { }
+      try { db.exec('ALTER TABLE campaigns ADD COLUMN phone_capture_thank_you_text TEXT;'); } catch (e) { }
       // Deliberately no FK here (unlike contacts.phone_capture_id above) - a
       // campaign must be able to keep pointing at a since-deleted status
       // (FR-012) so a later capture can report phone_capture_status_unavailable,
       // instead of either losing that fact or having the status deletion
       // itself blocked by a dangling reference.
-      try { db.exec('ALTER TABLE campaigns ADD COLUMN phone_capture_status_id INTEGER;'); } catch (e) {}
+      try { db.exec('ALTER TABLE campaigns ADD COLUMN phone_capture_status_id INTEGER;'); } catch (e) { }
 
       // Legacy non-empty phone values predate provenance tracking - mark them
       // explicitly protected so PhoneCaptureService never treats a contact
@@ -571,9 +591,9 @@ const migrations = [
     version: 23,
     name: 'add_campaign_recipient_route_snapshot',
     up: (db) => {
-      try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN source_type_snapshot TEXT;"); } catch(e) {}
-      try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN source_external_id_snapshot TEXT;"); } catch(e) {}
-      try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN source_display_name_snapshot TEXT;"); } catch(e) {}
+      try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN source_type_snapshot TEXT;"); } catch (e) { }
+      try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN source_external_id_snapshot TEXT;"); } catch (e) { }
+      try { db.exec("ALTER TABLE campaign_recipients ADD COLUMN source_display_name_snapshot TEXT;"); } catch (e) { }
       console.log('[DB] Migration v23: Added route snapshot columns to campaign_recipients table.');
     }
   },
@@ -593,7 +613,7 @@ const migrations = [
           FOREIGN KEY(campaign_message_id) REFERENCES campaign_messages(id) ON DELETE CASCADE
         );
       `);
-      try { db.exec("ALTER TABLE campaign_attachments ADD COLUMN manifest_id TEXT REFERENCES campaign_attachment_manifests(id) ON DELETE CASCADE;"); } catch(e) {}
+      try { db.exec("ALTER TABLE campaign_attachments ADD COLUMN manifest_id TEXT REFERENCES campaign_attachment_manifests(id) ON DELETE CASCADE;"); } catch (e) { }
       db.exec("CREATE INDEX IF NOT EXISTS idx_campaign_attachments_manifest ON campaign_attachments(manifest_id);");
       console.log('[DB] Migration v24: Added campaign_attachment_manifests table and campaign_attachments.manifest_id (spec 040).');
     }
@@ -602,8 +622,221 @@ const migrations = [
     version: 25,
     name: 'add_message_queue_manifest_id',
     up: (db) => {
-      try { db.exec("ALTER TABLE message_queue ADD COLUMN manifest_id TEXT;"); } catch(e) {}
+      try { db.exec("ALTER TABLE message_queue ADD COLUMN manifest_id TEXT;"); } catch (e) { }
       console.log('[DB] Migration v25: Added message_queue.manifest_id for manifest-aware dispatch (spec 040).');
+    }
+  },
+  {
+    version: 26,
+    name: 'add_message_sequence_and_sender_role',
+    up: (db) => {
+      try { db.exec("ALTER TABLE messages ADD COLUMN sender_role TEXT NOT NULL DEFAULT 'customer' CHECK(sender_role IN ('customer', 'operator'));"); } catch (e) { }
+      try { db.exec('ALTER TABLE messages ADD COLUMN sequence_order INTEGER;'); } catch (e) { }
+      db.exec(`
+        UPDATE messages
+        SET sequence_order = COALESCE(sequence_order, id),
+            sender_role = CASE WHEN is_outgoing = 1 THEN 'operator' ELSE 'customer' END;
+        CREATE TRIGGER IF NOT EXISTS messages_sequence_after_insert AFTER INSERT ON messages BEGIN
+          UPDATE messages
+          SET sequence_order = COALESCE(new.sequence_order, new.id),
+              sender_role = CASE WHEN new.is_outgoing = 1 THEN 'operator' ELSE 'customer' END
+          WHERE id = new.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS messages_role_after_direction_update AFTER UPDATE OF is_outgoing ON messages BEGIN
+          UPDATE messages
+          SET sender_role = CASE WHEN new.is_outgoing = 1 THEN 'operator' ELSE 'customer' END
+          WHERE id = new.id;
+        END;
+        CREATE INDEX IF NOT EXISTS idx_messages_thread_sequence ON messages(thread_id, sequence_order, id);
+      `);
+      console.log('[DB] Migration v26: Added durable message sequence and sender role.');
+    }
+  },
+  {
+    version: 27,
+    name: 'add_local_user_auth_sessions',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          token_hash TEXT NOT NULL UNIQUE,
+          expires_at DATETIME NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at);
+      `);
+      console.log('[DB] Migration v27: Added local CRM user sessions.');
+    }
+  },
+  {
+    version: 28,
+    name: 'fix_crm_outgoing_call_direction',
+    up: (db) => {
+      db.exec(`
+        UPDATE messages
+        SET is_outgoing = 1,
+            sender_role = 'operator',
+            direction_status = 'confirmed'
+        WHERE fb_message_id LIKE 'call_ended_%';
+      `);
+      console.log('[DB] Migration v28: Corrected CRM-originated call logs to outgoing.');
+    }
+  },
+  {
+    version: 29,
+    name: 'isolate_facebook_accounts_by_crm_user',
+    up: (db) => {
+      try { db.exec('ALTER TABLE accounts ADD COLUMN owner_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;'); } catch (error) { }
+      db.exec('CREATE INDEX IF NOT EXISTS idx_accounts_owner_user ON accounts(owner_user_id);');
+      console.log('[DB] Migration v29: Added per-user ownership for Facebook accounts.');
+    }
+  },
+  {
+    version: 30,
+    name: 'enterprise_company_membership_and_account_assignments',
+    up: (db) => {
+      try { db.exec('ALTER TABLE users ADD COLUMN company_id INTEGER;'); } catch (error) { }
+      try { db.exec("ALTER TABLE users ADD COLUMN company_role TEXT NOT NULL DEFAULT 'ADMIN' CHECK(company_role IN ('ADMIN','EMPLOYEE'));"); } catch (error) { }
+      try { db.exec('ALTER TABLE accounts ADD COLUMN company_id INTEGER;'); } catch (error) { }
+      db.exec(`
+        UPDATE users SET company_id=id WHERE company_id IS NULL;
+        UPDATE accounts SET company_id=owner_user_id WHERE company_id IS NULL;
+        CREATE TABLE IF NOT EXISTS account_user_assignments (
+          account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          assigned_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(account_id,user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_users_company ON users(company_id,company_role);
+        CREATE INDEX IF NOT EXISTS idx_accounts_company ON accounts(company_id);
+        CREATE INDEX IF NOT EXISTS idx_account_assignments_user ON account_user_assignments(user_id,account_id);
+      `);
+      console.log('[DB] Migration v30: Added enterprise membership and Facebook assignments.');
+    }
+  },
+  {
+    version: 53,
+    name: 'add_local_contact_nickname',
+    up: (db) => {
+      try { db.exec('ALTER TABLE contacts ADD COLUMN nickname TEXT;'); } catch (error) { }
+      console.log('[DB] Migration v53: Verified CRM-only contact nicknames.');
+    }
+  },
+  {
+    version: 54,
+    name: 'add_google_identity_to_users',
+    up: (db) => {
+      try { db.exec('ALTER TABLE users ADD COLUMN google_id TEXT;'); } catch (error) { }
+      try { db.exec('ALTER TABLE users ADD COLUMN email TEXT;'); } catch (error) { }
+      try { db.exec('ALTER TABLE users ADD COLUMN avatar_url TEXT;'); } catch (error) { }
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id) WHERE google_id IS NOT NULL;');
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE) WHERE email IS NOT NULL;');
+      console.log('[DB] Migration v54: Added Google identity fields.');
+    }
+  },
+  {
+    version: 55,
+    name: 'allow_call_media_type_in_messages',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE messages_v55 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            fb_message_id TEXT UNIQUE,
+            client_message_id TEXT,
+            sender_id TEXT NOT NULL,
+            content TEXT,
+            media_type TEXT CHECK(media_type IN ('text', 'image', 'video', 'voice', 'file', 'call')) DEFAULT 'text',
+            media_url TEXT,
+            local_media_path TEXT,
+            attachment_id TEXT REFERENCES outbound_attachments(id),
+            latest_attempt_id TEXT REFERENCES outbound_attempts(id),
+            media_name TEXT,
+            media_mime_type TEXT,
+            media_size INTEGER CHECK(media_size IS NULL OR media_size >= 0),
+            is_outgoing BOOLEAN NOT NULL DEFAULT 0,
+            sender_role TEXT NOT NULL DEFAULT 'customer' CHECK(sender_role IN ('customer', 'operator')),
+            sequence_order INTEGER,
+            direction_status TEXT NOT NULL DEFAULT 'confirmed' CHECK(direction_status IN ('confirmed', 'pending')),
+            is_unsent BOOLEAN NOT NULL DEFAULT 0,
+            delivery_status TEXT CHECK(delivery_status IN ('pending', 'sent', 'failed')) DEFAULT 'sent',
+            delivery_error TEXT,
+            timestamp_ms INTEGER DEFAULT 0,
+            timestamp_source TEXT DEFAULT 'unknown',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+        );
+
+        INSERT INTO messages_v55 (
+            id, thread_id, fb_message_id, client_message_id, sender_id, content, media_type, media_url,
+            local_media_path, attachment_id, latest_attempt_id, media_name, media_mime_type, media_size,
+            is_outgoing, sender_role, sequence_order, direction_status, is_unsent, delivery_status,
+            delivery_error, timestamp_ms, timestamp_source, created_at
+        )
+        SELECT
+            id, thread_id, fb_message_id, client_message_id, sender_id, content, media_type, media_url,
+            local_media_path, attachment_id, latest_attempt_id, media_name, media_mime_type, media_size,
+            is_outgoing, COALESCE(NULLIF(sender_role, ''), CASE WHEN is_outgoing = 1 THEN 'operator' ELSE 'customer' END),
+            sequence_order, direction_status, is_unsent, delivery_status,
+            delivery_error, timestamp_ms, timestamp_source, created_at
+        FROM messages;
+
+        DROP TABLE messages;
+        ALTER TABLE messages_v55 RENAME TO messages;
+
+        CREATE INDEX IF NOT EXISTS idx_messages_thread_sequence ON messages(thread_id, sequence_order, id);
+        CREATE INDEX IF NOT EXISTS idx_messages_latest_attempt ON messages(latest_attempt_id) WHERE latest_attempt_id IS NOT NULL;
+
+        DROP TRIGGER IF EXISTS messages_ai_insert;
+        DROP TRIGGER IF EXISTS messages_ai_update;
+        DROP TRIGGER IF EXISTS messages_ai_delete;
+        DROP TRIGGER IF EXISTS messages_sequence_after_insert;
+        DROP TRIGGER IF EXISTS messages_role_after_direction_update;
+
+        CREATE TRIGGER IF NOT EXISTS messages_ai_insert AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, content, thread_id, sender_id)
+            VALUES (new.id, new.content, new.thread_id, new.sender_id);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS messages_ai_update AFTER UPDATE ON messages BEGIN
+            UPDATE messages_fts SET content = new.content, thread_id = new.thread_id, sender_id = new.sender_id
+            WHERE rowid = old.id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS messages_ai_delete AFTER DELETE ON messages BEGIN
+            DELETE FROM messages_fts WHERE rowid = old.id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS messages_sequence_after_insert AFTER INSERT ON messages BEGIN
+          UPDATE messages
+          SET sequence_order = COALESCE(new.sequence_order, new.id),
+              sender_role = CASE WHEN new.is_outgoing = 1 THEN 'operator' ELSE 'customer' END
+          WHERE id = new.id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS messages_role_after_direction_update AFTER UPDATE OF is_outgoing ON messages BEGIN
+          UPDATE messages
+          SET sender_role = CASE WHEN new.is_outgoing = 1 THEN 'operator' ELSE 'customer' END
+          WHERE id = new.id;
+        END;
+      `);
+      console.log('[DB] Migration v55: Rebuilt messages table to allow media_type="call".');
+    }
+  },
+  {
+    version: 56,
+    name: 'add_inbox_folder_to_threads',
+    up: (db) => {
+      try {
+        db.exec("ALTER TABLE threads ADD COLUMN inbox_folder TEXT CHECK(inbox_folder IN ('INBOX', 'MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')) DEFAULT 'INBOX';");
+        console.log('[DB] Migration v56: Added threads.inbox_folder column.');
+      } catch (e) {
+        console.log('[DB] Migration v56: threads.inbox_folder already exists, skipped.');
+      }
     }
   }
 ];
@@ -611,7 +844,7 @@ const migrations = [
 function runMigrations() {
   const getVersion = db.prepare('SELECT MAX(version) as version FROM migrations').get();
   let currentVersion = getVersion.version || 0;
-  
+
   const pending = migrations.filter(m => m.version > currentVersion);
   if (pending.length > 0) {
     const beforeCounts = {
@@ -619,7 +852,7 @@ function runMigrations() {
       messages: db.prepare('SELECT COUNT(*) AS count FROM messages').get().count
     };
     console.log(`[DB] Found ${pending.length} pending migrations.`);
-    
+
     const insertMigration = db.prepare('INSERT INTO migrations (version, name) VALUES (?, ?)');
     const migrate = db.transaction((pendingMigrations) => {
       for (const m of pendingMigrations) {
@@ -630,9 +863,14 @@ function runMigrations() {
     });
 
     try {
+      db.pragma('foreign_keys = OFF');
       migrate(pending);
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+    try {
       console.log('[DB] Migrations applied successfully.');
-      
+
       // Integrity check
       const integrity = db.pragma('integrity_check', { simple: true });
       if (integrity !== 'ok') {

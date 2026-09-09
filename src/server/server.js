@@ -1,18 +1,27 @@
 const path = require('path');
 const fs = require('fs');
+const { parseEnv } = require('util');
 // Neither the plain `node src/server/index.js` entrypoint nor Electron's
 // require(serverPath) load .env on their own (no dotenv dependency, no
 // --env-file flag) - PAGE_TOKEN_SECRET/WEBHOOK_VERIFY_TOKEN/RICH_MESSAGE_*
 // flags etc. were silently falling back to unset. Node 20.6+'s built-in
 // loadEnvFile covers both launch paths without adding a dependency.
 try {
-  process.loadEnvFile(path.join(__dirname, '../../.env'));
+  // fs.readFileSync is ASAR-aware, unlike process.loadEnvFile's native file
+  // loader. This reads repo/.env in dev and app.asar/.env when packaged.
+  const envPath = path.join(__dirname, '../../.env');
+  const packagedEnv = parseEnv(fs.readFileSync(envPath, 'utf8'));
+  for (const [key, value] of Object.entries(packagedEnv)) {
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
 } catch (_) {
   // Missing .env is fine (e.g. a fresh checkout) - env vars just stay unset.
 }
 
 const express = require('express');
 const crypto = require('crypto');
+const { isLoopbackAddress, isLocalDevRequest } = require('./utils/localDevAccess');
+const { APP_DATA_ROOT } = require('./utils/appDataRoot');
 const OutboundAttachmentRepository = require('./repositories/OutboundAttachmentRepository');
 const OutboundAttemptRepository = require('./repositories/OutboundAttemptRepository');
 const OutboundAttachmentService = require('./services/OutboundAttachmentService');
@@ -23,14 +32,20 @@ const OutboundDomCorrelationService = require('./services/OutboundDomCorrelation
 const PhoneCaptureService = require('./services/PhoneCaptureService');
 const CampaignPhoneCaptureService = require('./services/CampaignPhoneCaptureService');
 const GlobalPhoneAutomationService = require('./services/GlobalPhoneAutomationService');
+const HistorySyncRetryPolicy = require('./services/HistorySyncRetryPolicy');
+const SidebarSyncCooldown = require('./services/SidebarSyncCooldown');
+const CallEventDeduplicator = require('./services/CallEventDeduplicator');
 const { resolveInternalThreadId } = require('./utils/threadIdResolver');
 const http = require('http');
 const WebSocket = require('ws');
 const { Server: SocketIOServer } = require('socket.io');
 const db = require('./database/db');
+const { AuthService, AuthError } = require('./services/AuthService');
+const { CentralAuthClient, CentralAuthError } = require('./services/CentralAuthClient');
 const processManager = require('./services/ProcessManager');
 const mediaDownloader = require('./services/MediaDownloader');
 const assignmentManager = require('./services/AssignmentManager');
+const enterpriseAccess = require('./services/EnterpriseAccessService');
 const searchService = require('./services/SearchService');
 const exportService = require('./services/ExportService');
 const autoReplyEngine = require('./services/AutoReplyEngine');
@@ -38,12 +53,14 @@ const broadcastEngine = require('./services/BroadcastEngine');
 const aiMediator = require('./services/AIMediator');
 const { extractLeadInfo } = require('./utils/leadExtractor');
 const { downloadAvatar, saveAvatarFromBase64OrUrl, serveAvatar } = require('./utils/avatarManager');
-const { isSystemOrMetadataText, cleanMessageText } = require('./utils/textFilter');
+const { isSystemOrMetadataText, cleanMessageText, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
 const { isKnownPageSystemNotice } = require('./utils/pageSystemNotice');
+const { parsePageIdFromInput } = require('./utils/pageIdParser');
 const ConversationRepository = require('./repositories/ConversationRepository');
 const MessageQueueRepository = require('./repositories/MessageQueueRepository');
 const queueWorker = require('./services/QueueWorker');
 const CampaignRepository = require('./repositories/CampaignRepository');
+const CampaignResponseStatsService = require('./services/CampaignResponseStatsService');
 const CampaignService = require('./services/CampaignService');
 const campaignRunner = require('./services/CampaignRunner');
 const CampaignEventService = require('./services/CampaignEventService');
@@ -52,40 +69,504 @@ const CampaignAttachmentService = require('./services/CampaignAttachmentService'
 const CampaignRecoveryService = require('./services/CampaignRecoveryService');
 const LeadStatusService = require('./services/LeadStatusService');
 const ContactService = require('./services/ContactService');
+const AccountService = require('./services/AccountService');
 const FollowupService = require('./services/FollowupService');
 const InboxSourceService = require('./services/InboxSourceService');
+const InboxSyncScheduler = require('./services/InboxSyncScheduler');
+const InitialMessageSweepService = require('./services/InitialMessageSweepService');
+const licenseChecker = require('./services/LicenseChecker');
+
+// Remote License Server URL – must match CentralAuthClient / LicenseChecker
+const LICENSE_SERVER_BASE_URL = (process.env.LICENSE_SERVER_URL || 'https://genblackmmoonline.online/license_server').replace(/\/$/, '');
 
 const app = express();
 const followupService = new FollowupService(db);
+const authService = new AuthService(db);
+const centralAuthClient = new CentralAuthClient();
 app.use(express.json());
 
+function sendAuthError(res, error) {
+  const status = error instanceof AuthError || error instanceof CentralAuthError ? error.status : 500;
+  if (status === 500) console.error('[Auth]', error);
+  res.status(status).json({
+    success: false,
+    code: error.code || 'AUTH_ERROR',
+    message: status === 500 ? 'Không thể xử lý yêu cầu đăng nhập.' : error.message
+  });
+}
+
+// Authentication comes before license activation: users sign in first, then
+// the authenticated application checks or activates this machine's key.
+app.post('/api/auth/register-otp', async (req, res) => {
+  try {
+    const data = await centralAuthClient.requestRegistrationOtp(req.body?.email);
+    res.json({ success: true, data });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.post('/api/auth/reset-password-otp', async (req, res) => {
+  try {
+    const data = await centralAuthClient.requestResetPasswordOtp(req.body?.email);
+    res.json({ success: true, data });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const data = await centralAuthClient.resetPassword(req.body || {});
+    res.json({ success: true, message: data?.message || 'Đặt lại mật khẩu thành công!' });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const user = await authService.registerManaged(req.body || {}, centralAuthClient);
+    const session = authService.login(req.body || {});
+    res.setHeader('Set-Cookie', authService.sessionCookie(session.token));
+    res.status(201).json({ success: true, user });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const session = isLocalDevRequest(req, 'LOCAL_DEV_AUTH')
+      ? authService.login(req.body || {})
+      : await authService.loginManaged(req.body || {}, centralAuthClient);
+    res.setHeader('Set-Cookie', authService.sessionCookie(session.token));
+    res.json({ success: true, user: session.user });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+let latestLocalSession = null;
+
+app.post('/api/auth/google', async (req, res) => {
+  try {
+    const session = await authService.loginGoogleManaged(req.body || {}, centralAuthClient);
+    res.setHeader('Set-Cookie', authService.sessionCookie(session.token));
+    latestLocalSession = { token: session.token, user: session.user, expiresAt: Date.now() + 60000 };
+    io.emit('AUTH_SUCCESS', { user: session.user, token: session.token });
+    res.json({ success: true, user: session.user });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.get('/api/auth/latest-local-session', (req, res) => {
+  if (latestLocalSession && Date.now() < latestLocalSession.expiresAt) {
+    const sessionData = latestLocalSession;
+    latestLocalSession = null;
+    res.setHeader('Set-Cookie', authService.sessionCookie(sessionData.token));
+    return res.json({ success: true, user: sessionData.user, token: sessionData.token });
+  }
+  res.status(404).json({ success: false });
+});
+
+app.post('/api/auth/claim-token', (req, res) => {
+  const { token } = req.body || {};
+  if (!token) return res.status(400).json({ success: false, message: 'Thiếu token' });
+  res.setHeader('Set-Cookie', authService.sessionCookie(token));
+  res.json({ success: true });
+});
+
+app.get('/google-auth-external', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="vi">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Xác thực Google - FB Messenger CRM</title>
+      <script src="https://accounts.google.com/gsi/client" async defer onload="initGoogle()"></script>
+      <style>
+        body { font-family: system-ui, -apple-system, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f8fafc; color: #0f172a; }
+        .card { background: white; padding: 2.5rem; border-radius: 1rem; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 90%; }
+        h2 { margin-top: 0; color: #1e293b; font-size: 1.5rem; }
+        p { color: #64748b; font-size: 0.95rem; margin-bottom: 1.5rem; line-height: 1.5; }
+        .success { color: #16a34a; font-weight: 600; display: none; margin-top: 1.5rem; padding: 0.75rem; background: #f0fdf4; border-radius: 0.5rem; border: 1px solid #bbf7d0; }
+        .error { color: #dc2626; font-weight: 500; display: none; margin-top: 1.5rem; padding: 0.75rem; background: #fef2f2; border-radius: 0.5rem; border: 1px solid #fecaca; font-size: 0.9rem; }
+        .btn-container { display: flex; justify-content: center; margin-top: 1rem; min-height: 50px; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h2>MISSPRICE CRM</h2>
+        <p>Vui lòng chọn tài khoản Google để tiếp tục sử dụng ứng dụng Desktop.</p>
+        <div class="btn-container">
+          <div id="googleBtn"></div>
+        </div>
+        <div id="msg-success" class="success">✓ Đăng nhập thành công! Cửa sổ này sẽ tự động đóng...</div>
+        <div id="msg-error" class="error"></div>
+      </div>
+      <script>
+        function initGoogle() {
+          if (!window.google?.accounts?.id) return;
+          google.accounts.id.initialize({
+            client_id: '436041288370-9v5egma47gmsbi2pgalj77un535j15r7.apps.googleusercontent.com',
+            callback: handleCredentialResponse,
+            ux_mode: 'popup',
+            auto_select: false
+          });
+          google.accounts.id.renderButton(
+            document.getElementById("googleBtn"),
+            { theme: "outline", size: "large", width: 320, text: "signin_with", shape: "rectangular" }
+          );
+        }
+        window.addEventListener('load', () => {
+          if (window.google?.accounts?.id) initGoogle();
+        });
+        async function handleCredentialResponse(response) {
+          const errDiv = document.getElementById('msg-error');
+          const succDiv = document.getElementById('msg-success');
+          errDiv.style.display = 'none';
+          try {
+            const res = await fetch('/api/auth/google', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ credential: response.credential })
+            });
+            const result = await res.json();
+            if (result.success) {
+              succDiv.style.display = 'block';
+              setTimeout(() => { try { window.close(); } catch(_) {} }, 1500);
+            } else {
+              errDiv.textContent = result.message || 'Đăng nhập bằng Google thất bại.';
+              errDiv.style.display = 'block';
+            }
+          } catch(e) {
+            errDiv.textContent = 'Không thể kết nối đến máy chủ.';
+            errDiv.style.display = 'block';
+          }
+        }
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+app.get('/api/auth/me', async (req, res) => {
+  const user = authService.getRequestUser(req);
+  if (!user) return res.status(401).json({ success: false, code: 'AUTH_REQUIRED' });
+  if (isLocalDevRequest(req, 'LOCAL_DEV_AUTH')) {
+    return res.json({ success: true, user });
+  }
+  try {
+    const status = await centralAuthClient.accountStatus(user.username);
+    if (status?.data?.company_role && status.data.company_role !== user.company_role) {
+      authService.db.prepare('UPDATE users SET company_role=? WHERE id=?').run(status.data.company_role, user.id);
+      user.company_role = status.data.company_role;
+    }
+  } catch (error) {
+    if (error instanceof CentralAuthError && ['USER_NOT_FOUND', 'ACCOUNT_BLOCKED'].includes(error.code)) {
+      authService.revokeRequestSession(req);
+      res.setHeader('Set-Cookie', authService.clearCookie());
+      return res.status(401).json({ success: false, code: error.code, message: error.message });
+    }
+    // A temporary License Server outage must not destroy a valid local session.
+  }
+  res.json({ success: true, user });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  authService.revokeRequestSession(req);
+  res.setHeader('Set-Cookie', authService.clearCookie());
+  res.json({ success: true });
+});
+
+// Desktop startup probes this endpoint before a user session or license exists.
+// Keep it ahead of both API protection middlewares so Electron can verify that
+// it is talking to the backend process started by this exact app instance.
+app.get('/api/health', (req, res) => res.json({
+  status: 'OK', uptime: process.uptime(),
+  db: 'SQLite WAL Mode', activeExtensions: extensionConnections.size,
+  instance_token: process.env.CRM_INSTANCE_TOKEN || null,
+  pid: process.pid
+}));
+
+const requireAuthenticatedApi = authService.middleware();
+app.use('/api', (req, res, next) => {
+  // Central payment callbacks and order polling must remain reachable before
+  // a user session exists. License status/activation intentionally do not:
+  // the product flow is authenticate first, then activate the workstation.
+  const unauthenticatedPaymentPaths = [
+    '/payment/sepay-webhook',
+    '/orders/create',
+    '/orders/status',
+    '/extension/reload'
+  ];
+  if (unauthenticatedPaymentPaths.some((pathPrefix) => req.path.startsWith(pathPrefix))) return next();
+  return requireAuthenticatedApi(req, res, next);
+});
+
+// 1. API Kiểm tra trạng thái bản quyền cục bộ
+app.get('/api/license/status', async (req, res) => {
+  try {
+    if (isLocalDevRequest(req, 'LOCAL_DEV_SKIP_LICENSE')) {
+      return res.json({
+        success: true,
+        data: {
+          isLicensed: true,
+          reason: 'LOCAL_DEV',
+          message: 'Đang dùng chế độ kiểm thử local.',
+          key: 'LOCAL-DEV'
+        }
+      });
+    }
+    const user = authService.getRequestUser(req);
+    const savedKey = licenseChecker.getSavedKey();
+
+    // Nếu máy này chưa/đã bị đăng xuất Key (không có savedKey) và không phải tài khoản nhân viên
+    if (!savedKey && user?.company_role !== 'EMPLOYEE') {
+      return res.json({
+        success: true,
+        data: {
+          isLicensed: false,
+          reason: 'NO_KEY',
+          message: 'Máy này chưa kích hoạt License Key.'
+        }
+      });
+    }
+
+    const { getMachineId } = require('./utils/machineId');
+    const response = await fetch(`${LICENSE_SERVER_BASE_URL}/api/client-auth/license-status`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: user.username, key: savedKey, machineId: getMachineId() })
+    });
+    const result = await response.json();
+    if (result.success && result.data?.valid && result.data?.key && savedKey) {
+      if (licenseChecker.getSavedKey() !== result.data.key) {
+        licenseChecker.saveKey(result.data.key);
+      }
+    }
+    res.json({ success: true, data: { isLicensed: Boolean(result.data?.valid), ...result.data } });
+  } catch (error) {
+    res.json({ success: true, data: { isLicensed: false, reason: 'LICENSE_SERVER_UNAVAILABLE', message: 'Không thể kiểm tra gói tài khoản.' } });
+  }
+});
+
+// 2. API Kích hoạt Key mới
+app.post('/api/license/activate', async (req, res) => {
+  try {
+    const { key } = req.body;
+    if (!key) return res.status(400).json({ success: false, message: 'Thiếu mã Key' });
+
+    const normalizedKey = key.trim();
+    const { getMachineId } = require('./utils/machineId');
+    const machineId = getMachineId();
+
+    const centralResponse = await fetch(`${LICENSE_SERVER_BASE_URL}/api/license/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key: normalizedKey,
+        machineId,
+        deviceName: 'Máy CRM Desktop',
+        clientUsername: authService.getRequestUser(req).username
+      })
+    });
+    const centralResult = await centralResponse.json();
+
+    if (!centralResponse.ok || !centralResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: centralResult.message || centralResult.error || 'Không thể kích hoạt Key trên License Server',
+        data: centralResult
+      });
+    }
+
+    licenseChecker.saveKey(normalizedKey);
+    const status = await licenseChecker.verify();
+
+    if (status.isLicensed) {
+      res.json({ success: true, message: 'Kích hoạt bản quyền thành công!', data: status });
+    } else {
+      licenseChecker.removeKey();
+      res.status(400).json({ success: false, message: status.message || 'Mã Key không hợp lệ', data: status });
+    }
+  } catch (e) {
+    res.status(500).json({ success: false, message: 'Không thể kết nối License Server', error: e.message });
+  }
+});
+
+// 2b. Lưu tên công ty cho chính Key đang được kích hoạt trên máy này
+app.post('/api/license/company', async (req, res) => {
+  try {
+    const companyName = String(req.body?.companyName || '').trim().replace(/\s+/g, ' ');
+    if (companyName.length < 2 || companyName.length > 120) {
+      return res.status(400).json({ success: false, message: 'Tên công ty phải từ 2 đến 120 ký tự' });
+    }
+
+    const savedKey = licenseChecker.getSavedKey();
+    if (!savedKey) {
+      return res.status(400).json({ success: false, message: 'Máy chưa có License Key đã kích hoạt' });
+    }
+
+    const centralResponse = await fetch(`${LICENSE_SERVER_BASE_URL}/api/license/company`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: savedKey, companyName })
+    });
+    const centralResult = await centralResponse.json();
+    if (!centralResponse.ok || !centralResult.success) {
+      return res.status(centralResponse.status || 400).json(centralResult);
+    }
+    res.json(centralResult);
+  } catch (error) {
+    res.status(502).json({ success: false, message: 'Không thể kết nối License Server để lưu tên công ty', error: error.message });
+  }
+});
+
+// 3. API Đăng xuất Key
+app.post('/api/license/deactivate', async (req, res) => {
+  try {
+    const key = licenseChecker.getSavedKey();
+    if (key) {
+      const { getMachineId } = require('./utils/machineId');
+      const machineId = getMachineId();
+      await fetch(`${LICENSE_SERVER_BASE_URL}/api/license/deactivate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, machineId })
+      }).catch(() => {});
+    }
+    licenseChecker.removeKey();
+    res.json({ success: true, message: 'Đã hủy đăng ký bản quyền trên máy này' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Proxy / Forward SePay Webhook sang Central License Server (Port 5055)
+app.post('/api/payment/sepay-webhook', async (req, res) => {
+  try {
+    const fetchRes = await fetch(`${LICENSE_SERVER_BASE_URL}/api/sepay/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+    const json = await fetchRes.json();
+    res.status(fetchRes.status).json(json);
+  } catch (err) {
+    console.error('[Server 5050 Proxy SePay Error]:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Áp dụng Middleware Bảo Vệ Khóa Backend cho tất cả các API CRM
+app.use('/api', licenseChecker.middleware());
+
 // Static: React Dashboard UI & Media files
-app.use(express.static(path.join(__dirname, '../../../dist/client'), { 
-  setHeaders: (res, path) => {
-    if (path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')) {
+const clientDistPath = path.join(__dirname, '../../dist/client');
+app.use(express.static(clientDistPath, {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('index.html') || filePath.endsWith('.js') || filePath.endsWith('.css')) {
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    } else if (filePath.endsWith('.jpg') || filePath.endsWith('.jpeg') || filePath.endsWith('.png')) {
       res.set('Cache-Control', 'public, max-age=31536000, immutable');
     }
   } 
 }));
-const clientDistPath = path.join(__dirname, '../../dist/client');
-app.use(express.static(clientDistPath));
-app.use('/data/media', express.static(path.join(__dirname, '../../data/media')));
-app.use('/data/exports', express.static(path.join(__dirname, '../../data/exports')));
+app.use('/data/media', express.static(path.join(APP_DATA_ROOT, 'media')));
+app.use('/data/exports', express.static(path.join(APP_DATA_ROOT, 'exports')));
 
 const server = http.createServer(app);
-const io = new SocketIOServer(server, { cors: { origin: '*' } });
+const io = new SocketIOServer(server, { cors: { origin: true, credentials: true } });
+io.use((socket, next) => {
+  const user = authService.getRequestUser({ headers: socket.handshake.headers });
+  if (!user) return next(new Error('AUTH_REQUIRED'));
+  socket.user = user;
+  next();
+});
 const wss = new WebSocket.Server({ noServer: true });
 const extensionConnections = new Map();
+const messageRequestActionOwners = new Map();
+const pendingAccountOwners = new Map();
+// Existing-account "Kết nối Facebook" launches should become background
+// processes only after that account's extension has registered successfully.
+// New-account pending sessions are intentionally excluded so the login window
+// stays visible for the operator.
+const backgroundAfterConnectRequests = new Map();
+// A newly-added Facebook profile first registers with pending_key while the
+// operator completes login/PIN. Its normal REGISTER_ACCOUNT arrives later.
+// Keep a bounded bootstrap retry here so that account enters the same inbox +
+// requests sync pipeline as the existing "Connect Facebook" action, even if
+// the first scan races the three Messenger role tabs becoming ready.
+const newAccountBootstrapSyncs = new Map();
 const domReplaySuppressUntil = new Map();
+const callEventDeduplicator = new CallEventDeduplicator();
+const historyBackfillJobs = new Map();
+const bulkHistoryJobs = new Map();
+// Diagnostic mode requested by the operator: keep managed Facebook Chrome
+// visible after Connect Facebook so realtime/sync behaviour can be observed.
+// Existing background-mode code remains intact and can be restored by setting
+// this flag to false.
+const KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE = false;
+const backgroundAfterConnectTimers = new Map();
+
+function enterBackgroundAfterSyncWindow(accountId, requestedAt, reason = 'sync_finished') {
+  const key = String(accountId || '');
+  if (!key || !Number.isFinite(requestedAt) || KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) return;
+  const existing = backgroundAfterConnectTimers.get(key);
+  if (existing) clearTimeout(existing);
+  const remaining = Math.max(0, 120000 - (Date.now() - requestedAt));
+  const timer = setTimeout(() => {
+    backgroundAfterConnectTimers.delete(key);
+    if (backgroundAfterConnectRequests.get(key) !== requestedAt) return;
+    backgroundAfterConnectRequests.delete(key);
+    processManager.hideAccountProcess(key);
+    console.log(`[BACKGROUND_AFTER_SYNC] account=${key} hidden=true reason=${reason}`);
+  }, remaining);
+  backgroundAfterConnectTimers.set(key, timer);
+  if (typeof timer.unref === 'function') timer.unref();
+}
+
+function scheduleNewAccountBootstrapSync(accountId) {
+  const key = String(accountId || '');
+  if (!key || newAccountBootstrapSyncs.has(key)) return;
+  const state = { attempt: 0, timer: null };
+  const delays = [4000, 18000, 45000];
+  const dispatch = () => {
+    if (!newAccountBootstrapSyncs.has(key)) return;
+    const attempt = state.attempt++;
+    const dispatched = InboxSyncScheduler.requestSidebarSync(key, 'new_account_bootstrap');
+    console.log(`[NEW_ACCOUNT_BOOTSTRAP_SYNC] account=${key} attempt=${attempt + 1}/${delays.length} dispatched=${dispatched}`);
+    if (state.attempt >= delays.length) {
+      newAccountBootstrapSyncs.delete(key);
+      return;
+    }
+    state.timer = setTimeout(dispatch, delays[state.attempt]);
+    if (typeof state.timer.unref === 'function') state.timer.unref();
+  };
+  newAccountBootstrapSyncs.set(key, state);
+  state.timer = setTimeout(dispatch, delays[0]);
+  if (typeof state.timer.unref === 'function') state.timer.unref();
+}
+
+function completeNewAccountBootstrapSync(accountId) {
+  const key = String(accountId || '');
+  const state = newAccountBootstrapSyncs.get(key);
+  if (!state) return;
+  if (state.timer) clearTimeout(state.timer);
+  newAccountBootstrapSyncs.delete(key);
+  console.log(`[NEW_ACCOUNT_BOOTSTRAP_SYNC] account=${key} completed`);
+}
+
+function sanitizeLog(str, maxLen = 120) {
+  if (!str) return '';
+  const cleaned = String(str).replace(/[\r\n]+/g, ' ').trim();
+  return cleaned.length > maxLen ? cleaned.substring(0, maxLen) + '...' : cleaned;
+}
 
 const richContentSecret = crypto.randomBytes(32);
-
-function isLoopbackAddress(address) {
-  const normalized = String(address || '').toLowerCase();
-  return normalized === '127.0.0.1' ||
-    normalized === '::1' ||
-    normalized === '::ffff:127.0.0.1';
-}
 
 function requireLocalCrmRequest(req, res, next) {
   if (isLoopbackAddress(req.socket?.remoteAddress) === false) {
@@ -177,9 +658,34 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 // ── Helper: gửi tin nhắn qua Extension WebSocket ──────────────────────────
+function deleteOutboundMessageRows({ messageId = null, threadId = null, clientMessageId = null, failedOnly = false } = {}) {
+  const clauses = [];
+  const params = [];
+  if (messageId != null) { clauses.push('id = ?'); params.push(messageId); }
+  if (threadId != null) { clauses.push('thread_id = ?'); params.push(String(threadId)); }
+  if (clientMessageId != null) { clauses.push('client_message_id = ?'); params.push(String(clientMessageId)); }
+  if (!clauses.length) return 0;
+  const failedClause = failedOnly ? " AND delivery_status = 'failed'" : '';
+  const rows = db.prepare(`SELECT id FROM messages WHERE ${clauses.join(' AND ')}${failedClause}`).all(...params);
+  if (!rows.length) return 0;
+  return db.transaction((messageIds) => {
+    const attempts = db.prepare(`SELECT id FROM outbound_attempts WHERE message_id IN (${messageIds.map(() => '?').join(',')})`).all(...messageIds);
+    if (attempts.length) {
+      const attemptIds = attempts.map((row) => row.id);
+      const placeholders = attemptIds.map(() => '?').join(',');
+      db.prepare(`UPDATE message_queue SET outbound_attempt_id = NULL WHERE outbound_attempt_id IN (${placeholders})`).run(...attemptIds);
+      db.prepare(`UPDATE messages SET latest_attempt_id = NULL WHERE latest_attempt_id IN (${placeholders})`).run(...attemptIds);
+      db.prepare(`DELETE FROM outbound_attempts WHERE id IN (${placeholders})`).run(...attemptIds);
+    }
+    return db.prepare(`DELETE FROM messages WHERE id IN (${messageIds.map(() => '?').join(',')})`).run(...messageIds).changes;
+  })(rows.map((row) => row.id));
+}
+
 async function sendViaExtension(thread_id, text, client_message_id = null) {
   // Tìm account_id của thread
-  const thread = db.prepare('SELECT account_id FROM threads WHERE id = ?').get(thread_id);
+  const thread = db.prepare(
+    'SELECT account_id, contact_name, thread_url FROM threads WHERE id = ?'
+  ).get(thread_id);
   if (!thread) throw new Error(`Thread ${thread_id} không tồn tại`);
 
   const extWs = extensionConnections.get(thread.account_id);
@@ -227,8 +733,38 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
   } else {
     // Persist trước khi dispatch để DOM/network confirmation không chạy vào race
     // window và luôn tìm thấy bản ghi pending để ghép đúng client_message_id.
-    extWs.send(JSON.stringify({ type: 'SEND_MESSAGE', data: { thread_id, content: text, client_message_id: clientMsgId } }));
+    extWs.send(JSON.stringify({
+      type: 'SEND_MESSAGE',
+      data: {
+        account_id: thread.account_id,
+        thread_id,
+        thread_url: thread.thread_url || null,
+        expected_contact_name: thread.contact_name || null,
+        content: text,
+        client_message_id: clientMsgId
+      }
+    }));
     trace('BACKEND_DISPATCHED_EXTENSION');
+
+    // Never leave the CRM bubble pending forever when an extension handler
+    // stalls before returning SEND_MESSAGE_RESULT.
+    setTimeout(() => {
+      const pending = db.prepare(`
+        SELECT id FROM messages
+        WHERE client_message_id = ? AND delivery_status = 'pending'
+      `).get(clientMsgId);
+      if (!pending) return;
+      const timeoutError = 'Extension không xác nhận kết quả gửi trong 30 giây';
+      deleteOutboundMessageRows({ messageId: pending.id });
+      io.emit('MESSAGE_SEND_FAILED', {
+        thread_id,
+        client_message_id: clientMsgId,
+        success: false,
+        status: 'failed',
+        error: timeoutError,
+        error_code: 'EXTENSION_ACK_TIMEOUT'
+      });
+    }, 30000);
   }
 
   io.emit('NEW_MESSAGE', {
@@ -332,34 +868,107 @@ wss.on('connection', (ws, req) => {
       switch (msg.type) {
         case 'REGISTER_ACCOUNT': {
           const { account_id, name, pending_key } = msg.data;
+          // Facebook sets c_user=0 as a placeholder while a page is mid-login;
+          // extension-side already guards this (content.js sanitizeUserId), but
+          // reject it here too so a stale/unpatched extension can never create
+          // a bogus "FB Account (0)" row.
+          if (!account_id || String(account_id).trim() === '0') {
+            console.warn(`[WS] Bỏ qua REGISTER_ACCOUNT với account_id không hợp lệ: ${JSON.stringify(account_id)}`);
+            break;
+          }
+          const removedAccount = db.prepare(
+            'SELECT account_id FROM removed_accounts WHERE account_id = ?'
+          ).get(String(account_id));
+          if (removedAccount && !pending_key) {
+            console.warn(`[WS] Từ chối stale REGISTER_ACCOUNT của tài khoản đã xóa: ${account_id}`);
+            ws.close(1000, 'ACCOUNT_REMOVED');
+            break;
+          }
+          if (pending_key) {
+            db.prepare('DELETE FROM removed_accounts WHERE account_id = ?').run(String(account_id));
+          }
+          let ownerUserId = pending_key ? pendingAccountOwners.get(String(pending_key)) : null;
+          if (pending_key && !ownerUserId) {
+            try {
+              const ownerFile = path.join(APP_DATA_ROOT, 'profiles', String(pending_key), '.crm-pending-owner.json');
+              if (fs.existsSync(ownerFile)) {
+                const ownerData = JSON.parse(fs.readFileSync(ownerFile, 'utf8'));
+                ownerUserId = ownerData.userId || null;
+              }
+            } catch (_) {}
+          }
+          const previousExtension = extensionConnections.get(account_id);
+          if (previousExtension && previousExtension !== ws && previousExtension.readyState === WebSocket.OPEN) {
+            previousExtension.close(1000, 'ACCOUNT_CONNECTION_REPLACED');
+          }
           extensionConnections.set(account_id, ws);
+          // A pending account is still inside Facebook's interactive login /
+          // encrypted-history PIN setup. Do not start background sidebar
+          // polling until the operator finishes setup and reconnects it as an
+          // existing account (REGISTER_ACCOUNT without pending_key).
+          if (!pending_key) InboxSyncScheduler.registerAccount(account_id);
+          else newAccountBootstrapSyncs.set(String(account_id), { awaitingSetup: true, attempt: 0, timer: null });
           domReplaySuppressUntil.set(account_id, Date.now() + 8000);
           ws.accountId = account_id;
 
-          let profileDir = `data/profiles/${account_id}`;
+          // profileDir: use pending_key path (new account setup), or keep existing from DB,
+          // or fallback to data/profiles/{account_id}.
+          let profileDir = null;
           if (pending_key) {
-            profileDir = `data/profiles/${pending_key}`;
+            // New account just logged in via pending Chrome session
+            profileDir = path.join(APP_DATA_ROOT, 'profiles', pending_key);
             if (processManager.processes.has(pending_key)) {
               const procData = processManager.processes.get(pending_key);
-              processManager.processes.set(account_id, procData);
+              processManager.promotePendingProcess(pending_key, account_id);
+              profileDir = procData.profileDir || profileDir;
             }
+          } else {
+            // Reconnect of an existing account - preserve whatever profile_dir is already in DB.
+            // Only fall back to the default path if account is truly new (not in DB yet).
+            const existingAcc = db.prepare('SELECT profile_dir FROM accounts WHERE id = ?').get(account_id);
+            profileDir = existingAcc?.profile_dir || `data/profiles/${account_id}`;
           }
 
           const accName = name || `FB Account (${account_id})`;
 
           db.prepare(`
-            INSERT INTO accounts (id, name, profile_dir, status)
-            VALUES (?, ?, ?, 'ACTIVE')
+            INSERT INTO accounts (id, name, profile_dir, status, owner_user_id, company_id)
+            VALUES (?, ?, ?, 'ACTIVE', ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               name = COALESCE(excluded.name, accounts.name),
-              profile_dir = COALESCE(excluded.profile_dir, accounts.profile_dir),
+              profile_dir = CASE
+                WHEN excluded.profile_dir LIKE '%/pending_%' THEN excluded.profile_dir
+                ELSE COALESCE(accounts.profile_dir, excluded.profile_dir)
+              END,
               status = 'ACTIVE',
+              owner_user_id = COALESCE(excluded.owner_user_id, accounts.owner_user_id),
+              company_id = COALESCE(excluded.company_id, accounts.company_id),
               last_broadcast_date = DATE('now')
-          `).run(account_id, accName, profileDir);
+          `).run(account_id, accName, profileDir, ownerUserId || null,
+            ownerUserId ? db.prepare('SELECT company_id FROM users WHERE id=?').get(ownerUserId)?.company_id || ownerUserId : null);
+          if (pending_key) {
+            pendingAccountOwners.delete(String(pending_key));
+            try {
+              fs.unlinkSync(path.join(APP_DATA_ROOT, 'profiles', String(pending_key), '.crm-pending-owner.json'));
+            } catch (_) {}
+          }
 
           console.log(`[WS] REGISTER_ACCOUNT thành công: account_id=${account_id}, profile_dir=${profileDir}`);
+          try {
+            InboxSourceService.createPersonalSource(account_id, accName, db);
+          } catch (_) {}
           io.emit('ACCOUNT_STATUS_CHANGED', { account_id, status: 'ACTIVE' });
+          io.emit('INBOX_SOURCE_ADDED', { id: 'src_personal_' + account_id, source_type: 'personal_messenger', display_name: accName });
           io.emit('EXTENSION_CONNECTION_CHANGED', { account_id, is_connected: true });
+
+          const backgroundRequestedAt = backgroundAfterConnectRequests.get(String(account_id));
+          const backgroundRequestIsFresh = Number.isFinite(backgroundRequestedAt)
+            && Date.now() - backgroundRequestedAt < 120000;
+          if (!pending_key && backgroundRequestIsFresh && !KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) {
+            backgroundAfterConnectRequests.delete(String(account_id));
+            processManager.hideAccountProcess(account_id);
+            console.log(`[BACKGROUND_SYNC] account=${account_id} hidden_immediately=true`);
+          }
 
           // Gửi ACK về Extension xác nhận đăng ký thành công
           if (ws.readyState === WebSocket.OPEN) {
@@ -367,15 +976,32 @@ wss.on('connection', (ws, req) => {
               type: 'REGISTER_ACCOUNT_ACK',
               data: { account_id, status: 'SUCCESS', pending_key }
             }));
+            const bootstrapState = newAccountBootstrapSyncs.get(String(account_id));
+            if (!pending_key && bootstrapState?.awaitingSetup) {
+              newAccountBootstrapSyncs.delete(String(account_id));
+              scheduleNewAccountBootstrapSync(account_id);
+            }
           }
 
-          // Trigger đồng bộ threads ngay sau khi extension đăng ký
-          setTimeout(() => {
-            if (ws.readyState === ws.OPEN) {
-              ws.send(JSON.stringify({ type: 'SYNC_THREADS', data: { account_id } }));
-              console.log(`[WS] Gửi SYNC_THREADS đến extension tài khoản: ${account_id}`);
-            }
-          }, 1500);
+          // Trigger đồng bộ threads ngay sau khi extension đăng ký - nhưng bỏ qua
+          // nếu vừa dispatch gần đây, vì REGISTER_ACCOUNT có thể lặp lại dồn dập
+          // do service worker của extension bị Chrome khởi động lại (spec 042).
+          // Phần rebind extensionConnections/ACK phía trên vẫn luôn chạy bình
+          // thường - chỉ việc quét lại sidebar là được cooldown.
+          const nowMs = Date.now();
+          if (pending_key) {
+            console.log(`[WS] Bỏ qua auto SYNC_THREADS trong phiên thiết lập/PIN: account=${account_id}`);
+          } else if (SidebarSyncCooldown.isInCooldown(account_id, nowMs)) {
+            console.log(`[WS] Bỏ qua auto SYNC_THREADS sau REGISTER_ACCOUNT (còn cooldown ${SidebarSyncCooldown.remainingMs(account_id, nowMs)}ms): account=${account_id}`);
+          } else {
+            SidebarSyncCooldown.markDispatched(account_id, nowMs);
+            setTimeout(() => {
+              if (ws.readyState === ws.OPEN) {
+                ws.send(JSON.stringify({ type: 'SYNC_THREADS', data: { account_id } }));
+                console.log(`[WS] Gửi SYNC_THREADS đến extension tài khoản: ${account_id}`);
+              }
+            }, 1500);
+          }
           break;
         }
 
@@ -421,7 +1047,14 @@ wss.on('connection', (ws, req) => {
               console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DISPATCHED_ALREADY_FAILED', thread_id: String(thread_id), client_message_id, at: new Date().toISOString() }));
             } else {
               console.log(`[WS] Composer đã dispatch tin; giữ pending chờ DOM/network confirmation: ${client_message_id}`);
-              io.emit('MESSAGE_SEND_PENDING', { thread_id, client_message_id, status: 'pending', error_code });
+              // Composer cleared successfully. Stop the first-message spinner,
+              // but keep SQLite pending for late Facebook DOM correlation.
+              io.emit('MESSAGE_SENT', {
+                thread_id,
+                client_message_id,
+                status: 'sent',
+                provisional: true
+              });
               console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_CONFIRMATION_GRACE', thread_id: String(thread_id), client_message_id, at: new Date().toISOString() }));
             }
           } else {
@@ -446,15 +1079,14 @@ wss.on('connection', (ws, req) => {
               setTimeout(() => {
                 const stillPending = db.prepare(`SELECT id FROM messages WHERE client_message_id = ? AND delivery_status = 'pending'`).get(client_message_id);
                 if (!stillPending) return;
-                db.prepare(`UPDATE messages SET delivery_status = 'failed', delivery_error = ? WHERE id = ?`).run(failureText, stillPending.id);
+              deleteOutboundMessageRows({ messageId: stillPending.id });
                 io.emit('MESSAGE_SEND_FAILED', { thread_id, client_message_id, success: false, status: 'failed', error: failureText, error_code: error_code || 'CONFIRMATION_TIMEOUT' });
               }, 5000);
             } else {
               // Lỗi chắc chắn không thể gửi: giữ lịch sử nhưng chuyển failed ngay.
-              db.prepare(`
-                UPDATE messages SET delivery_status = 'failed', delivery_error = ?
+              db.prepare(`DELETE FROM messages
                 WHERE (client_message_id = ? OR fb_message_id = ?) AND is_outgoing = 1
-              `).run(failureText, client_message_id, `pending_${client_message_id}`);
+              `).run(client_message_id, `pending_${client_message_id}`);
               io.emit('MESSAGE_SEND_FAILED', { thread_id, client_message_id, success: false, status: 'failed', error: failureText, error_code });
             }
           }
@@ -468,7 +1100,7 @@ wss.on('connection', (ws, req) => {
           // reachable during live debugging. Remove once T020 is closed.
           try {
             fs.appendFileSync(
-              path.join(__dirname, '../../data/composer-debug.log'),
+              path.join(APP_DATA_ROOT, 'composer-debug.log'),
               JSON.stringify({ at: new Date().toISOString(), source: 'CONTENT_DEBUG', ...msg.data }) + '\n'
             );
           } catch (error) {
@@ -485,7 +1117,7 @@ wss.on('connection', (ws, req) => {
           // T020 is confirmed fixed by a live send.
           try {
             fs.appendFileSync(
-              path.join(__dirname, '../../data/composer-debug.log'),
+              path.join(APP_DATA_ROOT, 'composer-debug.log'),
               JSON.stringify({ at: new Date().toISOString(), ...msg.data }) + '\n'
             );
           } catch (error) {
@@ -502,27 +1134,45 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
-        case 'INCOMING_CALL_RINGING': {
-          const m = msg.data || {};
-          console.log(`[CALL_DEBUG] 🔔 Phát hiện CUỘC GỌI ĐANG REO từ Extension: thread=${m.thread_id || 'unknown'}, caller=${m.caller_name}`);
-          const targetAcct = m.account_id || ws.accountId || null;
-          const internalThreadId = m.thread_id ? resolveInternalThreadId(db, targetAcct, m.thread_id) : null;
-          io.emit('INCOMING_CALL_RINGING', {
-            thread_id: internalThreadId || m.thread_id || null,
-            external_thread_id: m.thread_id || null,
-            account_id: targetAcct,
-            caller_name: m.caller_name || 'Khách hàng',
-            timestamp: m.timestamp || Date.now()
-          });
-          break;
-        }
+        case 'THREAD_METADATA_UPDATED': {
+          const { account_id, thread_id, contact_name, avatar_url, page_id } = msg.data || {};
+          const tidStr = String(thread_id || '');
+          if (!tidStr) break;
 
-        case 'INCOMING_CALL_ENDED': {
-          const m = msg.data || {};
-          console.log(`[CALL_DEBUG] 📴 Cuộc gọi đã ngừng reo: account=${m.account_id || ws.accountId || 'unknown'}`);
-          io.emit('INCOMING_CALL_ENDED', {
-            account_id: m.account_id || ws.accountId || null,
-            timestamp: m.timestamp || Date.now()
+          let updatedName = null;
+          let localAvatarPath = null;
+
+          if (contact_name && !isInvalidContactName(contact_name)) {
+            updatedName = contact_name.trim();
+            db.prepare('UPDATE threads SET contact_name = ? WHERE id = ?').run(updatedName, tidStr);
+            db.prepare(`
+              INSERT INTO contacts (thread_id, name)
+              VALUES (?, ?)
+              ON CONFLICT(thread_id) DO UPDATE SET
+                name = excluded.name
+            `).run(tidStr, updatedName);
+          }
+
+          if (avatar_url && avatar_url.startsWith('http')) {
+            try {
+              localAvatarPath = await saveAvatarFromBase64OrUrl(avatar_url, tidStr);
+              if (localAvatarPath) {
+                db.prepare(`
+                  INSERT INTO contacts (thread_id, name, avatar_url)
+                  VALUES (?, ?, ?)
+                  ON CONFLICT(thread_id) DO UPDATE SET
+                    avatar_url = excluded.avatar_url
+                `).run(tidStr, updatedName || 'Khách hàng', localAvatarPath);
+              }
+            } catch (e) {
+              console.warn('[WS] Avatar save failed:', e.message);
+            }
+          }
+
+          io.emit('CONTACT_UPDATED', {
+            thread_id: tidStr,
+            ...(updatedName ? { name: updatedName } : {}),
+            ...(localAvatarPath ? { avatar_url: localAvatarPath } : {})
           });
           break;
         }
@@ -530,67 +1180,107 @@ wss.on('connection', (ws, req) => {
         case 'NEW_MESSAGE_RECEIVED': {
           const m = msg.data;
           const threadId = String(m.thread_id || '');
-          console.log(`[WS] 📩 Nhận NEW_MESSAGE_RECEIVED | Source: ${m.source || 'unknown'} | Thread: ${threadId} | FB Message ID: ${m.fb_message_id} | Content: "${(m.content || '').substring(0, 80)}"`);
-          const _rawContentLower = (m.content || '').toLowerCase();
-          const isCallLog = _rawContentLower.includes('cuộc gọi') || _rawContentLower.includes('bỏ lỡ') || _rawContentLower.includes('đã nhỡ') || _rawContentLower.includes('nhỡ cuộc') || _rawContentLower.includes('video') || _rawContentLower.includes('chat video');
-          if (isCallLog) {
-            console.log(`[CALL_DEBUG] 📞 Backend nhận CALL LOG từ Extension: content="${m.content}", thread=${threadId}, fb_id=${m.fb_message_id}`);
+          console.log(`[WS] 📩 Nhận NEW_MESSAGE_RECEIVED | Source: ${m.source || 'unknown'} | Thread: ${threadId} | FB Message ID: ${m.fb_message_id} | Content: "${sanitizeLog(m.content, 80)}"`);
+          if (!threadId || threadId === 'unknown_dom' || threadId.trim() === '') {
+            console.warn(`[WS] ⚠️ Bỏ qua tin nhắn từ Thread ID không hợp lệ: "${threadId}"`);
+            break;
           }
-          if (!threadId || threadId === 'unknown_dom' || !/^\d+$/.test(threadId)) {
+          const _rawContentLower = (m.content || '').toLowerCase();
+          const isCallLog = _rawContentLower.includes('cuộc gọi') || _rawContentLower.includes('bỏ lỡ') || _rawContentLower.includes('đã nhỡ') || _rawContentLower.includes('nhỡ cuộc') || _rawContentLower.includes('chat video')
+            || _rawContentLower.includes('audio call') || _rawContentLower.includes('video call') || _rawContentLower.includes('missed call')
+            || _rawContentLower.includes('missed audio') || _rawContentLower.includes('missed video') || _rawContentLower.includes('call ended')
+            || (m.media_type === 'call');
+          if (isCallLog) {
+            console.log(`[CALL_DEBUG] 📞 Backend nhận CALL LOG từ Extension: content="${sanitizeLog(m.content)}", thread=${threadId}, fb_id=${m.fb_message_id}, isCallLog=true`);
+          }
+          if (!threadId || threadId === 'unknown_dom') {
             console.warn(`[WS] ⚠️ Bỏ qua tin nhắn từ Thread ID không hợp lệ: "${threadId}"`);
             break;
           }
           const targetAccountId = m.account_id || ws.accountId || null;
+          const canonicalThreadId = resolveInternalThreadId(db, targetAccountId, threadId);
+          if (!canonicalThreadId) {
+            console.warn(`[WS] Bỏ qua tin nhắn chưa ánh xạ được thread: raw=${threadId} account=${targetAccountId || 'unknown'}`);
+          }
+          // Preserve Facebook's raw id for diagnostics, but use the CRM's
+          // canonical id throughout the existing persistence/UI pipeline.
+          m.external_thread_id = m.external_thread_id || threadId;
+          m.thread_id = canonicalThreadId || threadId;
 
-          // Lọc tin nhắn hệ thống, accessibility text & timestamps bằng textFilter.
-          // Một tin nhắn media (ảnh/sticker) hợp lệ có thể không có caption nào cả -
-          // content rỗng không có nghĩa là rác nếu đã có media_url HOẶC media_type
-          // khác 'text' kèm theo (media_url có thể là null khi DOM chỉ thấy được
-          // data: URI cục bộ, không có CDN URL thật - nhưng media_type vẫn đủ để
-          // biết đây là ảnh thật, không phải rác).
-          // CALL LOG BYPASS: cuộc gọi không được qua cleanMessageText / system-text guard
-          // vì các từ như "Đã nhỡ cuộc gọi thoại" có thể bị xóa bởi bộ lọc.
-          if (isCallLog && m.content && m.fb_message_id && m.fb_message_id.startsWith('call_')) {
-            const targetAccountIdForCall = m.account_id || ws.accountId || null;
+          if (isCallLog && m.content && m.fb_message_id) {
+            const callThreadId = canonicalThreadId || m.thread_id;
+            const threadAccRow = db.prepare('SELECT account_id FROM threads WHERE id = ?').get(callThreadId);
+            const targetAccountIdForCall = m.account_id || ws.accountId || threadAccRow?.account_id || null;
             ConversationRepository.upsertThread({
-              id: m.thread_id,
+              id: callThreadId,
               account_id: targetAccountIdForCall,
               contact_name: m.contact_name || 'Khách hàng',
               last_message: m.content,
               is_unread: true
             });
             const stableCallId = m.fb_message_id;
-            const existingCall = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(stableCallId);
-            const callIsOutgoing = (m.is_outgoing === true || m.is_outgoing === 1) ? 1 : 0;
+            const callTimestamp = Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now();
+            const existingCall = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(stableCallId)
+              || db.prepare(`
+                SELECT id FROM messages
+                WHERE thread_id = ? AND media_type = 'call' AND content = ?
+                  AND ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) <= 60000
+                ORDER BY id DESC LIMIT 1
+              `).get(callThreadId, m.content, callTimestamp, callTimestamp);
+            const normalizedCallContent = String(m.content || '').toLocaleLowerCase('vi-VN');
+            const isExplicitMissedIncoming = /(?:nhỡ|bỏ lỡ|missed)/i.test(normalizedCallContent);
+            const hasRawAvatarEvidence = m.direction_evidence === 'call_article_avatar'
+              && (m.has_row_avatar === true || m.has_row_avatar === false);
+            const callIsOutgoing = isExplicitMissedIncoming
+              ? 0
+              : hasRawAvatarEvidence
+                ? (m.has_row_avatar ? 0 : 1)
+                : ((m.is_outgoing === true || m.is_outgoing === 1) ? 1 : 0);
             const callSenderId = m.sender_id || (callIsOutgoing ? String(targetAccountIdForCall || 'STAFF') : 'CONTACT');
+            console.log(`[CALL_DEBUG] 🧵 callThreadId=${callThreadId} | m.thread_id=${m.thread_id} | canonicalThreadId=${canonicalThreadId} | callIsOutgoing=${callIsOutgoing}`);
             if (!existingCall) {
               const insertCall = db.prepare(`
                 INSERT OR IGNORE INTO messages
                   (thread_id, fb_message_id, sender_id, content, media_type, is_outgoing, direction_status, timestamp_ms, timestamp_source, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               `).run(
-                m.thread_id, stableCallId,
+                callThreadId, stableCallId,
                 callSenderId,
-                m.content, 'text', callIsOutgoing, 'confirmed',
+                m.content, 'call', callIsOutgoing, 'confirmed',
                 m.timestamp_ms || Date.now(),
                 m.timestamp_source || 'realtime_fallback',
                 m.created_at || new Date().toISOString()
               );
               if (insertCall.changes > 0) {
-                console.log(`[CALL_DEBUG] ✅ Đã lưu call log vào DB: "${m.content}" (id: ${stableCallId}) | is_outgoing: ${callIsOutgoing}`);
+                console.log(`[CALL_DEBUG] ✅ Đã lưu call log vào DB: "${sanitizeLog(m.content)}" (id: ${stableCallId}) | thread: ${callThreadId} | is_outgoing: ${callIsOutgoing}`);
                 const newMsg = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(stableCallId);
                 if (newMsg) {
-                  io.emit('NEW_MESSAGE', newMsg);
-                  io.emit('THREAD_MESSAGES_UPDATED', { thread_id: m.thread_id });
+                  io.emit('NEW_MESSAGE', { ...newMsg, thread_id: callThreadId, account_id: targetAccountIdForCall });
+                  io.emit('THREAD_MESSAGES_UPDATED', { thread_id: callThreadId, account_id: targetAccountIdForCall });
                 }
               } else {
-                console.log(`[CALL_DEBUG] ⚠️ Call log đã tồn tại, bỏ qua: ${stableCallId}`);
+                // INSERT OR IGNORE bị ignore (trùng fb_message_id): patch media_type và is_outgoing nếu cần
+                db.prepare(`UPDATE messages SET media_type = 'call', is_outgoing = ? WHERE fb_message_id = ?`).run(callIsOutgoing, stableCallId);
+                const existingMsg = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(stableCallId);
+                if (existingMsg) {
+                  console.log(`[CALL_DEBUG] 🔄 Patch media_type='call' cho tin đã tồn tại: ${stableCallId}`);
+                  io.emit('NEW_MESSAGE', { ...existingMsg, thread_id: callThreadId, account_id: targetAccountIdForCall });
+                  io.emit('THREAD_MESSAGES_UPDATED', { thread_id: callThreadId, account_id: targetAccountIdForCall });
+                }
               }
             } else {
-              console.log(`[CALL_DEBUG] ⚠️ Call log đã tồn tại trong DB: ${stableCallId}`);
+              // existingCall tồn tại: patch media_type & is_outgoing rồi re-emit
+              db.prepare(`UPDATE messages SET media_type = 'call', is_outgoing = ? WHERE id = ?`).run(callIsOutgoing, existingCall.id);
+              const existingMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(existingCall.id);
+              if (existingMsg) {
+                console.log(`[CALL_DEBUG] 🔄 existingCall: patch + re-emit thread=${callThreadId}: ${stableCallId}`);
+                io.emit('NEW_MESSAGE', { ...existingMsg, thread_id: callThreadId, account_id: targetAccountIdForCall });
+                io.emit('THREAD_MESSAGES_UPDATED', { thread_id: callThreadId, account_id: targetAccountIdForCall });
+              }
             }
             break;
           }
+
 
           const cleanedContent = cleanMessageText(m.content);
           const hasMediaPayload = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
@@ -609,7 +1299,7 @@ wss.on('connection', (ws, req) => {
           if (!hasMediaPayload && !cleanedContent && (m.source === 'dom_observer' || m.source === 'page_dom_observer')) {
             const rawContent = String(m.content || '').trim();
             if (rawContent) {
-              const earlyInternalThreadId = resolveInternalThreadId(db, targetAccountId, m.thread_id);
+              const earlyInternalThreadId = canonicalThreadId;
               const pendingMatch = OutboundDomCorrelationService.matchPendingOutboundByRawContent(db, earlyInternalThreadId, rawContent);
               if (pendingMatch) {
                 const confirmed = OutboundDomCorrelationService.confirmPendingOutbound(db, io, pendingMatch, {
@@ -634,7 +1324,7 @@ wss.on('connection', (ws, req) => {
             break;
           }
           if (!hasMediaPayload && (!cleanedContent || isSystemOrMetadataText(cleanedContent))) {
-            console.log(`[WS] ℹ️ Backend Guard: Bỏ qua tin nhắn rác/hệ thống: "${(m.content || '').substring(0, 40)}" từ thread ${threadId}`);
+            console.log(`[WS] ℹ️ Backend Guard: Bỏ qua tin nhắn rác/hệ thống: "${sanitizeLog(m.content, 40)}" từ thread ${threadId}`);
             break;
           }
 
@@ -697,7 +1387,7 @@ wss.on('connection', (ws, req) => {
             `).get(threadId);
             const suppressUntil = domReplaySuppressUntil.get(targetAccountId) || 0;
             if (!hasRecentPending && Date.now() < suppressUntil) {
-              console.log(`[WS] ℹ️ Suppress outgoing DOM replay during startup/sync window: thread=${threadId} content="${(m.content || '').substring(0, 40)}"`);
+              console.log(`[WS] ℹ️ Suppress outgoing DOM replay during startup/sync window: thread=${threadId} content="${sanitizeLog(m.content, 40)}"`);
               console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_REPLAY_SUPPRESSED', thread_id: String(threadId), at: new Date().toISOString() }));
               break;
             }
@@ -737,6 +1427,20 @@ wss.on('connection', (ws, req) => {
           const createdAt = (m.created_at && !isNaN(Date.parse(m.created_at))) ? m.created_at : new Date().toISOString();
 
           const safeSenderId = m.sender_id || (isOutgoing ? String(targetAccountId) : 'CONTACT');
+          // Messenger exposes a caption/base id and an `id_media` companion
+          // for one logical image. Fold the media record into the base row.
+          const mergedMediaCompanion = OutboundDomCorrelationService.mergeMediaCompanion(
+            db, canonicalThreadId, m, isOutgoing
+          );
+          if (mergedMediaCompanion) {
+            io.emit('NEW_MESSAGE', withAttachmentAccessUrl({
+              ...mergedMediaCompanion,
+              thread_id: canonicalThreadId,
+              account_id: targetAccountId,
+              status: mergedMediaCompanion.delivery_status || 'sent'
+            }));
+            break;
+          }
           // Composer fallback không có official GraphQL ID; ghép confirmation DOM
           // vào bản pending gần nhất cùng thread/nội dung thay vì tạo bubble thứ hai.
           if (isOutgoing && (m.source === 'dom_observer' || m.source === 'page_dom_observer') && (m.content || m.media_url || (m.media_type && m.media_type !== 'text'))) {
@@ -744,9 +1448,9 @@ wss.on('connection', (ws, req) => {
             let skipPendingCorrelation = false;
             // Fix: Tránh crash UNIQUE constraint khi DOM observer gửi lại tin nhắn cũ có trùng content
             if (m.fb_message_id) {
-               const existingFbId = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(m.fb_message_id);
-               if (existingFbId) {
-                   console.log(`[WS] DOM observer sent an already known fb_message_id (${m.fb_message_id}). Bỏ qua event để tránh ghi đè pending.`);
+               const existingFbId = db.prepare('SELECT id, is_outgoing, delivery_status FROM messages WHERE fb_message_id = ?').get(m.fb_message_id);
+               if (existingFbId && existingFbId.is_outgoing === 1 && existingFbId.delivery_status === 'sent') {
+                   console.log(`[WS] DOM observer sent an already known confirmed fb_message_id (${m.fb_message_id}). Bỏ qua event để tránh ghi đè pending.`);
                    skipPendingCorrelation = true;
                }
             }
@@ -758,7 +1462,7 @@ wss.on('connection', (ws, req) => {
               // service first; it's a safe no-op (NO_CANDIDATE) for every
               // plain-text send, since those never create an outbound_attempts
               // row, so this can never double-fire against the legacy path.
-              const internalThreadId = resolveInternalThreadId(db, targetAccountId, m.thread_id);
+              const internalThreadId = canonicalThreadId;
               const richConfirmation = OutboundConfirmationService.confirmObservation({
                 threadId: internalThreadId,
                 fbMessageId: m.fb_message_id,
@@ -790,9 +1494,14 @@ wss.on('connection', (ws, req) => {
                 ? OutboundDomCorrelationService.matchPendingImageOutbound(db, internalThreadId)
                 : db.prepare(`
                     SELECT outbound.id, outbound.client_message_id FROM messages outbound
-                    LEFT JOIN message_queue queued ON outbound.client_message_id = 'queue_' || queued.id
+                    LEFT JOIN outbound_attempts attempt ON outbound.latest_attempt_id = attempt.id
+                    LEFT JOIN message_queue queued ON (
+                      outbound.client_message_id = 'queue_' || queued.id
+                      OR attempt.id = queued.outbound_attempt_id
+                    )
                     WHERE outbound.thread_id = ? AND outbound.content = ? AND outbound.is_outgoing = 1
                       AND outbound.delivery_status = 'pending'
+                      AND outbound.attachment_id IS NULL AND (outbound.media_type IS NULL OR outbound.media_type = 'text')
                       AND (queued.id IS NULL OR (queued.attachment_id IS NULL AND queued.manifest_id IS NULL))
                     ORDER BY outbound.id DESC LIMIT 1
                   `).get(internalThreadId, m.content);
@@ -823,21 +1532,19 @@ wss.on('connection', (ws, req) => {
               // a plain insert - a real duplicate row for the same send.
               // Recognize "already sent, same content, different id, very
               // recent" as an id upgrade and update in place instead.
-              if (m.fb_message_id) {
-                const recentSent = db.prepare(`
-                  SELECT id, client_message_id, fb_message_id FROM messages
-                  WHERE thread_id = ? AND content = ? AND is_outgoing = 1 AND delivery_status = 'sent'
-                    AND fb_message_id IS NOT NULL AND fb_message_id != ?
-                    AND datetime(created_at) >= datetime('now', '-8 seconds')
-                  ORDER BY id DESC LIMIT 1
-                `).get(m.thread_id, m.content, m.fb_message_id);
+               if (m.fb_message_id) {
+                 const observedAsMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
+                 const recentSent = OutboundDomCorrelationService.findTemporaryIdUpgrade(
+                   db, canonicalThreadId, { ...m, timestamp_ms: tsMs, created_at: createdAt }, observedAsMedia
+                 );
                 if (recentSent) {
                   db.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?').run(m.fb_message_id, recentSent.id);
                   console.log(`[WS] Nâng cấp fb_message_id tạm ${recentSent.fb_message_id} -> ${m.fb_message_id} (id ${recentSent.id}), cùng 1 tin gửi đi`);
-                  console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_ID_UPGRADED', thread_id: String(m.thread_id), from_fb_message_id: recentSent.fb_message_id, to_fb_message_id: m.fb_message_id, at: new Date().toISOString() }));
+                  console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_ID_UPGRADED', thread_id: String(canonicalThreadId), from_fb_message_id: recentSent.fb_message_id, to_fb_message_id: m.fb_message_id, at: new Date().toISOString() }));
                   break;
                 }
               }
+
 
               // Mismatch guard: exactly 1 pending in same thread within 10s, but content differs
               const recentPendings = db.prepare(`
@@ -845,7 +1552,7 @@ wss.on('connection', (ws, req) => {
                 WHERE thread_id = ? AND is_outgoing = 1 AND delivery_status = 'pending'
                   AND datetime(created_at) >= datetime('now', '-10 seconds')
                 ORDER BY id DESC
-              `).all(m.thread_id);
+              `).all(canonicalThreadId);
               if (recentPendings.length === 1) {
                 const mismatchPending = recentPendings[0];
                 const pendingContent = String(mismatchPending.content || '').trim();
@@ -856,27 +1563,69 @@ wss.on('connection', (ws, req) => {
                 const looksLikeSameAttempt = pendingContent && domContent &&
                   (domContent.includes(pendingContent) || pendingContent.includes(domContent));
                 if (looksLikeSameAttempt) {
-                  console.warn(`[WS] ⚠️ COMPOSER_CONTENT_MISMATCH: pending content="${pendingContent.substring(0, 40)}" vs DOM content="${domContent.substring(0, 40)}" | thread=${m.thread_id}`);
-                  console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_CONTENT_MISMATCH', thread_id: String(m.thread_id), client_message_id: mismatchPending.client_message_id, pending_len: pendingContent.length, dom_len: domContent.length, at: new Date().toISOString() }));
-                  db.prepare(`
-                    UPDATE messages SET delivery_status = 'failed', delivery_error = 'COMPOSER_CONTENT_MISMATCH'
-                    WHERE id = ?
-                  `).run(mismatchPending.id);
-                  io.emit('MESSAGE_SEND_FAILED', { thread_id: m.thread_id, client_message_id: mismatchPending.client_message_id, success: false, status: 'failed', error: 'COMPOSER_CONTENT_MISMATCH', error_code: 'COMPOSER_CONTENT_MISMATCH' });
+                  console.warn(`[WS] ⚠️ COMPOSER_CONTENT_MISMATCH: pending content="${pendingContent.substring(0, 40)}" vs DOM content="${domContent.substring(0, 40)}" | thread=${canonicalThreadId}`);
+                  console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_CONTENT_MISMATCH', thread_id: String(canonicalThreadId), client_message_id: mismatchPending.client_message_id, pending_len: pendingContent.length, dom_len: domContent.length, at: new Date().toISOString() }));
+                  deleteOutboundMessageRows({ messageId: mismatchPending.id });
+                  io.emit('MESSAGE_SEND_FAILED', { thread_id: canonicalThreadId, client_message_id: mismatchPending.client_message_id, success: false, status: 'failed', error: 'COMPOSER_CONTENT_MISMATCH', error_code: 'COMPOSER_CONTENT_MISMATCH' });
                   // Discard the mismatched DOM bubble entirely — do not insert it
                   break;
                 }
               }
             }
           }
+          // ===== ANTI-GHOST GUARD (chạy cho MỌI DOM observer, không phân biệt direction) =====
+          // DOM observer đôi khi bắt lại tin nhắn do CRM gửi (đã có is_outgoing=1 trong DB).
+          // Nếu để chạy tiếp sẽ tạo bubble ghost bên trái với is_outgoing=0.
+          // Guard này chạy TRƯỚC insert, bất kể finalIsOutgoing = 0 hay 1.
+          if (m.source === 'dom_observer' || m.source === 'page_dom_observer') {
+            const isMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
+            let outgoingMatch = null;
+
+            if (isMedia) {
+              outgoingMatch = db.prepare(`
+                SELECT id, delivery_status, client_message_id, thread_id FROM messages
+                WHERE thread_id = ? AND is_outgoing = 1
+                  AND (attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))
+                  AND datetime(created_at) >= datetime('now', '-300 seconds')
+                ORDER BY id DESC LIMIT 1
+              `).get(canonicalThreadId);
+            } else if (m.content) {
+              outgoingMatch = db.prepare(`
+                SELECT id, delivery_status, client_message_id, thread_id FROM messages
+                WHERE thread_id = ? AND content = ? AND is_outgoing = 1
+                  AND datetime(created_at) >= datetime('now', '-300 seconds')
+                ORDER BY id DESC LIMIT 1
+              `).get(canonicalThreadId, m.content);
+            }
+
+            if (outgoingMatch) {
+              console.log(`[WS] 🚫 Anti-ghost FINAL: DOM observer bắt lại tin outgoing (id=${outgoingMatch.id}, status=${outgoingMatch.delivery_status}). Discard hoàn toàn.`);
+              if (outgoingMatch.delivery_status === 'pending') {
+                OutboundDomCorrelationService.confirmPendingOutbound(db, io, outgoingMatch, {
+                  fbMessageId: m.fb_message_id,
+                  tsMs,
+                  tsSource,
+                  rawMessage: { ...m, created_at: createdAt }
+                });
+              }
+              break;
+            }
+          }
+
+
           // Lưu tin nhắn vào bảng messages
           const stableMessageId = m.fb_message_id || m.client_message_id || ConversationRepository.fingerprint(m.thread_id, m);
+          const sequenceRow = db.prepare(`
+            SELECT MAX(COALESCE(sequence_order, id)) AS max_sequence
+            FROM messages WHERE thread_id = ?
+          `).get(m.thread_id);
+          const realtimeSequence = Number(sequenceRow?.max_sequence || 0) + 1;
           const insertMsgResult = db.prepare(`
             INSERT OR IGNORE INTO messages
-              (thread_id, fb_message_id, sender_id, content, media_type, media_url, local_media_path, is_outgoing, direction_status, timestamp_ms, timestamp_source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              (thread_id, fb_message_id, sender_id, content, media_type, media_url, local_media_path, is_outgoing, direction_status, sequence_order, timestamp_ms, timestamp_source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(m.thread_id, stableMessageId, safeSenderId, m.content,
-            m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, tsMs, tsSource, createdAt);
+            m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt);
 
           let wasNewMessage = insertMsgResult.changes > 0;
           let directionWasUpdated = false;
@@ -915,27 +1664,39 @@ wss.on('connection', (ws, req) => {
             // move the bubble without inserting a duplicate message.
           }
 
+          // Update contact name if provided and not yet properly set
+          if (m.contact_name && !isInvalidContactName(m.contact_name)) {
+            const cleanName = m.contact_name.trim();
+            const existing = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(m.thread_id);
+            if (!existing || isInvalidContactName(existing.contact_name) || (existing.contact_name || '').startsWith('Khách hàng')) {
+              db.prepare('UPDATE threads SET contact_name = ? WHERE id = ?').run(cleanName, m.thread_id);
+              db.prepare(`
+                INSERT INTO contacts (thread_id, name)
+                VALUES (?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET name = excluded.name
+              `).run(m.thread_id, cleanName);
+              io.emit('CONTACT_UPDATED', { thread_id: m.thread_id, name: cleanName });
+            }
+          }
+
           // Avatar backfill: apply regardless of whether this message is a brand-new
           // insert or a re-scan of an existing one, so a thread whose messages were
           // already stored before contact-avatar extraction existed still gets
-          // corrected. Skip entirely once a real (non-placeholder) avatar is already
-          // stored, so we don't re-download/re-write on every scan tick.
-          if (isConfirmedIncoming && wasNewMessage) {
-            const avatarData = m.avatar_base64 || m.avatar_url || m.contact_avatar || '';
-            if (avatarData) {
-              const existingContact = db.prepare('SELECT avatar_url FROM contacts WHERE thread_id = ?').get(m.thread_id);
-              if (!existingContact || !existingContact.avatar_url) {
-                try {
-                  const localAvatarPath = await saveAvatarFromBase64OrUrl(avatarData, m.thread_id);
-                  if (localAvatarPath) {
-                    const avatarResult = ConversationRepository.setContactAvatarIfMissing(m.thread_id, m.contact_name, localAvatarPath, db);
-                    if (avatarResult.updated) {
-                      io.emit('CONTACT_UPDATED', { thread_id: m.thread_id, avatar_url: localAvatarPath });
-                    }
+          // corrected.
+          const avatarData = m.avatar_base64 || m.avatar_url || m.contact_avatar || '';
+          if (avatarData) {
+            const existingContact = db.prepare('SELECT avatar_url FROM contacts WHERE thread_id = ?').get(m.thread_id);
+            if (!existingContact || !existingContact.avatar_url) {
+              try {
+                const localAvatarPath = await saveAvatarFromBase64OrUrl(avatarData, m.thread_id);
+                if (localAvatarPath) {
+                  const avatarResult = ConversationRepository.setContactAvatarIfMissing(m.thread_id, m.contact_name, localAvatarPath, db);
+                  if (avatarResult.updated) {
+                    io.emit('CONTACT_UPDATED', { thread_id: m.thread_id, avatar_url: localAvatarPath });
                   }
-                } catch (err) {
-                  console.warn('[WS] Avatar save failed:', err.message);
                 }
+              } catch (err) {
+                console.warn('[WS] Avatar save failed:', err.message);
               }
             }
           }
@@ -1047,8 +1808,11 @@ wss.on('connection', (ws, req) => {
           }
 
           // Emit payload đầy đủ lên frontend
+          const persistedMessage = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(stableMessageId);
           const msgPayload = {
             ...m,
+            ...(persistedMessage || {}),
+            account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null,
             timestamp_ms: tsMs,
             timestamp_source: tsSource,
             created_at: createdAt,
@@ -1068,26 +1832,103 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'DISCOVERY_SYNC_DIAGNOSTIC': {
+          const diagnostic = msg.data || {};
+          console.log(`[DISCOVERY_DIAG] account=${diagnostic.account_id || ws.accountId || 'unknown'} stage=${diagnostic.stage || 'unknown'} data=${JSON.stringify(diagnostic)}`);
+          break;
+        }
+
+        case 'INCOMING_CALL_RINGING': {
+          const data = msg.data || {};
+          const accountId = data.account_id || ws.accountId || null;
+          // A detached Chrome tab can deliver one last queued frame after its
+          // account was removed. Never surface that stale frame in the CRM.
+          const liveAccount = accountId
+            ? db.prepare('SELECT id FROM accounts WHERE id = ?').get(String(accountId))
+            : null;
+          if (!liveAccount || ws.accountId && String(ws.accountId) !== String(accountId)) {
+            console.warn(`[WS] Skip stale incoming call for removed/invalid account=${accountId || 'unknown'}`);
+            break;
+          }
+
+          // Keep the managed Chrome profile hidden. The desktop CRM popup is
+          // sufficient; bringing Chrome forward interrupts the operator.
+          const internalThreadId = data.thread_id ? resolveInternalThreadId(db, accountId, data.thread_id) : null;
+          const knownThread = internalThreadId
+            ? db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(internalThreadId)
+            : null;
+          const callerName = String(data.caller_name || knownThread?.contact_name || '').trim() || 'Khách hàng';
+          io.emit('INCOMING_CALL_RINGING', { ...data, caller_name: callerName, thread_id: internalThreadId || data.thread_id || null, external_thread_id: data.thread_id || null, account_id: accountId });
+          break;
+        }
+
+        case 'INCOMING_CALL_ENDED':
+          io.emit('INCOMING_CALL_ENDED', msg.data || {});
+          break;
+
+        case 'ANSWER_INCOMING_CALL_RESULT':
+          io.emit('ANSWER_INCOMING_CALL_RESULT', msg.data || {});
+          break;
+
+        case 'MESSAGE_REQUEST_ACTION_RESULT': {
+          const result = msg.data || {};
+          const requestId = String(result.request_id || '');
+          const owner = messageRequestActionOwners.get(requestId);
+          if (!owner) break;
+          messageRequestActionOwners.delete(requestId);
+          if (result.success && result.action !== 'query') {
+            const threadId = String(owner.threadId);
+            // "Continue" only expands Messenger's second-stage request
+            // controls (Accept / Delete / Block). Keep the thread in the
+            // request inbox until the operator chooses a terminal action.
+            if (result.action === 'accept') {
+              db.prepare("UPDATE threads SET inbox_folder = 'INBOX' WHERE id = ?").run(threadId);
+              io.emit('THREAD_INBOX_FOLDER_CHANGED', { thread_id: threadId, inbox_folder: 'INBOX' });
+            } else if (result.action === 'delete' || result.action === 'block') {
+              db.prepare('UPDATE threads SET archived_at = CURRENT_TIMESTAMP WHERE id = ?').run(threadId);
+              io.emit('MESSAGE_REQUEST_REMOVED', { thread_id: threadId });
+            }
+          }
+          owner.socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { ...result, thread_id: owner.threadId });
+          break;
+        }
+
         case 'SYNC_THREADS_RESULT': {
-          const { account_id, threads } = msg.data;
+          const { account_id, threads, partial, sync_status, checkpoint } = msg.data;
           console.log(`[WS] Nhận ${threads?.length || 0} threads từ extension tài khoản: ${account_id}`);
+          // Progressive UI batches are not the end of the combined Inbox +
+          // Requests scan. Only its final aggregate frame releases inFlight.
+          if (partial !== true) {
+            InboxSyncScheduler.markSidebarResult(account_id, threads?.length || 0);
+            if (threads?.length) completeNewAccountBootstrapSync(account_id);
+          }
+          if (partial === true && (sync_status === 'paused' || sync_status === 'cancelled')) {
+            InboxSyncScheduler.markSidebarResult(account_id, threads?.length || 0);
+          }
+          io.emit('FACEBOOK_SYNC_STATUS', { account_id, status: sync_status || (partial ? 'running' : 'completed'), checkpoint: checkpoint || [], count: threads?.length || 0 });
           domReplaySuppressUntil.set(account_id, Date.now() + 5000);
           if (threads?.length) {
+            // Keep a small list of already-known conversations whose unread
+            // sidebar preview actually changed.  The existing sidebar sync is
+            // intentionally left untouched; this only fills the realtime gap
+            // for conversations which are not currently open in the history
+            // tab (Facebook does not mount their message DOM).
+            const changedUnreadThreads = [];
             const txn = db.transaction((account_id, threads) => {
               for (const t of threads) {
-                const threadId = String(t.thread_id);
-                let name = t.name || t.contact_name || null;
-                
-                const PRESENCE_EXACT = /^(?:Đang|Đang hoạt động.*|Hoạt động(?:\s+\d+.*)?|Đã hoạt động.*|Active now|Active recently|Active \d+.*|Online|Offline)$/i;
-                if (name && PRESENCE_EXACT.test(name.trim())) {
+                const threadId = String(t.id || t.thread_id || '');
+                if (!threadId) continue;
+                const previousThread = db.prepare(`
+                  SELECT last_message, is_unread, thread_url, contact_name
+                  FROM threads WHERE id = ?
+                `).get(threadId);
+                let name = cleanContactName(t.name || t.contact_name, null);
+                if (!name || isInvalidContactName(name)) {
                   const existing = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(threadId);
                   let existingName = existing?.contact_name;
-                  if (existingName && PRESENCE_EXACT.test(existingName.trim())) existingName = null;
+                  if (isInvalidContactName(existingName)) existingName = null;
                   name = existingName || 'Khách hàng';
                 }
-                
-                // Double check để loại bỏ trường hợp 'Đang' tuyệt đối
-                if (name === 'Đang') name = 'Khách hàng';
                 let cleanLastMsg = cleanMessageText(t.last_message);
                 if (!cleanLastMsg || isSystemOrMetadataText(cleanLastMsg) || cleanLastMsg === 'Đang tải...') {
                   const dbMsgs = db.prepare(`
@@ -1111,13 +1952,32 @@ wss.on('connection', (ws, req) => {
                     : 'Chưa có tin nhắn';
                 }
 
+                const incomingPreviewChanged = Boolean(
+                  previousThread
+                  && Number(t.is_unread) === 1
+                  && cleanLastMsg
+                  && cleanLastMsg !== 'Chưa có tin nhắn'
+                  && cleanMessageText(previousThread.last_message) !== cleanLastMsg
+                );
+                if (incomingPreviewChanged) {
+                  changedUnreadThreads.push({
+                    account_id,
+                    thread_id: threadId,
+                    external_thread_id: t.external_thread_id || threadId,
+                    thread_url: t.thread_url || previousThread.thread_url || null,
+                    page_id: t.source_type === 'page_messenger' ? (t.page_id || null) : null,
+                    contact_name: name || previousThread.contact_name || null
+                  });
+                }
+
                 ConversationRepository.upsertThread({
                   id: threadId,
                   account_id: account_id,
                   thread_url: t.thread_url || null,
                   contact_name: name,
                   last_message: cleanLastMsg,
-                  is_unread: t.is_unread
+                  is_unread: t.is_unread,
+                  inbox_folder: t.inbox_folder || null
                 });
 
                 // Auto-bind Page source nếu thread đến từ Business Suite
@@ -1150,8 +2010,22 @@ wss.on('connection', (ws, req) => {
             });
             txn(account_id, threads);
 
+            // Fetch only the changed tail. Jobs remain serialized by the
+            // existing scheduler so they cannot make several hidden tabs race
+            // each other or interrupt an explicit CRM navigation request.
+            for (const changed of changedUnreadThreads) {
+              InboxSyncScheduler.enqueueThreadSync({
+                ...changed,
+                reason: 'sidebar_incoming',
+                allow_navigation: true,
+                priority: 'normal',
+                sync_mode: 'incremental'
+              });
+            }
+
             for (const t of threads) {
-              const threadId = String(t.thread_id);
+              const threadId = String(t.id || t.thread_id || '');
+              if (!threadId) continue;
               const avatarData = t.avatar_base64 || t.avatar_url;
               if (avatarData) {
                 saveAvatarFromBase64OrUrl(avatarData, threadId).then(localFilename => {
@@ -1180,30 +2054,84 @@ wss.on('connection', (ws, req) => {
           `).all(account_id);
           io.emit('THREADS_SYNCED', { account_id, threads: allThreads });
           console.log(`[WS] Đã emit THREADS_SYNCED lên frontend: ${allThreads.length} threads`);
+          // Keep the existing full sweep available as an opt-in fallback.
+          // Normal operation synchronizes history only when CRM opens/scrolls a thread.
+          if (process.env.FB_CRM_ENABLE_INITIAL_HISTORY_SWEEP === '1' && partial !== true) {
+            InitialMessageSweepService.start(account_id);
+          }
           break;
         }
 
         case 'THREAD_MESSAGES_SYNCED': {
-          const { account_id, thread_id, messages, reason, mode, checkpoint, fetched_count } = msg.data;
+          const { account_id, thread_id, messages, reason, mode, cursor, checkpoint, fetched_count, scroll_delta } = msg.data;
           console.log(`[WS] THREAD_MESSAGES_SYNCED: thread=${thread_id} mode=${mode||'full'} count=${messages?.length || 0}${reason ? ` reason=${reason}` : ''}`);
+          InboxSyncScheduler.markThreadSyncResult(account_id, thread_id, reason || null);
 
           if (reason) {
-            // Never retry SYNC_THREAD_MESSAGES with a delayed timer. That message
-            // also performs tab navigation, so a retry for an older conversation
-            // can arrive after a newer click and pull Messenger back to the old
-            // user. A fresh user click is the only event allowed to navigate.
-            if (global.syncRetries) global.syncRetries[thread_id] = 0;
             const HistorySyncManager = require('./services/HistorySyncManager');
             HistorySyncManager.updateSyncStatus(thread_id, 'FAILED', null, reason);
-            console.log(`[WS] Không retry điều hướng thread ${thread_id} (reason=${reason}); chờ click/yêu cầu mới.`);
+            console.log(`[WS] History sync failed for thread=${thread_id}; automatic retry is disabled.`);
+
+            // Always finish the CRM request, even when Facebook navigation or
+            // its virtualized DOM was not ready. Keep all persisted messages.
+            const persistedRows = db.prepare(`
+              SELECT * FROM messages WHERE thread_id = ?
+              ORDER BY COALESCE(sequence_order, id) ASC, id ASC
+            `).all(thread_id);
+            io.emit('THREAD_MESSAGES_UPDATED', {
+              thread_id,
+              account_id,
+              messages: persistedRows.map(withAttachmentAccessUrl),
+              authoritative: true,
+              sync_status: 'FAILED',
+              sync_error: reason
+            });
+            return;
+
+            // marker_mismatch/sidebar_mismatch/no_rows/no_main_container are DOM-timing
+            // flukes that usually clear up on their own; error_screen means Facebook
+            // itself is blocking the content, which is permanent and must not retry.
+            const TRANSIENT_REASONS = new Set(['marker_mismatch', 'sidebar_mismatch', 'no_rows', 'no_main_container']);
+            if (TRANSIENT_REASONS.has(reason)) {
+              const scheduled = HistorySyncRetryPolicy.scheduleRetry(account_id, thread_id, () => {
+                // A retry also performs tab navigation - if the operator has since
+                // clicked a different thread, HistorySyncRetryPolicy already cancels
+                // this before it fires, so reaching here means this thread is still
+                // the one being looked at.
+                const extWs = extensionConnections.get(account_id);
+                if (!extWs || extWs.readyState !== WebSocket.OPEN) {
+                  console.warn(`[HISTORY_SYNC_RETRY_SKIPPED] thread=${thread_id} reason=extension_not_ready`);
+                  return;
+                }
+                const threadRow = db.prepare('SELECT thread_url, contact_name FROM threads WHERE id = ?').get(thread_id);
+                const pageSource = ConversationRepository.getThreadSource(thread_id);
+                extWs.send(JSON.stringify({
+                  type: 'SYNC_THREAD_MESSAGES',
+                  data: {
+                    account_id,
+                    thread_id,
+                    thread_url: threadRow?.thread_url || null,
+                    page_id: pageSource?.pageId || null,
+                    mode,
+                    cursor,
+                    contact_name: threadRow?.contact_name || null
+                  }
+                }));
+                console.log(`[WS] Retry sync tin nhắn cho thread ${thread_id} (account ${account_id}) mode=${mode}`);
+              });
+              if (!scheduled) {
+                console.log(`[WS] Không retry điều hướng thread ${thread_id} (reason=${reason}, đã hết lượt); chờ click/yêu cầu mới.`);
+              }
+            } else {
+              console.log(`[WS] Không retry điều hướng thread ${thread_id} (reason=${reason}, lỗi vĩnh viễn); chờ click/yêu cầu mới.`);
+            }
             return; // Không ghi đè hoặc emit UI
           }
 
-          if (global.syncRetries && global.syncRetries[thread_id]) {
-            global.syncRetries[thread_id] = 0;
-          }
+          HistorySyncRetryPolicy.cancelRetry(thread_id);
 
           const HistorySyncManager = require('./services/HistorySyncManager');
+          let resolvedSyncStatus = null;
           
           if (Array.isArray(messages) && messages.length > 0) {
             const validMessages = messages.map(m => ({ ...m, content: cleanMessageText(m.content) }))
@@ -1220,29 +2148,119 @@ wss.on('connection', (ws, req) => {
               });
             }
             
-            const persistence = ConversationRepository.saveMessagesTransaction(thread_id, validMessages.map(m => ({
-              ...m,
-              account_id,
-              timestamp_source: m.timestamp_source || 'fallback'
-            })));
+            const sequenceBounds = db.prepare(`
+              SELECT MIN(COALESCE(sequence_order, id)) AS min_sequence,
+                     MAX(COALESCE(sequence_order, id)) AS max_sequence
+              FROM messages WHERE thread_id = ?
+            `).get(thread_id);
+            const existingSequences = new Map(db.prepare(
+              'SELECT fb_message_id, COALESCE(sequence_order, id) AS sequence_order FROM messages WHERE thread_id = ?'
+            ).all(thread_id).map((row) => [String(row.fb_message_id || ''), Number(row.sequence_order)]));
+            let olderSequence = Number(sequenceBounds?.min_sequence || 0) - validMessages.length - 1;
+            let newerSequence = Number(sequenceBounds?.max_sequence || 0);
+            const { isOlderHistoryBatch } = require('./services/HistoryViewportDirection');
+            const isOlderBatch = isOlderHistoryBatch(mode, scroll_delta);
+            // Preserve the order of a partially mounted Facebook window. New
+            // rows can sit between two messages already stored; appending all
+            // of them after max_sequence is what previously moved incoming
+            // messages to the wrong place. Fractional ranks are supported by
+            // SQLite and let us insert between stable anchors without
+            // rewriting any existing row.
+            const nextKnownSequence = new Array(validMessages.length).fill(null);
+            let upcomingKnown = null;
+            for (let index = validMessages.length - 1; index >= 0; index--) {
+              const known = existingSequences.get(String(validMessages[index].fb_message_id || ''));
+              if (Number.isFinite(known)) upcomingKnown = known;
+              nextKnownSequence[index] = upcomingKnown;
+            }
+            let previousKnown = null;
+            const sequencedMessages = validMessages.map((message, index) => {
+              const existingSequence = existingSequences.get(String(message.fb_message_id || ''));
+              let sequenceOrder = existingSequence;
+              if (Number.isFinite(existingSequence)) {
+                previousKnown = existingSequence;
+              } else {
+                const nextKnown = nextKnownSequence[index];
+                let segmentLength = 1;
+                while (index + segmentLength < validMessages.length
+                  && !Number.isFinite(existingSequences.get(String(validMessages[index + segmentLength].fb_message_id || '')))) {
+                  segmentLength += 1;
+                }
+                if (Number.isFinite(previousKnown) && Number.isFinite(nextKnown) && nextKnown > previousKnown) {
+                  sequenceOrder = previousKnown + (nextKnown - previousKnown) / (segmentLength + 1);
+                  previousKnown = sequenceOrder;
+                } else if (Number.isFinite(nextKnown)) {
+                  sequenceOrder = nextKnown - segmentLength;
+                  previousKnown = sequenceOrder;
+                } else if (Number.isFinite(previousKnown)) {
+                  sequenceOrder = previousKnown + 1;
+                  previousKnown = sequenceOrder;
+                  newerSequence = Math.max(newerSequence, sequenceOrder);
+                } else {
+                  sequenceOrder = isOlderBatch ? ++olderSequence : ++newerSequence;
+                  previousKnown = sequenceOrder;
+                }
+              }
+              return {
+                ...message,
+                account_id,
+                sequence_order: sequenceOrder,
+                timestamp_source: message.timestamp_source || 'fallback'
+              };
+            });
+            const persistence = ConversationRepository.saveMessagesTransaction(thread_id, sequencedMessages);
+            // A DOM page numbers its rows locally from zero. Merging multiple
+            // pages and realtime rows otherwise leaves duplicate/gapped ranks,
+            // which makes old messages appear below newer ones in the CRM.
+            ConversationRepository.normalizeMessageSequence(thread_id, db);
+            for (const mediaMessage of validMessages.filter((message) => message.media_url && ['image', 'video', 'voice', 'file'].includes(message.media_type))) {
+              mediaDownloader.downloadNewMessageMedia(thread_id, mediaMessage.media_url, mediaMessage.media_type)
+                .then((localPath) => {
+                  if (!localPath) return;
+                  db.prepare('UPDATE messages SET local_media_path = ? WHERE thread_id = ? AND fb_message_id = ?')
+                    .run(localPath, thread_id, mediaMessage.fb_message_id);
+                  const stored = db.prepare('SELECT * FROM messages WHERE thread_id = ? AND fb_message_id = ?')
+                    .get(thread_id, mediaMessage.fb_message_id);
+                  if (stored) io.emit('THREAD_MESSAGES_UPDATED', { thread_id, messages: [stored] });
+                })
+                .catch((error) => console.warn('[HISTORY_MEDIA] Download failed:', error.message));
+            }
             const deltaIds = [...persistence.insertedIds, ...persistence.updatedIds];
             const fetchedTotal = Number.isFinite(Number(fetched_count)) ? Number(fetched_count) : messages.length;
             const skippedTotal = Math.max(0, fetchedTotal - deltaIds.length);
             console.log(`[WS] Diagnostics thread=${thread_id}: fetched=${fetchedTotal} inserted=${persistence.insertedIds.length} updated=${persistence.updatedIds.length} skipped=${skippedTotal}`);
 
             if (checkpoint) {
-              HistorySyncManager.updateSyncStatus(thread_id, 'SYNCED', checkpoint);
+              resolvedSyncStatus = HistorySyncManager.resolveStatusFromCheckpoint(checkpoint);
+              HistorySyncManager.updateSyncStatus(thread_id, resolvedSyncStatus, checkpoint);
+              console.log(`[WS] History sync status thread=${thread_id}: ${resolvedSyncStatus} (stop_reason=${checkpoint.stop_reason || 'n/a'})`);
             }
 
-            const latest = validMessages[validMessages.length - 1];
-            if (latest) ConversationRepository.touchThread(thread_id, latest.content);
+            const latest = validMessages.reduce((currentLatest, candidate) => {
+              if (!currentLatest) return candidate;
+              const candidateTime = Number(candidate.timestamp_ms) || new Date(candidate.created_at || 0).getTime();
+              const latestTime = Number(currentLatest.timestamp_ms) || new Date(currentLatest.created_at || 0).getTime();
+              return candidateTime >= latestTime ? candidate : currentLatest;
+            }, null);
+            if (latest) {
+              const latestTimestamp = Number(latest.timestamp_ms) || new Date(latest.created_at || 0).getTime();
+              ConversationRepository.touchThreadFromHistory(thread_id, latest.content, latestTimestamp);
+            }
 
-            if (deltaIds.length === 0) break;
-            const placeholders = deltaIds.map(() => '?').join(',');
-            const deltaMsgsRows = db.prepare(`
-              SELECT * FROM messages WHERE fb_message_id IN (${placeholders}) ORDER BY timestamp_ms ASC, created_at ASC, id ASC
-            `).all(...deltaIds);
-            const cleanMsgs = deltaMsgsRows.map(m => {
+            if (deltaIds.length === 0) {
+              // Overlapping virtual pages can contain only rows already in
+              // SQLite. The checkpoint may still have advanced, so keep the
+              // continuation state machine alive instead of leaving the
+              // thread permanently PARTIAL/spinning.
+              console.log(`[WS] History page contained no DB delta; continue checkpoint evaluation thread=${thread_id}`);
+            }
+            // Refresh the CRM from the authoritative DB snapshot after every
+            // user-requested history page, including an overlap-only page.
+            const syncedRows = db.prepare(`
+              SELECT * FROM messages WHERE thread_id = ?
+              ORDER BY COALESCE(sequence_order, id) ASC, id ASC
+            `).all(thread_id);
+            const cleanMsgs = syncedRows.map(m => {
               const cleaned = cleanMessageText(m.content);
               return { ...m, cleaned };
             }).filter(m => m.media_url || (m.cleaned && !isSystemOrMetadataText(m.cleaned) && m.cleaned !== 'Đang tải...')).map(m => withAttachmentAccessUrl({
@@ -1250,13 +2268,114 @@ wss.on('connection', (ws, req) => {
               content: m.cleaned
             }));
 
-            io.emit('THREAD_MESSAGES_UPDATED', { thread_id, messages: cleanMsgs });
+            io.emit('THREAD_MESSAGES_UPDATED', {
+              thread_id,
+              messages: cleanMsgs,
+              authoritative: true,
+              sync_status: resolvedSyncStatus
+            });
           } else {
              // Empty messages list but no error means we might have reached the end or just no new messages
              if (checkpoint) {
-               HistorySyncManager.updateSyncStatus(thread_id, 'SYNCED', checkpoint);
+               resolvedSyncStatus = HistorySyncManager.resolveStatusFromCheckpoint(checkpoint);
+               HistorySyncManager.updateSyncStatus(thread_id, resolvedSyncStatus, checkpoint);
+               console.log(`[WS] History sync status thread=${thread_id}: ${resolvedSyncStatus} (stop_reason=${checkpoint.stop_reason || 'n/a'})`);
              }
+             // A virtualized Messenger viewport can briefly expose zero rows
+             // while React swaps pages. Zero newly parsed rows does not mean
+             // the authoritative thread is empty. Re-emit the persisted
+             // snapshot so the CRM never wipes or freezes its existing list.
+             const persistedRows = db.prepare(`
+               SELECT * FROM messages WHERE thread_id = ?
+               ORDER BY COALESCE(sequence_order, id) ASC, id ASC
+             `).all(thread_id);
+             io.emit('THREAD_MESSAGES_UPDATED', {
+               thread_id,
+               messages: persistedRows.map(withAttachmentAccessUrl),
+               authoritative: true,
+               sync_status: resolvedSyncStatus
+             });
           }
+
+          const historyJobKey = String(account_id);
+          const activeJob = historyBackfillJobs.get(historyJobKey);
+          const isActiveProgressiveJob = activeJob && String(activeJob.threadId) === String(thread_id);
+          const checkpointOldestId = String(checkpoint?.oldest_message_id || '');
+          if (isActiveProgressiveJob) {
+            if (checkpointOldestId && checkpointOldestId !== activeJob.lastOldestMessageId) {
+              activeJob.lastOldestMessageId = checkpointOldestId;
+              activeJob.stalledBatches = 0;
+            } else {
+              activeJob.stalledBatches = Number(activeJob.stalledBatches || 0) + 1;
+            }
+          }
+          const transientNoGrowth = resolvedSyncStatus === 'SYNCED'
+            && checkpoint?.stop_reason === 'no_scroll_growth'
+            && Number(activeJob?.stalledBatches || 0) < 4;
+          if ((resolvedSyncStatus === 'PARTIAL' || transientNoGrowth) && isActiveProgressiveJob) {
+            const generation = activeJob.generation;
+            activeJob.batches += 1;
+            if (activeJob.batches <= 500) {
+              setTimeout(() => {
+                const latestJob = historyBackfillJobs.get(historyJobKey);
+                if (!latestJob || latestJob.generation !== generation || String(latestJob.threadId) !== String(thread_id)) return;
+                const extWs = extensionConnections.get(account_id);
+                if (!extWs || extWs.readyState !== WebSocket.OPEN) return;
+                const threadRow = db.prepare('SELECT thread_url, contact_name FROM threads WHERE id = ?').get(thread_id);
+                const pageSource = ConversationRepository.getThreadSource(thread_id);
+                extWs.send(JSON.stringify({
+                  type: 'SYNC_THREAD_MESSAGES',
+                  data: {
+                    account_id,
+                    thread_id,
+                    thread_url: threadRow?.thread_url || null,
+                    page_id: pageSource?.pageId || null,
+                    mode: 'deep_backfill',
+                    cursor: checkpoint,
+                    contact_name: threadRow?.contact_name || null,
+                    reason: 'crm_navigation',
+                    allow_navigation: true
+                  }
+                }));
+                console.log(`[WS] Continue deep-backfill batch ${latestJob.batches} for thread=${thread_id}`);
+              }, 350);
+            } else {
+              HistorySyncManager.updateSyncStatus(thread_id, 'FAILED', checkpoint, 'BACKFILL_BATCH_LIMIT');
+              historyBackfillJobs.delete(historyJobKey);
+            }
+          } else if (resolvedSyncStatus === 'SYNCED' && isActiveProgressiveJob) {
+            historyBackfillJobs.delete(historyJobKey);
+          }
+          break;
+        }
+
+        case 'BULK_HISTORY_SYNC_PROGRESS': {
+          const progress = msg.data || {};
+          const job = bulkHistoryJobs.get(String(progress.job_id || ''));
+          if (!job) break;
+          const accountKey = String(progress.account_id || ws.accountId || '');
+          job.accounts.set(accountKey, {
+            total: Number(progress.total || 0),
+            completed: Number(progress.completed || 0),
+            failed: Number(progress.failed || 0),
+            status: progress.status || 'running',
+            error: progress.error || null
+          });
+          const states = [...job.accounts.values()];
+          const aggregate = states.reduce((sum, state) => ({
+            total: sum.total + state.total,
+            completed: sum.completed + state.completed,
+            failed: sum.failed + state.failed
+          }), { total: 0, completed: 0, failed: 0 });
+          const allTerminal = states.length === job.expectedAccounts
+            && states.every((state) => state.status === 'completed' || state.status === 'failed');
+          io.emit('BULK_HISTORY_SYNC_PROGRESS', {
+            job_id: job.id,
+            status: allTerminal ? 'completed' : 'running',
+            ...aggregate,
+            error: progress.error || null
+          });
+          if (allTerminal) bulkHistoryJobs.delete(job.id);
           break;
         }
 
@@ -1414,20 +2533,23 @@ wss.on('connection', (ws, req) => {
             db.prepare(`
               INSERT OR IGNORE INTO messages
                 (thread_id, fb_message_id, sender_id, content, is_outgoing, direction_status, timestamp_ms, created_at)
-              VALUES (?, ?, 'CONTACT', ?, 0, 'confirmed', ?, CURRENT_TIMESTAMP)
-            `).run(internalThreadId, callFbId, callContent, callTsMs);
+              VALUES (?, ?, ?, ?, 1, 'confirmed', ?, CURRENT_TIMESTAMP)
+            `).run(internalThreadId, callFbId, String(callAccountId || ws.accountId || 'CURRENT_USER'), callContent, callTsMs);
           } catch (dbErr) {
             console.warn('[WS] CALL_ENDED: Lỗi lưu DB:', dbErr.message);
           }
 
           console.log(`[WS] 📞 CALL_ENDED: ${callContent} (${duration_text || '?'}) thread=${callThreadId}`);
 
+          const storedCallMessage = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(callFbId);
           // Emit to CRM immediately
           io.emit('NEW_MESSAGE', {
+            ...(storedCallMessage || {}),
             thread_id: internalThreadId,
+            account_id: String(callAccountId || ws.accountId || ''),
             fb_message_id: callFbId,
             content: callContent,
-            is_outgoing: false,
+            is_outgoing: true,
             direction_status: 'confirmed',
             source: 'call_log',
             timestamp_ms: callTsMs,
@@ -1446,6 +2568,7 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     if (ws.accountId) {
       extensionConnections.delete(ws.accountId);
+      InboxSyncScheduler.unregisterAccount(ws.accountId);
       domReplaySuppressUntil.delete(ws.accountId);
       db.prepare("UPDATE accounts SET status='DISCONNECTED' WHERE id=?").run(ws.accountId);
       io.emit('ACCOUNT_STATUS_CHANGED', { account_id: ws.accountId, status: 'DISCONNECTED' });
@@ -1458,50 +2581,165 @@ wss.on('connection', (ws, req) => {
 // Socket.io: Nhân viên gửi tin nhắn → AI auto-pause 30 phút
 // ────────────────────────────────────────────────
 io.on('connection', (socket) => {
-  socket.on('REQUEST_SYNC_THREADS', ({ account_id }) => {
-    if (!account_id) return;
-    const extWs = extensionConnections.get(account_id);
-    if (extWs && extWs.readyState === WebSocket.OPEN) {
-      console.log(`[Socket.io] Nhận yêu cầu đồng bộ lại hội thoại cho account: ${account_id}`);
-      extWs.send(JSON.stringify({ type: 'SYNC_THREADS', data: { account_id } }));
-    } else {
-      console.warn(`[Socket.io] Extension cho account ${account_id} chưa sẵn sàng WebSocket.`);
+  socket.on('REQUEST_BULK_HISTORY_SYNC', ({ job_id, threads = [] } = {}) => {
+    const requested = Array.isArray(threads) ? threads : [];
+    const allowed = requested.filter((thread) =>
+      thread?.thread_id && enterpriseAccess.canAccessThread(socket.user, thread.thread_id)
+    );
+    const groups = new Map();
+    for (const thread of allowed) {
+      const row = db.prepare('SELECT id, account_id, thread_url, contact_name, source_id FROM threads WHERE id = ?').get(thread.thread_id);
+      if (!row?.account_id) continue;
+      const source = ConversationRepository.getThreadSource(row.id);
+      if (source?.sourceType === 'page_messenger') continue;
+      const key = String(row.account_id);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({
+        thread_id: String(row.id),
+        thread_url: row.thread_url || thread.thread_url || null,
+        contact_name: row.contact_name || thread.contact_name || null
+      });
     }
-  });
 
-  socket.on('REQUEST_SYNC_THREAD_MESSAGES', ({ account_id, thread_id, thread_url, page_id, contact_name }) => {
-    let targetAccId = account_id;
-    if (!targetAccId && extensionConnections.size > 0) {
-      targetAccId = extensionConnections.keys().next().value;
+    const id = String(job_id || require('crypto').randomUUID());
+    const connectedGroups = [...groups.entries()].filter(([accountId]) => {
+      const extWs = extensionConnections.get(accountId);
+      return extWs && extWs.readyState === WebSocket.OPEN;
+    });
+    if (connectedGroups.length === 0) {
+      socket.emit('BULK_HISTORY_SYNC_PROGRESS', { job_id: id, status: 'completed', total: 0, completed: 0, failed: allowed.length, error: 'EXTENSION_NOT_CONNECTED' });
+      return;
     }
-    if (!targetAccId || !thread_id) return;
 
-    const extWs = extensionConnections.get(targetAccId);
-    if (extWs && extWs.readyState === WebSocket.OPEN) {
-      const HistorySyncManager = require('./services/HistorySyncManager');
-      const syncState = HistorySyncManager.getSyncState(thread_id);
-      let mode = 'incremental';
-      if (!syncState || !syncState.sync_cursor) {
-        mode = 'initial';
-      }
-      
-      const pageSource = ConversationRepository.getThreadSource(thread_id);
-      const targetPageId = page_id || pageSource?.pageId || null;
-      let contactName = contact_name;
-      if (!contactName) {
-        const row = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(thread_id);
-        contactName = row?.contact_name || null;
-      }
-
-      console.log(`[Socket.io] Yêu cầu sync tin nhắn cho thread ${thread_id} (${contactName || 'unknown'}, account ${targetAccId}, page=${targetPageId || 'none'}) mode=${mode}`);
-      extWs.send(JSON.stringify({
-        type: 'SYNC_THREAD_MESSAGES',
-        data: { account_id: targetAccId, thread_id, thread_url, page_id: targetPageId, mode, cursor: syncState?.sync_cursor || null, contact_name: contactName }
+    bulkHistoryJobs.set(id, { id, expectedAccounts: connectedGroups.length, accounts: new Map() });
+    socket.emit('BULK_HISTORY_SYNC_PROGRESS', { job_id: id, status: 'running', total: allowed.length, completed: 0, failed: 0 });
+    for (const [accountId, accountThreads] of connectedGroups) {
+      extensionConnections.get(accountId).send(JSON.stringify({
+        type: 'BULK_HISTORY_SYNC',
+        data: { job_id: id, account_id: accountId, threads: accountThreads }
       }));
     }
   });
 
-  socket.on('TRIGGER_CALL', ({ thread_id, call_type = 'audio', account_id }) => {
+  socket.on('REQUEST_SYNC_THREADS', ({ account_id }) => {
+    if (!account_id) return;
+    if (!InboxSyncScheduler.requestSidebarSync(account_id, 'crm_manual', { force: true })) {
+      console.warn(`[Socket.io] Extension cho account ${account_id} chưa sẵn sàng WebSocket.`);
+    }
+  });
+
+  socket.on('MESSAGE_REQUEST_ACTION', ({ request_id, thread_id, action } = {}) => {
+    const requestId = String(request_id || '');
+    const threadId = String(thread_id || '');
+    const requestedAction = String(action || 'query');
+    if (!requestId || !threadId || !['query', 'accept', 'continue', 'delete', 'block'].includes(requestedAction)) {
+      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'Yêu cầu không hợp lệ.' });
+      return;
+    }
+    if (!enterpriseAccess.canAccessThread(socket.user, threadId)) {
+      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'Không có quyền truy cập hội thoại.' });
+      return;
+    }
+    const thread = db.prepare('SELECT id, external_thread_id, account_id, thread_url, contact_name, inbox_folder FROM threads WHERE id = ?').get(threadId);
+    if (!thread?.account_id || !['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(thread.inbox_folder)) {
+      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'Hội thoại không còn ở Tin nhắn chờ.' });
+      return;
+    }
+    const extension = extensionConnections.get(String(thread.account_id));
+    if (!extension || extension.readyState !== WebSocket.OPEN) {
+      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'Extension Facebook chưa kết nối.' });
+      return;
+    }
+    messageRequestActionOwners.set(requestId, { socket, threadId, createdAt: Date.now() });
+    setTimeout(() => {
+      const pending = messageRequestActionOwners.get(requestId);
+      if (!pending) return;
+      messageRequestActionOwners.delete(requestId);
+      pending.socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'Messenger phản hồi quá thời gian.' });
+    }, 15000).unref?.();
+    extension.send(JSON.stringify({
+      type: 'MESSAGE_REQUEST_ACTION',
+      data: {
+        request_id: requestId,
+        thread_id: thread.id,
+        external_thread_id: thread.external_thread_id || thread.id,
+        account_id: thread.account_id,
+        thread_url: thread.thread_url,
+        contact_name: thread.contact_name,
+        action: requestedAction
+      }
+    }));
+  });
+
+  socket.on('CONTINUE_FACEBOOK_SYNC', ({ account_id } = {}) => {
+    const accountId = String(account_id || '');
+    if (!accountId || !enterpriseAccess.canAccessAccount(socket.user, accountId)) return;
+    backgroundAfterConnectRequests.set(accountId, Date.now());
+    InboxSyncScheduler.requestSidebarSync(accountId, 'crm_continue', { force: true });
+  });
+
+  socket.on('CANCEL_FACEBOOK_SYNC', ({ account_id } = {}) => {
+    const accountId = String(account_id || '');
+    if (!accountId || !enterpriseAccess.canAccessAccount(socket.user, accountId)) return;
+    const extension = extensionConnections.get(accountId);
+    if (extension?.readyState === WebSocket.OPEN) {
+      extension.send(JSON.stringify({ type: 'CANCEL_THREADS_SYNC', data: { account_id: accountId } }));
+    }
+  });
+
+  socket.on('REQUEST_SYNC_THREAD_MESSAGES', ({ thread_id, direction = 'initial', scroll_delta = 0 } = {}) => {
+    const threadId = String(thread_id || '');
+    if (!threadId || !enterpriseAccess.canAccessThread(socket.user, threadId)) return;
+    const thread = db.prepare(`
+      SELECT t.id, t.external_thread_id, t.account_id, t.thread_url, t.contact_name,
+             t.sync_status, t.sync_cursor,
+             s.source_type, s.external_id AS page_id
+      FROM threads t LEFT JOIN inbox_sources s ON s.id = t.source_id
+      WHERE t.id = ?
+    `).get(threadId);
+    if (!thread?.account_id) return;
+    HistorySyncRetryPolicy.noteManualRequest(thread.account_id, threadId);
+    InitialMessageSweepService.noteUserActivity(thread.account_id);
+    InboxSyncScheduler.clearQueuedThreadSyncs(thread.account_id, (job) => String(job.reason || '').startsWith('initial_sweep'));
+    InboxSyncScheduler.clearQueuedThreadSyncs(thread.account_id, (job) => (
+      ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].some((prefix) => String(job.reason || '').startsWith(prefix))
+      && String(job.thread_id) !== threadId
+    ));
+    InboxSyncScheduler.clearPendingThreadSyncs(thread.account_id, (job) => (
+      ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].some((prefix) => String(job.reason || '').startsWith(prefix))
+      && String(job.thread_id) !== threadId
+    ));
+    // A manual conversation change must take ownership of the single history
+    // tab immediately. The extension navigation token cancels the superseded
+    // DOM pass; releasing only that old scheduler slot lets the new user run
+    // without waiting for the previous scroll timeout.
+    InboxSyncScheduler.preemptActiveThreadSync(thread.account_id, (job) => String(job.thread_id) !== threadId);
+    // History is controlled only by the CRM operator. Opening a conversation
+    // synchronizes the currently mounted viewport; subsequent Messenger
+    // movement is requested exclusively by CRM viewport scroll events.
+    // Cancel any old progressive job so selecting a user can never start an
+    // unsolicited background crawl.
+    const historyJobKey = String(thread.account_id);
+    historyBackfillJobs.delete(historyJobKey);
+    InboxSyncScheduler.enqueueThreadSync({
+      account_id: thread.account_id,
+      thread_id: thread.id,
+      external_thread_id: thread.external_thread_id || thread.id,
+      thread_url: thread.thread_url,
+      page_id: thread.source_type === 'page_messenger' ? thread.page_id : null,
+      contact_name: thread.contact_name,
+      reason: direction === 'viewport' ? 'crm_scroll_viewport' : (direction === 'older' ? 'crm_scroll_older' : 'crm_navigation'),
+      allow_navigation: true,
+      priority: 'high',
+      // Opening/switching user must never scroll Messenger. A saved PARTIAL
+      // checkpoint is consumed only after an explicit CRM scroll-to-top event.
+      sync_mode: direction === 'viewport' ? 'ondemand_viewport' : (direction === 'older' ? 'ondemand_older' : 'ondemand_initial'),
+      scroll_delta: direction === 'viewport' ? Number(scroll_delta) || 0 : 0
+    });
+  });
+
+  socket.on('TRIGGER_CALL', ({ thread_id, call_type = 'audio', account_id, call_request_id }) => {
+    if (!enterpriseAccess.canAccessThread(socket.user, thread_id)) return socket.emit('CALL_ERROR', { error: 'Không có quyền sử dụng hội thoại này.' });
     let targetAccId = account_id;
     if (!targetAccId && thread_id) {
       const thread = db.prepare('SELECT account_id FROM threads WHERE id = ?').get(thread_id);
@@ -1515,12 +2753,25 @@ io.on('connection', (socket) => {
       return;
     }
 
+    if (!callEventDeduplicator.claimOutgoing({
+      accountId: targetAccId,
+      threadId: thread_id,
+      callType: call_type
+    })) {
+      socket.emit('CALL_TRIGGER_RESPONSE', {
+        success: false,
+        error: 'Cuộc gọi này vừa được kích hoạt. Vui lòng chờ trong giây lát.'
+      });
+      return;
+    }
+
+    const requestId = String(call_request_id || require('crypto').randomUUID());
     const extWs = extensionConnections.get(targetAccId);
     if (extWs && extWs.readyState === WebSocket.OPEN) {
       console.log(`[Socket.io] 📞 Yêu cầu kích hoạt cuộc gọi Messenger ${call_type} cho thread ${thread_id} (account ${targetAccId})`);
       extWs.send(JSON.stringify({
         type: 'TRIGGER_MESSENGER_CALL',
-        data: { account_id: targetAccId, thread_id, call_type }
+        data: { account_id: targetAccId, thread_id, call_type, call_request_id: requestId }
       }));
       socket.emit('CALL_TRIGGER_RESPONSE', { success: true, message: 'Đã gửi lệnh kích hoạt cuộc gọi tới Extension' });
     } else {
@@ -1529,39 +2780,27 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('ANSWER_INCOMING_CALL', ({ action, thread_id, account_id } = {}) => {
+  socket.on('ANSWER_INCOMING_CALL', ({ action, thread_id, account_id, source_tab_id, source_frame_id, call_id } = {}) => {
     if (action !== 'accept' && action !== 'decline') {
-      socket.emit('ANSWER_INCOMING_CALL_RESPONSE', { success: false, error: 'Hành động cuộc gọi không hợp lệ' });
+      socket.emit('ANSWER_INCOMING_CALL_RESPONSE', { success: false, action, thread_id, error: 'Invalid call action' });
       return;
     }
-
-    let targetAccId = account_id;
-    if (!targetAccId && thread_id) {
-      const thread = db.prepare('SELECT account_id FROM threads WHERE id = ?').get(thread_id);
-      if (thread?.account_id) targetAccId = thread.account_id;
+    const targetAccount = account_id || extensionConnections.keys().next().value;
+    const extension = targetAccount ? extensionConnections.get(targetAccount) : null;
+    if (extension?.readyState === WebSocket.OPEN) {
+      extension.send(JSON.stringify({ type: 'ANSWER_INCOMING_CALL', data: { action, thread_id, account_id: targetAccount, source_tab_id, source_frame_id, call_id } }));
+      socket.emit('ANSWER_INCOMING_CALL_RESPONSE', { success: true, action, thread_id });
+    } else {
+      socket.emit('ANSWER_INCOMING_CALL_RESPONSE', { success: false, action, thread_id, error: 'Facebook extension is not connected' });
     }
-    if (!targetAccId && extensionConnections.size > 0) {
-      targetAccId = extensionConnections.keys().next().value;
-    }
-
-    const extWs = targetAccId ? extensionConnections.get(targetAccId) : null;
-    if (extWs && extWs.readyState === WebSocket.OPEN) {
-      console.log(`[Socket.io] 🎯 Gửi lệnh ${action} cuộc gọi tới Extension account ${targetAccId}`);
-      extWs.send(JSON.stringify({
-        type: 'ANSWER_INCOMING_CALL',
-        data: { action, thread_id: thread_id || null, account_id: targetAccId }
-      }));
-      socket.emit('ANSWER_INCOMING_CALL_RESPONSE', { success: true, action });
-      return;
-    }
-
-    console.warn('[Socket.io] Không tìm thấy Extension đang kết nối để điều khiển cuộc gọi.');
-    socket.emit('ANSWER_INCOMING_CALL_RESPONSE', { success: false, error: 'Extension Facebook chưa được kết nối' });
   });
 
   socket.on('SEND_MESSAGE', async (payload = {}) => {
     const { thread_id, content, client_message_id, attachment_id, contract_version } = payload;
     const isRichMessage = Number(contract_version) === 2 || Boolean(attachment_id);
+    if (!enterpriseAccess.canAccessThread(socket.user, thread_id)) {
+      return socket.emit('SEND_ERROR', { client_message_id, code: 'ACCOUNT_NOT_ASSIGNED', error: 'Tài khoản Facebook chưa được Admin cấp cho bạn.' });
+    }
 
     // Nhân viên gõ tay → tạm dừng AI 30 phút
     const pauseResult = aiMediator.pauseForThread(thread_id);
@@ -1625,6 +2864,7 @@ io.on('connection', (socket) => {
 
   socket.on('RETRY_MESSAGE', (payload = {}) => {
     try {
+      if (!enterpriseAccess.canAccessThread(socket.user, payload.thread_id)) throw Object.assign(new Error('Tài khoản Facebook chưa được Admin cấp cho bạn.'), { code: 'ACCOUNT_NOT_ASSIGNED' });
       if (isLoopbackAddress(socket.handshake?.address) === false) {
         throw new RichMessageService.Error(
           'LOCAL_CRM_REQUIRED',
@@ -1666,38 +2906,241 @@ io.on('connection', (socket) => {
 // REST API
 // ────────────────────────────────────────────────
 
-app.get('/api/health', (req, res) => res.json({
-  status: 'OK', uptime: process.uptime(),
-  db: 'SQLite WAL Mode', activeExtensions: extensionConnections.size
-}));
+function requireCompanyAdmin(req, res, next) {
+  if (enterpriseAccess.isCompanyAdmin(req.user) || (req.user.role === 'ADMIN' && req.user.username === 'admin')) return next();
+  return res.status(403).json({ success: false, error: 'Chỉ Admin doanh nghiệp được sử dụng chức năng này.' });
+}
+
+app.get('/api/company/employees', requireCompanyAdmin, (req, res) => {
+  res.json({ success: true, employees: enterpriseAccess.listEmployees(req.user), assignments: enterpriseAccess.assignmentMap(req.user.company_id), accounts: enterpriseAccess.listAccounts(req.user) });
+});
+
+app.post('/api/company/employees', requireCompanyAdmin, async (req, res) => {
+  try {
+    const centralResponse = await fetch(`${LICENSE_SERVER_BASE_URL}/api/client-auth/company-employees`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminUsername: req.user.username, username: req.body?.username, password: req.body?.password })
+    });
+    const central = await centralResponse.json().catch(() => ({}));
+    if (!centralResponse.ok || !central.success) return res.status(centralResponse.status).json({ success: false, error: central.message || 'License Server từ chối tạo nhân viên.' });
+    const employee = enterpriseAccess.createEmployee(req.user, req.body || {});
+    res.status(201).json({ success: true, employee });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, error: error.message || 'Không thể tạo nhân viên.' });
+  }
+});
+
+app.delete('/api/company/employees/:id', requireCompanyAdmin, async (req, res) => {
+  const employee = db.prepare("SELECT username FROM users WHERE id=? AND company_id=? AND company_role='EMPLOYEE'").get(Number(req.params.id), req.user.company_id);
+  if (!employee) return res.status(404).json({ success: false, error: 'Không tìm thấy nhân viên.' });
+  try {
+    const centralResponse = await fetch(`${LICENSE_SERVER_BASE_URL}/api/client-auth/company-employees`, {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminUsername: req.user.username, username: employee.username })
+    });
+    if (!centralResponse.ok && centralResponse.status !== 404) throw new Error('Không thể xóa nhân viên trên License Server.');
+    enterpriseAccess.deleteEmployee(req.user, req.params.id);
+    res.json({ success: true });
+  } catch (error) { res.status(502).json({ success: false, error: error.message }); }
+});
+
+app.put('/api/company/employees/:id/accounts', requireCompanyAdmin, (req, res) => {
+  try {
+    const accountIds = enterpriseAccess.setAssignments(req.user, req.params.id, Array.isArray(req.body?.account_ids) ? req.body.account_ids : []);
+    res.json({ success: true, account_ids: accountIds });
+  } catch (error) { res.status(error.status || 500).json({ success: false, error: error.message }); }
+});
 
 // Accounts
 app.get('/api/accounts', (req, res) => {
-  const accounts = db.prepare('SELECT * FROM accounts').all();
+  const accounts = enterpriseAccess.listAccounts(req.user);
   const result = accounts.map(acc => ({
     ...acc,
-    is_extension_connected: extensionConnections.has(acc.id) && extensionConnections.get(acc.id).readyState === WebSocket.OPEN
+    is_extension_connected: extensionConnections.has(acc.id) && extensionConnections.get(acc.id).readyState === WebSocket.OPEN,
+    is_chrome_running: processManager.getStatus(acc.id) === 'RUNNING',
+    chrome_display_mode: processManager.getDisplayMode(acc.id)
   }));
   res.json(result);
 });
-app.post('/api/accounts/:id/start', (req, res) => {
-  res.json({ success: processManager.startAccountProcess(req.params.id) });
+app.post('/api/accounts/:id/start', async (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  const accountId = String(req.params.id);
+  backgroundAfterConnectRequests.set(accountId, Date.now());
+  const success = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: true });
+  if (!success) {
+    backgroundAfterConnectRequests.delete(accountId);
+    return res.json({ success: false });
+  }
+
+  // Chrome remains visible until the initial combined sidebar result arrives.
+  // The final SYNC_THREADS_RESULT frame moves it to background; keeping the
+  // request marker here also covers an already-connected extension.
+  res.json({ success: true });
 });
-app.post('/api/accounts/new-session', (req, res) => {
+app.post('/api/accounts/:id/stop', (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  backgroundAfterConnectRequests.delete(String(req.params.id));
+  const stopped = processManager.stopAccountProcess(req.params.id);
+  res.json({ success: true, stopped });
+});
+app.post('/api/extension/reload', (req, res) => {
+  let count = 0;
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      try {
+        client.send(JSON.stringify({ type: 'RELOAD_EXTENSION' }));
+        count++;
+      } catch (_) {}
+    }
+  });
+  console.log(`[WS] 🔄 Đã gửi tín hiệu RELOAD_EXTENSION tới ${count} kết nối Extension WebSocket.`);
+  res.json({ success: true, reloaded: count });
+});
+app.post('/api/accounts/:id/open', (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  if (processManager.getStatus(req.params.id) !== 'RUNNING') {
+    return res.status(409).json({ success: false, error: 'Hãy kết nối tài khoản Facebook trước khi bật hiển thị Chrome.' });
+  }
+  const visible = processManager.unhideWindow(req.params.id);
+  res.json({ success: visible });
+});
+app.post('/api/accounts/:id/background', (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  if (processManager.getStatus(req.params.id) !== 'RUNNING') {
+    return res.status(409).json({ success: false, error: 'Tài khoản Facebook chưa được kết nối.' });
+  }
+  const hidden = processManager.hideAccountProcess(req.params.id);
+  res.json({ success: hidden });
+});
+app.post('/api/accounts/new-session', async (req, res) => {
+  if (!enterpriseAccess.isCompanyAdmin(req.user) && !(req.user.role === 'ADMIN' && req.user.username === 'admin')) {
+    return res.status(403).json({ success: false, error: 'Chỉ Admin doanh nghiệp được thêm tài khoản Facebook.' });
+  }
+  // Reuse this operator's unfinished login window. A new pending profile on
+  // every click loses Facebook's device cookies, makes each retry look like a
+  // new browser, and leaves several heavy Chrome processes alive.
+  for (const [existingPendingKey, ownerUserId] of pendingAccountOwners.entries()) {
+    if (String(ownerUserId) !== String(req.user.id)) continue;
+    if (processManager.getStatus(existingPendingKey) !== 'RUNNING') {
+      pendingAccountOwners.delete(existingPendingKey);
+      continue;
+    }
+    processManager.unhideWindow(existingPendingKey);
+    console.log(`[API] Reuse unfinished Facebook login session: ${existingPendingKey}`);
+    return res.json({ success: true, pending_key: existingPendingKey, reused: true });
+  }
+  // Recover an unfinished login owned by this operator after a backend
+  // restart. Without this durable marker every click created another cold
+  // Chrome profile, losing Facebook device trust/cache and making login slow.
+  const profilesRoot = path.join(APP_DATA_ROOT, 'profiles');
+  try {
+    const reusable = fs.readdirSync(profilesRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith('pending_'))
+      .map((entry) => {
+        const markerPath = path.join(profilesRoot, entry.name, '.crm-pending-owner.json');
+        try {
+          const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+          const stat = fs.statSync(markerPath);
+          return String(marker.owner_user_id) === String(req.user.id)
+            ? { pendingKey: entry.name, modifiedMs: stat.mtimeMs }
+            : null;
+        } catch (_) { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.modifiedMs - a.modifiedMs)[0];
+    if (reusable) {
+      pendingAccountOwners.set(reusable.pendingKey, req.user.id);
+      const success = await processManager.startNewAccountProcess(reusable.pendingKey);
+      if (success) {
+        console.log(`[API] Recovered unfinished Facebook login profile: ${reusable.pendingKey}`);
+        return res.json({ success: true, pending_key: reusable.pendingKey, reused: true });
+      }
+      pendingAccountOwners.delete(reusable.pendingKey);
+    }
+  } catch (_) {}
+
   const now = new Date();
   const dateStr = now.toISOString().replace(/[-T:.Z]/g, '').substring(0, 14);
   const randomStr = Math.random().toString(36).substring(2, 7);
   const pendingKey = `pending_${dateStr}_${randomStr}`;
+  pendingAccountOwners.set(pendingKey, req.user.id);
+
+  const pendingProfileDir = path.join(APP_DATA_ROOT, 'profiles', pendingKey);
+  fs.mkdirSync(pendingProfileDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(pendingProfileDir, '.crm-pending-owner.json'),
+    JSON.stringify({ owner_user_id: req.user.id, created_at: new Date().toISOString() })
+  );
 
   console.log(`[API] Tạo phiên đăng ký tài khoản Facebook mới: ${pendingKey}`);
-  const success = processManager.startNewAccountProcess(pendingKey);
+  const success = await processManager.startNewAccountProcess(pendingKey);
+  if (!success) pendingAccountOwners.delete(pendingKey);
   res.json({ success, pending_key: pendingKey });
+});
+app.delete('/api/accounts/:id', (req, res) => {
+  try {
+    const accountId = String(req.params.id || '').trim();
+    completeNewAccountBootstrapSync(accountId);
+    const account = enterpriseAccess.canAccessAccount(req.user, accountId)
+      ? db.prepare('SELECT id FROM accounts WHERE id = ?').get(accountId) : null;
+    if (!enterpriseAccess.isCompanyAdmin(req.user) && !(req.user.role === 'ADMIN' && req.user.username === 'admin')) {
+      return res.status(403).json({ success: false, error: 'Chỉ Admin doanh nghiệp được xóa tài khoản Facebook.' });
+    }
+    if (!account) {
+      return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+    }
+
+    // Block late REGISTER_ACCOUNT frames before terminating the detached
+    // Chrome tree, otherwise the account can be recreated during deletion.
+    processManager.stopAccountProcess(accountId);
+    backgroundAfterConnectRequests.delete(accountId);
+    const extension = extensionConnections.get(accountId);
+    extensionConnections.delete(accountId);
+    InboxSyncScheduler.unregisterAccount(accountId);
+    domReplaySuppressUntil.delete(accountId);
+    if (extension && extension.readyState === WebSocket.OPEN) {
+      extension.close(1000, 'ACCOUNT_REMOVED');
+    }
+
+    const result = AccountService.removeAccount(accountId, db);
+    // Close a popup that may already be visible before clients remove the
+    // account from their local list.
+    io.emit('INCOMING_CALL_ENDED', { account_id: accountId, reason: 'ACCOUNT_REMOVED' });
+    io.emit('ACCOUNT_REMOVED', { account_id: accountId });
+    io.emit('INBOX_SOURCE_REMOVED', { id: 'src_personal_' + accountId });
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('[API] Không thể xóa tài khoản Facebook:', error);
+    res.status(500).json({ success: false, error: 'Không thể xóa tài khoản Facebook', detail: error.message });
+  }
 });
 
 // Threads
+app.get('/api/threads/waiting-count', (req, res) => {
+  try {
+    const row = db.prepare(`
+      SELECT COUNT(*) as count FROM threads t
+      JOIN accounts a ON a.id = t.account_id
+      WHERE COALESCE(t.inbox_folder, 'INBOX') IN ('MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')
+      AND t.archived_at IS NULL
+    `).get();
+    res.json({ count: row?.count || 0 });
+  } catch (error) {
+    res.json({ count: 0 });
+  }
+});
+
 app.get('/api/threads', (req, res) => {
-  const { user_id = 1, role = 'ADMIN', tab = 'ALL' } = req.query;
-  const threads = assignmentManager.getThreadsByFilter(Number(user_id), role, tab);
+  const { tab = 'ALL' } = req.query;
+  const threads = assignmentManager.getThreadsByFilter(req.user.id, req.user.role, tab, 'all', req.user.company_id, req.user.company_role, req.user.username);
   res.json(threads);
 });
 
@@ -1745,8 +3188,7 @@ app.post('/api/threads/:id/restore', (req, res) => {
 });
 
 app.post('/api/threads/:id/assign', (req, res) => {
-  const { user_id } = req.body;
-  if (!user_id) return res.status(400).json({ error: 'Thiếu user_id' });
+  const user_id = req.user.id;
   const result = assignmentManager.assignThread(req.params.id, user_id);
   if (result.success) io.emit('THREAD_ASSIGNED', { thread_id: req.params.id, user_id });
   res.json(result);
@@ -1769,6 +3211,7 @@ app.get(
   requireLocalCrmRequest,
   (req, res) => {
     try {
+      if (!enterpriseAccess.canAccessThread(req.user, req.params.threadId)) return res.status(404).json({ error: 'Không tìm thấy hội thoại.' });
       res.json(RichMessageCapabilityService.getForThread(
         req.params.threadId,
         getRichMessageCapabilityOptions()
@@ -1785,7 +3228,8 @@ app.post(
   express.raw({ type: 'multipart/form-data', limit: '105mb' }),
   (req, res) => {
     try {
-      const operatorId = getLocalOperatorId();
+      if (!enterpriseAccess.canAccessThread(req.user, req.params.threadId)) return res.status(404).json({ error: 'Không tìm thấy hội thoại.' });
+      const operatorId = req.user.id;
       if (operatorId == null) {
         return res.status(401).json({ code: 'AUTH_REQUIRED', error: 'CRM chưa có operator hợp lệ.' });
       }
@@ -1822,7 +3266,8 @@ app.delete(
   requireLocalCrmRequest,
   (req, res) => {
     try {
-      const operatorId = getLocalOperatorId();
+      if (!enterpriseAccess.canAccessThread(req.user, req.params.threadId)) return res.status(404).json({ error: 'Không tìm thấy hội thoại.' });
+      const operatorId = req.user.id;
       if (operatorId == null) {
         return res.status(401).json({ code: 'AUTH_REQUIRED', error: 'CRM chưa có operator hợp lệ.' });
       }
@@ -1847,7 +3292,7 @@ app.delete(
 
 // Serve campaign-attachment images for in-chat preview (local_media_path stores absolute path,
 // but the browser can only fetch via HTTP - use a thin proxy route to pipe the file contents).
-const CAMPAIGN_ATTACHMENTS_DIR = path.join(__dirname, '../../data/campaign-attachments');
+const CAMPAIGN_ATTACHMENTS_DIR = path.join(APP_DATA_ROOT, 'campaign-attachments');
 app.get('/api/campaign-attachments/:filename', requireLocalCrmRequest, (req, res) => {
   try {
     const filename = path.basename(req.params.filename); // strip any traversal
@@ -1899,12 +3344,14 @@ app.get(
 );
 
 app.get('/api/contacts/:thread_id', (req, res) => {
+  if (!enterpriseAccess.canAccessThread(req.user, req.params.thread_id)) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
   const contact = db.prepare('SELECT * FROM contacts WHERE thread_id=?').get(req.params.thread_id) || {};
   const phoneView = PhoneCaptureService.getContactPhoneView(req.params.thread_id, db);
   res.json({ ...contact, phone_candidates: phoneView.phone_candidates, phone_capture: phoneView.phone_capture });
 });
 
 app.put('/api/contacts/:thread_id', (req, res) => {
+  if (!enterpriseAccess.canAccessThread(req.user, req.params.thread_id)) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
   let updatedContact;
   try {
     updatedContact = ContactService.update(req.params.thread_id, req.body, db);
@@ -1929,6 +3376,50 @@ app.put('/api/contacts/:thread_id', (req, res) => {
     phone_captured_at: contact.phone_captured_at
   });
   res.json({ success: true, contact });
+});
+
+// Inbox Sources — Personal and Page connected sources
+app.get('/api/inbox-sources', (req, res) => {
+  try {
+    const accountIds = enterpriseAccess.listAccounts(req.user).map(account => String(account.id));
+    const sources = accountIds.length ? db.prepare(`
+      SELECT id,source_type,owner_account_id,external_id,display_name,avatar_url,status,webhook_verify_token,created_at
+      FROM inbox_sources WHERE owner_account_id IN (${accountIds.map(() => '?').join(',')}) ORDER BY created_at ASC
+    `).all(...accountIds) : [];
+    res.json(sources);
+  } catch (error) {
+    console.error('[InboxSource] Fetch failed:', error);
+    res.status(500).json({ error: error.message || 'Không thể lấy danh sách nguồn hội thoại' });
+  }
+});
+
+// Manual "Kết nối Page" flow (AccountManagerModal) — this only ever accepted a
+// raw Page ID or a profile.php?id= link (per the UI's own placeholder text;
+// no Graph API token is actually needed since the extension does DOM
+// automation, not the Graph API), but no route ever backed the POST the
+// frontend sends here — every submit 404'd and Express's default handler
+// returned an HTML page, which broke on the client's res.json() with
+// "Unexpected token '<' ... is not valid JSON". Reuses ensurePageSource(),
+// the same idempotent upsert the automatic page_dom_observer path already
+// uses, so a manually-added Page behaves identically to an auto-detected one.
+app.post('/api/inbox-sources/page', (req, res) => {
+  try {
+    const raw = String(req.body?.page_access_token || '').trim();
+    const ownerAccountId = req.body?.owner_account_id || null;
+    if (!raw) return res.status(400).json({ error: 'Thiếu Link Page hoặc ID Page' });
+
+    const pageId = parsePageIdFromInput(raw);
+    if (!pageId) {
+      return res.status(400).json({ error: 'Không nhận diện được ID Page. Dùng ID số hoặc link dạng facebook.com/profile.php?id=...' });
+    }
+
+    const source = InboxSourceService.ensurePageSource({ pageId, accountId: ownerAccountId, pageName: null }, db);
+    io.emit('INBOX_SOURCE_ADDED', { id: source.id, source_type: 'page_messenger', display_name: source.display_name });
+    res.json(source);
+  } catch (error) {
+    console.error('[InboxSource] Kết nối Page thủ công thất bại:', error);
+    res.status(500).json({ error: error.message || 'Không thể kết nối Page' });
+  }
 });
 
 // Lead Statuses — staff-created, reusable, color-coded (feature 022)
@@ -2061,7 +3552,7 @@ app.get("/api/campaigns", (req, res) => {
 app.post("/api/campaigns", (req, res) => {
   try {
     CampaignService.assertFeatureEnabled();
-    const campaign = CampaignService.createDraft(req.body || {}, db, {
+    const campaign = CampaignService.createDraft({ ...(req.body || {}), created_by: req.user.id }, db, {
       getConnection: (accountId) => extensionConnections.get(accountId)
     });
     res.status(201).json(campaign);
@@ -2074,6 +3565,17 @@ app.get("/api/campaigns/:id", (req, res) => {
   const campaign = CampaignRepository.getCampaign(req.params.id);
   if (!campaign) return sendCampaignError(res, { code: "CAMPAIGN_NOT_FOUND", message: "Không tìm thấy chiến dịch." });
   res.json(campaign);
+});
+
+app.get('/api/campaigns/:id/response-stats', (req, res) => {
+  try {
+    const statistics = CampaignResponseStatsService.get(req.params.id, db);
+    if (!statistics) return sendCampaignError(res, { code: 'CAMPAIGN_NOT_FOUND', message: 'Không tìm thấy chiến dịch.' });
+    res.json(statistics);
+  } catch (error) {
+    console.error('[Campaign response stats]', error);
+    res.status(500).json({ error: { code: 'CAMPAIGN_STATS_ERROR', message: 'Không thể tải thống kê phản hồi.' } });
+  }
 });
 
 app.patch('/api/campaigns/:id', (req, res) => {
@@ -2339,7 +3841,18 @@ app.get('/api/ollama/health', async (req, res) => {
 
 // Messages REST API - With UI Guard Filter
 app.get('/api/threads/:id/messages', (req, res) => {
-  const msgs = db.prepare('SELECT * FROM messages WHERE thread_id=? ORDER BY timestamp_ms ASC, created_at ASC, id ASC').all(req.params.id);
+  if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
+  OutboundDomCorrelationService.collapseStoredMediaCompanions(db, req.params.id);
+  OutboundDomCorrelationService.collapseStoredTemporaryIdUpgrades(db, req.params.id);
+  // A failed outbound attempt is terminal. Remove it before reading so an old
+  // pending row can never reappear as a retry bubble after app startup.
+  deleteOutboundMessageRows({ threadId: req.params.id, failedOnly: true });
+  // `id` is the durable per-database receive sequence. is_outgoing identifies
+  // the side (0 = customer, 1 = operator); timestamps are display-only.
+  const msgs = db.prepare(`
+    SELECT * FROM messages WHERE thread_id=?
+    ORDER BY COALESCE(sequence_order, id) ASC, id ASC
+  `).all(req.params.id);
   const cleanMsgs = msgs.map(m => {
     const cleaned = cleanMessageText(m.content);
     return { ...m, cleaned };
@@ -2357,6 +3870,7 @@ app.get('/api/threads/:id/messages', (req, res) => {
 // content/media - used by page_content.js/content.js to re-seed their
 // client-side timestamp-anchor map after a script restart (feature 014).
 app.get('/api/threads/:id/message-timestamps', (req, res) => {
+  if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
   res.json(ConversationRepository.getMessageTimestamps(req.params.id));
 });
 
@@ -2368,10 +3882,57 @@ app.get('*', (req, res) => {
 // ────────────────────────────────────────────────
 const PORT = process.env.PORT || 5050;
 function startServer() {
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Server] http://localhost:${PORT}`);
-    console.log(`[Server] WebSocket ws://localhost:${PORT}`);
+  const allowedProfileDirs = db.prepare('SELECT profile_dir FROM accounts WHERE profile_dir IS NOT NULL').all()
+    .map(({ profile_dir }) => path.isAbsolute(profile_dir)
+      ? profile_dir
+      : path.resolve(__dirname, '../..', profile_dir));
+  processManager.stopOrphanedManagedChromeProfiles(allowedProfileDirs);
+
+  const listenPromise = new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      console.log(`[Server] http://localhost:${PORT}`);
+      console.log(`[Server] WebSocket ws://localhost:${PORT}`);
+      resolve({ port: Number(PORT), pid: process.pid });
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(PORT, '0.0.0.0');
   });
+
+  // Dọn dẹp các tên rác hệ thống (ví dụ: "Tất cả tin nhắn", "Hộp thư đến") đã lưu vào CSDL trước đây
+  try {
+    const dirtySystemNames = [
+      'Tất cả tin nhắn', 'Tất cả', 'All messages', 'All',
+      'Tin nhắn trực tiếp', 'Direct messages',
+      'Hộp thư đến', 'Hộp thư', 'Inbox',
+      'Chưa đọc', 'Unread', 'Đã xong', 'Done',
+      'Gắn dấu sao', 'Đã gắn dấu sao', 'Starred',
+      'Spam', 'Thư rác', 'Đang', 'Facebook', 'Messenger', 'Meta'
+    ];
+    const placeholders = dirtySystemNames.map(() => '?').join(',');
+    db.prepare(`
+      UPDATE threads 
+      SET contact_name = 'Khách hàng' 
+      WHERE contact_name IN (${placeholders}) 
+         OR contact_name LIKE 'Đang hoạt động%' 
+         OR contact_name LIKE 'Hoạt động%'
+    `).run(...dirtySystemNames);
+    db.prepare(`
+      UPDATE contacts 
+      SET name = 'Khách hàng' 
+      WHERE name IN (${placeholders}) 
+         OR name LIKE 'Đang hoạt động%' 
+         OR name LIKE 'Hoạt động%'
+    `).run(...dirtySystemNames);
+
+  } catch (cleanErr) {
+    console.warn('[DB] Lỗi dọn dẹp tên hệ thống:', cleanErr.message);
+  }
 
   // Drains message_queue (Page-thread sends routed there by sendViaExtension,
   // feature 015) and dispatches SEND_QUEUED_MESSAGE to the right extension
@@ -2422,6 +3983,89 @@ function startServer() {
   if (CampaignService.getConfig().enabled) {
     setTimeout(() => campaignRunner.recover(), 1500);
   }
+  return listenPromise;
 }
 
-module.exports = { app, server, startServer, extensionConnections, io };
+InitialMessageSweepService.configure({
+  listThreads: (accountId) => db.prepare(`
+    SELECT t.id, t.external_thread_id, t.thread_url, t.contact_name,
+           CASE WHEN s.source_type = 'page_messenger' THEN s.external_id ELSE NULL END AS page_id
+    FROM threads t
+    LEFT JOIN inbox_sources s ON s.id = t.source_id
+    WHERE t.account_id = ? AND t.archived_at IS NULL
+      AND COALESCE(t.sync_status, 'LOCAL') <> 'SYNCED'
+    ORDER BY t.last_activity DESC
+  `).all(String(accountId)),
+  enqueue: (job) => InboxSyncScheduler.enqueueThreadSync(job),
+  isBusy: (accountId) => InboxSyncScheduler.isAccountThreadBusy(accountId),
+  isReady: (accountId) => {
+    const connection = extensionConnections.get(String(accountId));
+    return Boolean(connection && connection.readyState === WebSocket.OPEN);
+  },
+  emit: (progress) => io.emit('INITIAL_MESSAGE_SYNC_PROGRESS', progress)
+});
+
+InboxSyncScheduler.configure({
+  getConnection: (accountId) => extensionConnections.get(String(accountId)),
+  dispatchThreadMessagesSync: ({ account_id, thread_id, external_thread_id, thread_url, page_id, contact_name, reason, allow_navigation, sync_mode, scroll_delta }) => {
+    const extWs = extensionConnections.get(String(account_id));
+    if (!extWs || extWs.readyState !== WebSocket.OPEN) return false;
+    const syncState = require('./services/HistorySyncManager').getSyncState(thread_id);
+    const pageSource = ConversationRepository.getThreadSource(thread_id);
+    const persisted = db.prepare('SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?').get(thread_id);
+    let mode = sync_mode || 'incremental';
+    if (!sync_mode && (!syncState?.sync_cursor || Number(persisted?.count || 0) === 0)) mode = 'initial';
+    else if (!sync_mode && (syncState.sync_status === 'PARTIAL' || syncState.sync_status === 'FAILED')) mode = 'deep_backfill';
+    extWs.send(JSON.stringify({
+      type: 'SYNC_THREAD_MESSAGES',
+      data: {
+        account_id,
+        thread_id,
+        external_thread_id: external_thread_id || thread_id,
+        thread_url,
+        page_id: pageSource?.sourceType === 'personal_messenger' ? null : (page_id || pageSource?.pageId || null),
+        mode,
+        cursor: syncState?.sync_cursor || null,
+        contact_name,
+        reason,
+        allow_navigation: allow_navigation === true,
+        scroll_delta: Number(scroll_delta) || 0
+      }
+    }));
+    return true;
+
+    console.log(`[HISTORY_SYNC_DISABLED] Scheduler request ignored account=${account_id} thread=${thread_id}`);
+    return false;
+    /* Scheduler-based message history synchronization is intentionally disabled.
+    const extWs = extensionConnections.get(String(account_id));
+    if (!extWs || extWs.readyState !== WebSocket.OPEN) return false;
+    const syncState = require('./services/HistorySyncManager').getSyncState(thread_id);
+    const pageSource = ConversationRepository.getThreadSource(thread_id);
+    const threadRow = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(thread_id);
+    let mode = 'incremental';
+    if (!syncState?.sync_cursor) mode = 'initial';
+    else if (syncState.sync_status === 'PARTIAL' || syncState.sync_status === 'FAILED') mode = 'deep_backfill';
+    extWs.send(JSON.stringify({
+      type: 'SYNC_THREAD_MESSAGES',
+      data: {
+        account_id,
+        thread_id,
+        thread_url,
+        page_id: page_id || pageSource?.pageId || null,
+        mode,
+        cursor: syncState?.sync_cursor || null,
+        contact_name: contact_name || threadRow?.contact_name || null,
+        reason,
+        allow_navigation: allow_navigation === true
+      }
+    }));
+    return true;
+    */
+  }
+});
+
+function stopManagedProcesses() {
+  return processManager.stopAllAccountProcesses();
+}
+
+module.exports = { app, server, startServer, stopManagedProcesses, extensionConnections, io };

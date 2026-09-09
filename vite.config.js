@@ -14,10 +14,15 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/api': 'http://localhost:5050',
+      '/api': {
+        target: 'http://localhost:5050',
+        changeOrigin: true,
+        cookieDomainRewrite: 'localhost'
+      },
       '/socket.io': {
         target: 'http://localhost:5050',
-        ws: true
+        ws: true,
+        changeOrigin: true
       }
     }
   }

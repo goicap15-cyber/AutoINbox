@@ -48,33 +48,15 @@ for (const filename of fs.readdirSync(SRC_DIR)) {
   const srcPath = path.join(SRC_DIR, filename);
   const outPath = path.join(OUT_DIR, filename);
 
-  if (COPY_AS_IS.includes(filename)) {
-    fs.copyFileSync(srcPath, outPath);
-    console.log(`[copy]  ${filename}`);
-  } else if (filename.endsWith('.js')) {
-    const src = fs.readFileSync(srcPath, 'utf8');
-    try {
-      const result = JavaScriptObfuscator.obfuscate(src, OBFUSCATE_OPTIONS);
-      fs.writeFileSync(outPath, result.getObfuscatedCode());
-      const reduction = (1 - result.getObfuscatedCode().length / src.length).toFixed(2);
-      console.log(`[obfuscate]  ${filename}  (${reduction > 0 ? '+' : ''}${(-reduction * 100).toFixed(0)}% size)`);
-      ok++;
-    } catch (err) {
-      console.error(`[ERROR] ${filename}:`, err.message);
-      // Fallback: copy không obfuscate
-      fs.copyFileSync(srcPath, outPath);
-    }
+  const stat = fs.statSync(srcPath);
+  if (stat.isDirectory()) {
+    fs.cpSync(srcPath, outPath, { recursive: true, force: true });
   } else {
-    // Các file khác (icons, etc.): copy nguyên
-    const stat = fs.statSync(srcPath);
-    if (stat.isDirectory()) {
-      fs.cpSync(srcPath, outPath, { recursive: true, force: true });
-    } else {
-      fs.copyFileSync(srcPath, outPath);
-    }
-    console.log(`[copy]  ${filename}`);
+    fs.copyFileSync(srcPath, outPath);
   }
+  console.log(`[copy]  ${filename}`);
+  ok++;
 }
 
-console.log(`\n=== Chrome Extension obfuscation hoàn tất: ${ok} file(s) ===`);
+console.log(`\n=== Chrome Extension build/copy hoàn tất: ${ok} file(s) ===`);
 console.log(`Output: ${OUT_DIR}`);

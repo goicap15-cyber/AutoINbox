@@ -20,6 +20,13 @@ function sourceCapturedAt(capture) {
 
 function update(threadId, payload = {}, database) {
   const { name, email, address, notes, tags, lead_captured, avatar_url, status_id, custom_fields, phone_capture_id } = payload;
+  const hasNickname = Object.prototype.hasOwnProperty.call(payload, 'nickname');
+  const nickname = hasNickname ? String(payload.nickname || '').trim() : undefined;
+  if (nickname !== undefined && nickname.length > 80) {
+    const error = new Error('Biệt danh không được vượt quá 80 ký tự.');
+    error.code = 'NICKNAME_TOO_LONG';
+    throw error;
+  }
   let { phone } = payload;
   const serializedTags = JSON.stringify(Array.isArray(tags) ? tags : []);
   const serializedCustomFields = JSON.stringify(Array.isArray(custom_fields) ? custom_fields : []);
@@ -53,11 +60,12 @@ function update(threadId, payload = {}, database) {
 
   database.prepare(`
     INSERT INTO contacts
-      (thread_id, name, phone, email, address, notes, tags, lead_captured, avatar_url, status_id,
+      (thread_id, name, nickname, phone, email, address, notes, tags, lead_captured, avatar_url, status_id,
        custom_fields, phone_source, phone_capture_id, phone_captured_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET
       name = COALESCE(excluded.name, contacts.name),
+      nickname = CASE WHEN ? THEN excluded.nickname ELSE contacts.nickname END,
       phone = COALESCE(excluded.phone, contacts.phone),
       email = COALESCE(excluded.email, contacts.email),
       address = COALESCE(excluded.address, contacts.address),
@@ -72,6 +80,7 @@ function update(threadId, payload = {}, database) {
   `).run(
     threadId,
     name || null,
+    nickname || null,
     phone || null,
     email || null,
     address == null ? null : String(address).trim(),
@@ -83,7 +92,8 @@ function update(threadId, payload = {}, database) {
     serializedCustomFields,
     phoneSource,
     phoneCaptureId,
-    phoneCapturedAt
+    phoneCapturedAt,
+    hasNickname ? 1 : 0
   );
 
   if (phone_capture_id != null) {

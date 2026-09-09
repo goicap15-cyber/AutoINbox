@@ -17,6 +17,7 @@ export function normalizeSourceKey(value) {
   const key = String(value || '').trim();
   if (KNOWN_SOURCE_TYPE_KEYS.has(key)) return key;
   if (key.startsWith('source:') && key.slice('source:'.length).trim()) return key;
+  if (key.startsWith('account:') && key.slice('account:'.length).trim()) return key;
   return null;
 }
 
@@ -146,9 +147,20 @@ export function toggleQuickFilter(filters, key) {
   return clean;
 }
 
-export function sanitizeFilters(filters, availableSources = [], availableStatuses = []) {
+export function sanitizeFilters(filters, availableSources = [], availableStatuses = [], availableAccounts = []) {
   const clean = normalizeFilters(filters);
-  const validSourceKeys = new Set([...getAvailableSourceTypeKeys(availableSources), ...(Array.isArray(availableSources) ? availableSources : []).filter((source) => source?.id != null && String(source.id).trim()).map((source) => 'source:' + source.id)]);
+  // type:personal_messenger and type:page_messenger are always valid — they are core source type keys,
+  // not dependent on what inboxSources are loaded (personal threads have no inbox_sources row).
+  const validSourceKeys = new Set([
+    SOURCE_TYPE_KEYS.PERSONAL,
+    SOURCE_TYPE_KEYS.PAGE,
+    ...getAvailableSourceTypeKeys(availableSources),
+    ...(Array.isArray(availableSources) ? availableSources : []).filter((source) => source?.id != null && String(source.id).trim()).map((source) => 'source:' + source.id),
+    // account:<id> keys mirror source:<id> for Pages, but scoped to currently
+    // connected personal Facebook accounts - removing an account drops its
+    // filter key here too instead of leaving a stale selection with no effect.
+    ...(Array.isArray(availableAccounts) ? availableAccounts : []).filter((account) => account?.id != null && String(account.id).trim()).map((account) => 'account:' + account.id)
+  ]);
   const validStatusIds = new Set((Array.isArray(availableStatuses) ? availableStatuses : []).map((status) => String(status.id)));
   clean.sourceKeys = clean.sourceKeys.filter((key) => validSourceKeys.has(key));
   clean.statusIds = clean.statusIds.filter((id) => validStatusIds.has(id));
@@ -228,7 +240,17 @@ export function matchesConversationFilters(thread, filters, now = Date.now()) {
   if (!thread) return false;
   const clean = normalizeFilters(filters);
   if (!matchesArchiveScope(thread, clean.archiveScope, now)) return false;
-  if (clean.sourceKeys.length) { const typeKey = thread.source_type ? 'type:' + thread.source_type : null; const idKey = thread.source_id != null ? 'source:' + thread.source_id : null; if (!clean.sourceKeys.some((key) => key === typeKey || key === idKey)) return false; }
+  if (clean.sourceKeys.length) {
+    // Determine source type: prefer explicit source_type from JOIN, then fall back by source_id presence.
+    // Personal threads: source_id = null AND source_type = null (no inbox_sources row).
+    // Page threads: source_id = 'src_page_...' AND source_type = 'page_messenger'.
+    const threadSourceType = thread.source_type ||
+      (thread.source_id != null && String(thread.source_id).startsWith('src_page_') ? 'page_messenger' : 'personal_messenger');
+    const typeKey = 'type:' + threadSourceType;
+    const idKey = thread.source_id != null ? 'source:' + thread.source_id : null;
+    const accountKey = thread.account_id != null ? 'account:' + thread.account_id : null;
+    if (!clean.sourceKeys.some((key) => key === typeKey || (idKey && key === idKey) || (accountKey && key === accountKey))) return false;
+  }
   if (clean.statusIds.length && !clean.statusIds.includes(String(thread.status_id ?? ''))) return false;
   if (clean.workflowStates.length && !clean.workflowStates.includes(String(thread.status || ''))) return false;
   const tags = parseTags(thread.tags);

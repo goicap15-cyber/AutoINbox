@@ -97,3 +97,17 @@ test('validateAttachment rejects empty, oversized, mismatched and truncated PDF 
     allowedMimeTypes: ['image/png']
   }), (error) => error.code === 'ATTACHMENT_UNSUPPORTED');
 });
+
+test('validateAttachment accepts a safe chat file from its allow-listed extension', () => {
+  const bytes = Buffer.from('noi dung tai lieu');
+  const result = validateAttachment({
+    buffer: bytes,
+    originalName: 'ghi-chu.txt',
+    declaredMimeType: '',
+    allowedMimeTypes: ['text/plain'],
+    enforceExtension: true
+  });
+  assert.equal(result.mimeType, 'text/plain');
+  assert.equal(result.mediaType, 'file');
+  assert.equal(result.extension, '.txt');
+});

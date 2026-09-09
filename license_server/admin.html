@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Dashboard quản trị License Server FB CRM"><title>License Admin | FB CRM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{--app:#16283b;--side:#1b3046;--panel:#21384f;--surface:#29445e;--hover:#355570;--border:#4b6983;--text:#f8fafc;--muted:#aec1d2;--accent:#38bdf8;--green:#34d399;--amber:#fbbf24;--red:#f87171;--radius:14px}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 75% 0,rgba(56,189,248,.18),transparent 32%),linear-gradient(135deg,#182c40,#20384f 55%,#172a3d);color:var(--text);font:14px/1.5 Inter,sans-serif}button,input,select{font:inherit}button{cursor:pointer}.hidden{display:none!important}.icon{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #7dd3fc;outline-offset:2px}
+.login{min-height:100vh;display:grid;place-items:center;padding:20px}.login-card{width:min(420px,100%);padding:32px;border:1px solid var(--border);border-radius:20px;background:linear-gradient(145deg,var(--surface),var(--side));box-shadow:0 30px 80px #0007}.logo{width:52px;height:52px;border-radius:15px;display:grid;place-items:center;color:#7dd3fc;background:#0ea5e922;border:1px solid #38bdf844}.login h1{font-size:22px;margin:20px 0 5px}.login p{color:var(--muted);margin:0 0 24px}.label{display:block;font-size:12px;font-weight:600;margin-bottom:7px}.input{width:100%;height:43px;padding:0 13px;border:1px solid var(--border);border-radius:9px;background:var(--app);color:var(--text)}.login-btn{width:100%;height:43px;margin-top:13px;border:0;border-radius:9px;color:white;font-weight:700;background:linear-gradient(135deg,var(--accent),#0284c7)}.login-error{min-height:18px;color:#fca5a5;font-size:12px;margin-top:10px}
+.app{display:grid;grid-template-columns:252px minmax(0,1fr);min-height:100vh}.sidebar{position:fixed;inset:0 auto 0 0;width:252px;padding:18px 14px;background:linear-gradient(var(--side),#081321);border-right:1px solid #28405799;display:flex;flex-direction:column;z-index:30}.brand{display:flex;gap:11px;align-items:center;padding:7px 9px 22px}.brand .logo{width:38px;height:38px;border-radius:11px;color:white;background:linear-gradient(145deg,var(--accent),#2563eb)}.brand strong{font-size:13px}.brand small{display:block;color:var(--muted);font-size:10px}.nav-label{padding:10px;color:#536b82;font-size:10px;font-weight:800;letter-spacing:.12em}.nav{display:grid;gap:4px}.nav button{min-height:42px;border:0;border-radius:9px;padding:0 11px;background:transparent;color:#90a6ba;display:flex;align-items:center;gap:11px;text-align:left;font-weight:600}.nav button:hover{background:var(--hover);color:white}.nav button.active{color:#7dd3fc;background:#0ea5e91d;box-shadow:inset 3px 0 var(--accent)}.count{margin-left:auto;padding:1px 7px;border-radius:99px;background:#7f95aa22;font-size:10px}.server{margin-top:auto;padding:14px 10px;border-top:1px solid #28405799;display:flex;gap:9px;align-items:center}.dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 5px #10b98118}.server small{display:block;color:var(--muted);font-size:10px}
+.main{grid-column:2;min-width:0}.topbar{height:72px;position:sticky;top:0;z-index:20;padding:0 27px;display:flex;align-items:center;gap:12px;background:#1a2f44e8;backdrop-filter:blur(15px);border-bottom:1px solid #4b6983aa}.heading h1{font-size:18px;margin:0}.heading p{font-size:11px;color:var(--muted);margin:2px 0}.actions{margin-left:auto;display:flex;gap:8px}.search{width:min(310px,28vw)}.btn{height:40px;padding:0 13px;border:1px solid var(--border);border-radius:9px;background:var(--surface);color:#e2edf5;display:inline-flex;align-items:center;gap:7px}.btn:hover{background:var(--hover);color:white}.btn.danger{color:#fecaca;background:#ef44441f}.menu{display:none;width:40px;padding:0;justify-content:center}.content{padding:25px 27px 40px;max-width:1680px;margin:auto}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}.stat{min-height:126px;padding:18px;border:1px solid #52718c;border-radius:var(--radius);background:linear-gradient(145deg,#2b4863,#21394f);box-shadow:0 10px 26px #07111d33}.stat-head{display:flex;justify-content:space-between;color:#c2d2df;font-size:11px;font-weight:600}.stat-ico{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;color:#bae6fd;background:#38bdf82b}.stat-value{font-size:26px;font-weight:800;margin-top:7px}.stat-note{color:#adc1d2;font-size:10px}.stat.green .stat-ico{color:#a7f3d0;background:#10b9812b}.stat.amber .stat-ico{color:#fde68a;background:#f59e0b2b}.stat.violet .stat-ico{color:#ddd6fe;background:#8b5cf62b}
+.panel{border:1px solid #52718c;border-radius:var(--radius);background:#21384ff5;box-shadow:0 18px 42px #07111d44;overflow:hidden}.panel-head{min-height:66px;padding:12px 17px;display:flex;align-items:center;border-bottom:1px solid #52718c99}.panel h2{font-size:14px;margin:0}.panel p{font-size:10px;color:var(--muted);margin:2px 0}.filters{margin-left:auto;display:flex;gap:8px}.select{height:36px;padding:0 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:#e2edf5;font-size:11px}.table-wrap{overflow:auto;min-height:300px}table{width:100%;min-width:1050px;border-collapse:collapse}th{height:42px;padding:0 15px;text-align:left;background:#1a3045;color:#b7cad9;font-size:9px;letter-spacing:.08em;text-transform:uppercase}td{padding:14px 15px;border-top:1px solid #52718c77;vertical-align:top;color:#e2e8f0;font-size:12px}tbody tr:hover{background:#35557088}.sub{display:block;color:var(--muted);font-size:10px;margin-top:3px}.key{font-family:Consolas,monospace;color:#bae6fd;padding:5px 7px;border-radius:6px;background:#38bdf81f;border:1px solid #38bdf852;white-space:nowrap}.copy,.remove{width:28px;height:28px;border:0;border-radius:6px;background:transparent;color:var(--muted)}.copy:hover{background:var(--hover);color:white}.badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:99px;font-size:10px;font-weight:700;white-space:nowrap}.badge:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}.ok{color:#a7f3d0;background:#10b98126}.warn{color:#fde68a;background:#f59e0b26}.bad{color:#fecaca;background:#ef444426}.devices{display:flex;flex-wrap:wrap;gap:6px}.device{display:flex;align-items:center;gap:6px;padding:3px 4px 3px 8px;border:1px solid #52718c99;border-radius:7px;background:#192e42}.remove{width:25px;height:25px;color:#fecaca;background:#ef444422}.empty{height:290px;display:grid;place-items:center;text-align:center;color:var(--muted)}.loading{height:3px;background:#38bdf833;overflow:hidden}.loading:after{content:"";display:block;width:35%;height:100%;background:var(--accent);animation:load 1s infinite}.toasts{position:fixed;right:20px;bottom:20px;z-index:100}.toast{margin-top:8px;min-width:280px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--surface);box-shadow:0 18px 42px #0006}.toast.error{border-color:#ef444466}.overlay{display:none}@keyframes load{from{transform:translateX(-110%)}to{transform:translateX(320%)}}
+@media(max-width:1050px){.stats{grid-template-columns:repeat(2,1fr)}}@media(max-width:760px){.app{display:block}.sidebar{transform:translateX(-105%);transition:.2s}.sidebar.open{transform:none}.overlay.open{display:block;position:fixed;inset:0;background:#0f172a66;z-index:25}.main{grid-column:auto}.menu{display:inline-flex}.topbar{height:64px;padding:0 13px}.search{display:none}.content{padding:15px 13px}.stats{gap:9px}.filters{margin-left:0;width:100%}.panel-head{align-items:flex-start;flex-direction:column;gap:10px}.select{flex:1}}@media(max-width:440px){.stats{grid-template-columns:1fr}.stat{min-height:100px}}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* Light theme — đồng bộ CRM client */
+:root{--app:#f6f7f9;--side:#fff;--panel:#fff;--surface:#f1f3f6;--hover:#eef4ff;--border:#e5e7eb;--text:#111827;--muted:#6b7280;--accent:#2684ff;--green:#059669;--amber:#d97706;--red:#dc2626}
+body{background:radial-gradient(circle at 78% -8%,#dbeafe 0,transparent 32%),linear-gradient(135deg,#f8fafc,#f3f6fa);color:var(--text)}
+.login-card{background:#fff;border-color:#dbe3ec;box-shadow:0 24px 70px #46617d24}.login .logo{color:#fff;background:linear-gradient(145deg,#2684ff,#0f6eea);border-color:#60a5fa;box-shadow:0 10px 25px #2684ff38}.login p,.stat-note,.sub,.panel p,.heading p,.brand small,.server small{color:#6b7280}.label{color:#374151}.input{background:#fff;color:#111827;border-color:#d1d5db}.input::placeholder{color:#9ca3af}.login-btn{background:linear-gradient(135deg,#2684ff,#0f6eea);box-shadow:0 10px 24px #2684ff35}.login-error{color:#dc2626}
+.sidebar{background:linear-gradient(180deg,#fff,#f8fafc);border-right-color:#e5e7eb;box-shadow:5px 0 25px #3341550d}.brand .logo{color:#fff;background:linear-gradient(145deg,#2684ff,#0f6eea)}.brand strong,.server strong{color:#111827}.nav-label{color:#9ca3af}.nav button{color:#4b5563}.nav button:hover{background:#eef4ff;color:#0f6eea}.nav button.active{color:#0f6eea;background:#eaf3ff;box-shadow:inset 3px 0 #2684ff}.count{color:#2563eb;background:#dbeafe}.server{border-top-color:#e5e7eb}.dot{background:#10b981}
+.topbar{background:#fffffff0;border-bottom-color:#e5e7eb;box-shadow:0 3px 16px #3341550b}.heading h1{color:#111827}.btn{background:#fff;border-color:#d1d5db;color:#374151;box-shadow:0 1px 2px #1118270a}.btn:hover{background:#eef4ff;color:#0f6eea;border-color:#93c5fd}.btn.danger{color:#dc2626;background:#fff;border-color:#fecaca}.btn.danger:hover{background:#fef2f2}
+.stat{background:#fff;border-color:#e5e7eb;box-shadow:0 8px 24px #33415512}.stat:hover{border-color:#bfdbfe;box-shadow:0 12px 28px #2684ff17}.stat-head{color:#64748b}.stat-value{color:#111827}.stat-ico{color:#0f6eea;background:#eaf3ff}.stat.green .stat-ico{color:#047857;background:#d1fae5}.stat.amber .stat-ico{color:#b45309;background:#fef3c7}.stat.violet .stat-ico{color:#7c3aed;background:#ede9fe}
+.panel{background:#fff;border-color:#e5e7eb;box-shadow:0 12px 32px #33415512}.panel-head{border-bottom-color:#e5e7eb}.panel h2{color:#111827}.select{background:#fff;color:#374151;border-color:#d1d5db}th{background:#f8fafc;color:#64748b;border-bottom:1px solid #e5e7eb}td{color:#374151;border-top-color:#edf0f3}tbody tr:hover{background:#f5f9ff}.check-cell{width:42px;text-align:center}.row-check,.select-all{width:16px;height:16px;accent-color:#2684ff;cursor:pointer}.bulk-delete{height:36px;padding:0 11px;border:1px solid #fecaca;border-radius:8px;color:#dc2626;background:#fff;font-size:11px;font-weight:700}.bulk-delete:hover{background:#fee2e2}.bulk-delete:disabled{opacity:.45;cursor:not-allowed}.key{color:#0f6eea;background:#eaf3ff;border-color:#bfdbfe}.copy{color:#64748b}.copy:hover{background:#dbeafe;color:#0f6eea}.ok{color:#047857;background:#d1fae5}.warn{color:#b45309;background:#fef3c7}.bad{color:#b91c1c;background:#fee2e2}.device{background:#f8fafc;border-color:#dbe3ec;color:#374151}.remove{color:#dc2626;background:#fee2e2}.delete-key{height:32px;padding:0 10px;border:1px solid #fecaca;border-radius:7px;color:#dc2626;background:#fff;white-space:nowrap;font-size:11px;font-weight:700}.delete-key:hover{background:#fee2e2;border-color:#fca5a5}.delete-key:disabled{opacity:.55;cursor:not-allowed}.empty{color:#6b7280}.loading{background:#dbeafe}.toast{background:#fff;color:#111827;border-color:#dbe3ec;box-shadow:0 18px 42px #33415526}
+.dashboard-grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(280px,.8fr);gap:18px;margin-bottom:18px}.dash-card{min-width:0;border:1px solid #e5e7eb;border-radius:14px;background:#fff;box-shadow:0 8px 24px #3341550d}.dash-head{padding:17px 19px 10px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.dash-head h2{font-size:14px;margin:0;color:#111827}.dash-head p{font-size:10px;color:#6b7280;margin:3px 0 0}.chart-total{font-size:18px;font-weight:800;color:#111827;text-align:right}.chart-total small{display:block;font-size:9px;font-weight:500;color:#6b7280}.revenue-chart{height:205px;padding:14px 20px 18px;display:flex;align-items:flex-end;gap:12px;border-top:1px solid #f1f5f9}.bar-col{height:100%;min-width:0;flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:7px}.bar-value{font-size:9px;color:#64748b;white-space:nowrap}.bar-track{height:145px;width:min(42px,70%);display:flex;align-items:flex-end;border-radius:8px;background:#f1f5f9;overflow:hidden}.bar-fill{width:100%;min-height:4px;border-radius:8px 8px 0 0;background:linear-gradient(180deg,#2684ff,#60a5fa);transition:height .25s}.bar-label{font-size:9px;font-weight:600;color:#64748b}.health-body{padding:8px 19px 18px;display:grid;gap:14px}.health-row{display:grid;grid-template-columns:1fr auto;gap:7px;align-items:center}.health-label{font-size:11px;color:#475569}.health-number{font-size:11px;font-weight:700;color:#111827}.health-track{grid-column:1/-1;height:7px;border-radius:99px;background:#eef2f7;overflow:hidden}.health-fill{height:100%;border-radius:99px;background:#10b981}.health-fill.amber{background:#f59e0b}.health-fill.red{background:#ef4444}.expiry-card{grid-column:1/-1}.expiry-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:4px 19px 18px}.expiry-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px;border:1px solid #e5e7eb;border-radius:10px;background:#fafcff}.expiry-item strong{display:block;font-size:11px;color:#111827}.expiry-item span{display:block;font-size:9px;color:#64748b;margin-top:2px}.expiry-days{flex:none;padding:4px 8px;border-radius:99px;background:#fef3c7;color:#b45309!important;font-size:9px!important;font-weight:700}.rank-revenue{flex:none;padding:4px 8px;border-radius:99px;background:#dbeafe;color:#1d4ed8!important;font-size:9px!important;font-weight:700}.dash-empty{padding:24px;color:#94a3b8;font-size:11px;text-align:center;grid-column:1/-1}@media(max-width:1100px){.dashboard-grid{grid-template-columns:1fr}.expiry-list{grid-template-columns:1fr}.expiry-card{grid-column:auto}}@media(max-width:760px){.revenue-chart{gap:5px;padding-inline:10px}.bar-value{display:none}}
+</style></head>
+<body>
+<section id="login" class="login"><form id="loginForm" class="login-card"><div class="logo">◆</div><h1>Central License Admin</h1><p>Đăng nhập để quản lý Key, thiết bị và doanh thu.</p><label class="label" for="pass">Mật khẩu quản trị</label><input id="pass" class="input" type="password" placeholder="Nhập mật khẩu admin" autocomplete="current-password" required><button class="login-btn">Đăng nhập Dashboard</button><div id="loginError" class="login-error"></div></form></section>
+<div id="app" class="app hidden"><div id="overlay" class="overlay"></div><aside id="sidebar" class="sidebar"><div class="brand"><div class="logo">◆</div><div><strong>License Admin</strong><small>FB CRM Control Center</small></div></div><div class="nav-label">QUẢN LÝ</div><nav class="nav"><button class="active" data-view="overview">▦ Tổng quan</button><button data-view="licenses">⌁ License Keys <span id="keyCount" class="count">0</span></button><button data-view="pricing">⚙ Cài đặt bảng giá</button></nav><div class="server"><span class="dot"></span><div><strong>License Server Online</strong><small>genblackmmoonline.online</small></div></div></aside>
+<main class="main"><header class="topbar"><button id="menu" class="btn menu">☰</button><div class="heading"><h1 id="title">Tổng quan</h1><p id="subtitle">Theo dõi hoạt động cấp phép theo thời gian thực</p></div><div class="actions"><input id="search" class="input search" placeholder="Tìm mã đơn, Key, thiết bị..."><button id="refresh" class="btn">↻ Làm mới</button><button id="logout" class="btn danger">Đăng xuất</button></div></header>
+<div class="content"><section id="statsSection" class="stats"><article class="stat"><div class="stat-head">TỔNG KEY ĐÃ CẤP <span class="stat-ico">⌁</span></div><div id="total" class="stat-value">0</div><div class="stat-note">Tất cả license trong hệ thống</div></article><article class="stat green"><div class="stat-head">DOANH THU HÔM NAY <span class="stat-ico">₫</span></div><div id="revenueToday" class="stat-value">0₫</div><div class="stat-note">Đơn hàng phát sinh trong ngày</div></article><article class="stat amber"><div class="stat-head">DOANH THU THÁNG NÀY <span class="stat-ico">↗</span></div><div id="revenueMonth" class="stat-value">0₫</div><div class="stat-note">Tổng doanh thu từ đầu tháng</div></article><article class="stat violet"><div class="stat-head">TỔNG DOANH THU <span class="stat-ico">Σ</span></div><div id="revenue" class="stat-value">0₫</div><div class="stat-note">Toàn bộ doanh thu đã cấp Key</div></article></section>
+<section id="dashboardInsights" class="dashboard-grid"><article class="dash-card"><div class="dash-head"><div><h2>Doanh thu 6 tháng gần nhất</h2><p>Tổng hợp từ các đơn hàng đã cấp License Key</p></div><div id="chartTotal" class="chart-total">0₫<small>Trong 6 tháng</small></div></div><div id="revenueChart" class="revenue-chart"></div></article><article class="dash-card"><div class="dash-head"><div><h2>Cơ cấu gói License</h2><p>Tỷ lệ lựa chọn theo thời hạn sử dụng</p></div></div><div id="healthBody" class="health-body"></div></article><article class="dash-card expiry-card"><div class="dash-head"><div><h2>Khách hàng doanh thu cao</h2><p>Xếp hạng công ty theo tổng giá trị đơn hàng</p></div><span id="expiryCount" class="count">0</span></div><div id="expiryList" class="expiry-list"></div></article></section>
+<section id="licensePanel" class="panel"><div id="loading" class="loading hidden"></div><div class="panel-head"><div><h2>Danh sách License</h2><p id="summary">Đang tải dữ liệu...</p></div><div class="filters"><button id="bulkDelete" class="bulk-delete" disabled>Xóa đã chọn (0)</button><select id="period" class="select" aria-label="Kiểu thời gian"><option value="all">Tất cả thời gian</option><option value="day">Theo ngày</option><option value="month">Theo tháng</option><option value="year">Theo năm</option></select><input id="dayPicker" class="select hidden" type="date" aria-label="Chọn ngày"><input id="monthPicker" class="select hidden" type="month" aria-label="Chọn tháng"><select id="yearPicker" class="select hidden" aria-label="Chọn năm"></select><select id="filter" class="select"><option value="all">Tất cả trạng thái</option><option value="active">Còn hiệu lực</option><option value="expired">Đã hết hạn</option><option value="full">Đã đầy slot</option><option value="available">Còn slot</option></select><select id="sort" class="select"><option value="newest">Mới nhất</option><option value="expiry">Sắp hết hạn</option><option value="revenue">Doanh thu công ty cao</option></select></div></div><div class="table-wrap"><table><thead><tr><th class="check-cell"><input id="selectAll" class="select-all" type="checkbox" aria-label="Chọn tất cả Key đang hiển thị"></th><th>Đơn hàng</th><th>License Key</th><th>Tên công ty</th><th>Ngày thanh toán</th><th>Trạng thái</th><th>Slot máy</th><th>Thời hạn</th><th>Thiết bị đang dùng</th><th>Thao tác</th></tr></thead><tbody id="tbody"></tbody></table><div id="empty" class="empty hidden"><div><strong>Không tìm thấy dữ liệu</strong><br>Thử thay đổi từ khóa hoặc bộ lọc.</div></div></div></section><section id="pricingPanel" class="panel hidden"><div class="panel-head"><div><h2>Cài đặt bảng giá</h2><p>Giá mới áp dụng cho các đơn hàng được tạo sau khi lưu.</p></div></div><form id="pricingForm" style="padding:24px;max-width:900px"><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px"><label><strong>Giá máy đầu tiên / tháng (VNĐ)</strong><input id="priceUnit" class="input" type="number" min="0" max="100000000" step="1" inputmode="numeric" required style="width:100%;margin-top:8px"></label><label><strong>Giá thuê thêm 1 slot / tháng</strong><input id="extraSlotPrice" class="input" type="number" min="0" max="100000000" step="1" inputmode="numeric" required style="width:100%;margin-top:8px"></label><label><strong>Giảm gói 1 tháng (%)</strong><input id="discount1" class="input" type="number" min="0" max="90" step="1" required style="width:100%;margin-top:8px"></label><label><strong>Giảm gói 3 tháng (%)</strong><input id="discount3" class="input" type="number" min="0" max="90" step="1" required style="width:100%;margin-top:8px"></label><label><strong>Giảm gói 6 tháng (%)</strong><input id="discount6" class="input" type="number" min="0" max="90" step="1" required style="width:100%;margin-top:8px"></label><label><strong>Giảm gói 12 tháng (%)</strong><input id="discount12" class="input" type="number" min="0" max="90" step="1" required style="width:100%;margin-top:8px"></label></div><div id="pricePreview" class="stats" style="margin-top:24px"></div><div style="display:flex;align-items:center;gap:14px;margin-top:20px"><button id="savePricing" class="btn" type="submit">Lưu bảng giá</button><span id="pricingStatus" class="sub"></span></div></form></section></div></main></div><div id="toasts" class="toasts"></div>
+<script>
+(function(){const o=window.fetch;window.fetch=function(r,i){if(typeof r==='string'&&r.startsWith('/api/')){let b=location.pathname.substring(0,location.pathname.lastIndexOf('/'));if(b.endsWith('/'))b=b.slice(0,-1);r=b+r}return o.call(this,r,i)}})();
+const today=new Date(),pad=n=>String(n).padStart(2,'0'),todayValue=`${today.getFullYear()}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`,monthValue=`${today.getFullYear()}-${pad(today.getMonth()+1)}`;const S={token:localStorage.getItem('admin_token')||'',data:[],query:'',filter:'all',sort:'newest',period:'all',day:todayValue,month:monthValue,year:String(today.getFullYear()),view:'overview',selected:new Set()},$=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),money=n=>new Intl.NumberFormat('vi-VN').format(+n||0)+'₫';function parseDate(v){if(!v)return new Date(NaN);if(v instanceof Date)return v;let s=String(v).trim();if(!s)return new Date(NaN);let dmy=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);if(dmy){let d=parseInt(dmy[1],10),m=parseInt(dmy[2],10)-1,y=parseInt(dmy[3],10),h=parseInt(dmy[4]||0,10),min=parseInt(dmy[5]||0,10),sec=parseInt(dmy[6]||0,10);return new Date(y,m,d,h,min,sec)}if(/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}/.test(s))s=s.replace(' ','T');return new Date(s)}const orderDate=x=>parseDate(x.paid_at||x.order_created_at||x.created_at);function toast(m,error=false){let e=document.createElement('div');e.className='toast'+(error?' error':'');e.textContent=m;$('toasts').append(e);setTimeout(()=>e.remove(),3000)}
+$('loginForm').onsubmit=async e=>{e.preventDefault();$('loginError').textContent='';try{let r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('pass').value.trim()})}),j=await r.json();if(!r.ok||!j.success)throw Error(j.message||'Mật khẩu quản trị không chính xác.');S.token=j.token;localStorage.setItem('admin_token',S.token);await load(true)}catch(err){localStorage.removeItem('admin_token');S.token='';$('loginError').textContent=err.message}};async function load(login=false){$('loading').classList.remove('hidden');try{let r=await fetch('/api/admin/licenses',{headers:{Authorization:`Bearer ${S.token}`}}),j=await r.json();if(!r.ok||!j.success)throw Error('Phiên quản trị không hợp lệ. Vui lòng đăng nhập lại.');localStorage.setItem('admin_token',S.token);S.data=Array.isArray(j.data)?j.data:[];let years=Array.from(new Set([today.getFullYear(),...S.data.map(x=>orderDate(x).getFullYear()).filter(Number.isFinite)])).sort((a,b)=>b-a);$('yearPicker').innerHTML=years.map(y=>`<option value="${y}">${y}</option>`).join('');if(!years.includes(+S.year))S.year=String(years[0]);$('yearPicker').value=S.year;$('login').classList.add('hidden');$('app').classList.remove('hidden');update();if(!login)toast('Dữ liệu đã được cập nhật.')}catch(e){localStorage.removeItem('admin_token');if(login){$('app').classList.add('hidden');$('login').classList.remove('hidden');$('loginError').textContent=e.message;S.token=''}else toast(e.message,true)}finally{$('loading').classList.add('hidden')}}
+function periodRows(){return S.data.filter(x=>{if(S.period==='all')return true;let d=orderDate(x);if(Number.isNaN(d.getTime()))return false;let y=String(d.getFullYear()),m=`${y}-${pad(d.getMonth()+1)}`,day=`${m}-${pad(d.getDate())}`;return S.period==='day'?day===S.day:S.period==='month'?m===S.month:y===S.year})}
+function companyKey(x){return String(x.company_name||'').trim().replace(/\s+/g,' ').toLocaleLowerCase('vi-VN')}
+function update(){let data=periodRows(),dev=data.reduce((n,x)=>n+(x.devices?.length||0),0),todayRevenue=data.filter(x=>{let d=orderDate(x);return !Number.isNaN(d.getTime())&&d.getFullYear()===today.getFullYear()&&d.getMonth()===today.getMonth()&&d.getDate()===today.getDate()}).reduce((n,x)=>n+(+x.total_amount||0),0),monthRevenue=data.filter(x=>{let d=orderDate(x);return !Number.isNaN(d.getTime())&&d.getFullYear()===today.getFullYear()&&d.getMonth()===today.getMonth()}).reduce((n,x)=>n+(+x.total_amount||0),0);$('total').textContent=data.length;$('revenueToday').textContent=money(todayRevenue);$('revenueMonth').textContent=money(monthRevenue);$('revenue').textContent=money(data.reduce((n,x)=>n+(+x.total_amount||0),0));$('keyCount').textContent=S.data.length;let deviceCount=$('deviceCount');if(deviceCount)deviceCount.textContent=dev;renderDashboard();render()}
+function renderDashboard(){let months=[];for(let i=5;i>=0;i--){let d=new Date(today.getFullYear(),today.getMonth()-i,1),key=`${d.getFullYear()}-${pad(d.getMonth()+1)}`;months.push({key,label:`T${d.getMonth()+1}`,value:0})}S.data.forEach(x=>{let d=orderDate(x),key=Number.isNaN(d.getTime())?'':`${d.getFullYear()}-${pad(d.getMonth()+1)}`,m=months.find(v=>v.key===key);if(m)m.value+=+x.total_amount||0});let max=Math.max(1,...months.map(x=>x.value)),sixTotal=months.reduce((n,x)=>n+x.value,0);$('chartTotal').innerHTML=`${money(sixTotal)}<small>Trong 6 tháng</small>`;$('revenueChart').innerHTML=months.map(x=>`<div class="bar-col"><span class="bar-value">${x.value?money(x.value):'0₫'}</span><div class="bar-track"><div class="bar-fill" style="height:${Math.max(x.value?8:3,x.value/max*100)}%"></div></div><span class="bar-label">${x.label}</span></div>`).join('');let total=S.data.length,pct=(v,t)=>t?Math.round(v/t*100):0,packageDurations=[1,3,6,12],packageColors=['','amber','','red'];$('healthBody').innerHTML=packageDurations.map((duration,index)=>{let count=S.data.filter(x=>Number(x.months)===duration).length;return `<div class="health-row"><span class="health-label">Gói ${duration} tháng</span><strong class="health-number">${count} Key · ${pct(count,total)}%</strong><div class="health-track"><div class="health-fill ${packageColors[index]}" style="width:${pct(count,total)}%"></div></div></div>`}).join('');let companies=new Map();S.data.forEach(x=>{let key=companyKey(x),name=String(x.company_name||'').trim();if(!key)return;let current=companies.get(key)||{name,revenue:0,keys:0};current.revenue+=+x.total_amount||0;current.keys++;companies.set(key,current)});let leaders=[...companies.values()].sort((a,b)=>b.revenue-a.revenue||b.keys-a.keys).slice(0,6);$('expiryCount').textContent=leaders.length;$('expiryList').innerHTML=leaders.length?leaders.map((x,index)=>`<div class="expiry-item"><div><strong>#${index+1} · ${esc(x.name)}</strong><span>${x.keys} License Key đã mua</span></div><span class="rank-revenue">${money(x.revenue)}</span></div>`).join(''):'<div class="dash-empty">Chưa có thông tin công ty để xếp hạng doanh thu.</div>'}
+function rows(){let q=S.query.toLowerCase(),now=Date.now(),base=periodRows(),totals=new Map(),counts=new Map();base.forEach(x=>{let k=companyKey(x);if(k){totals.set(k,(totals.get(k)||0)+(+x.total_amount||0));counts.set(k,(counts.get(k)||0)+1)}});let a=base.filter(x=>`${x.order_code} ${x.key_value} ${x.company_name||''} ${(x.devices||[]).map(d=>d.device_name+' '+d.machine_id)}`.toLowerCase().includes(q));a=a.filter(x=>{let active=x.is_active!==0&&new Date(x.expires_at)>now,full=(x.devices?.length||0)>=x.machines;if(S.filter==='active')return active;if(S.filter==='expired')return !active;if(S.filter==='full')return full;if(S.filter==='available')return !full;return true});if(S.view==='devices')a=a.filter(x=>x.devices?.length);if(S.sort==='expiry')a.sort((a,b)=>new Date(a.expires_at)-new Date(b.expires_at));else if(S.sort==='revenue')a.sort((a,b)=>{let ka=companyKey(a),kb=companyKey(b);if(!ka&&kb)return 1;if(ka&&!kb)return -1;return (totals.get(kb)||0)-(totals.get(ka)||0)||ka.localeCompare(kb,'vi')||orderDate(b)-orderDate(a)});else a.sort((a,b)=>orderDate(b)-orderDate(a));return a.map(x=>({...x,_companyRevenue:totals.get(companyKey(x))||0,_companyKeys:counts.get(companyKey(x))||0}))}
+function updateSelection(){let visible=rows().map(x=>x.id),selected=visible.filter(id=>S.selected.has(id)).length;$('bulkDelete').textContent=`Xóa đã chọn (${S.selected.size})`;$('bulkDelete').disabled=!S.selected.size;$('selectAll').checked=visible.length>0&&selected===visible.length;$('selectAll').indeterminate=selected>0&&selected<visible.length}
+function render(){let a=rows(),now=Date.now(),periodLabel=S.period==='all'?'tất cả thời gian':S.period==='day'?S.day:S.period==='month'?S.month:S.year;$('summary').textContent=`${a.length} license · ${periodLabel}`;$('empty').classList.toggle('hidden',a.length>0);$('tbody').innerHTML=a.map(x=>{let active=x.is_active!==0&&new Date(x.expires_at)>now,used=x.devices?.length||0,paid=orderDate(x);return `<tr><td class="check-cell"><input class="row-check" type="checkbox" data-select="${x.id}" ${S.selected.has(x.id)?'checked':''} aria-label="Chọn Key ${esc(x.key_value)}"></td><td><strong>${esc(x.order_code)}</strong><span class="sub">${money(x.total_amount)} · ${x.months} tháng</span></td><td><code class="key">${esc(x.key_value)}</code> <button class="copy" data-copy="${esc(x.key_value)}" aria-label="Sao chép Key">⧉</button></td><td><strong>${esc(x.company_name||'Chưa cập nhật')}</strong>${x.company_name?`<span class="sub">${money(x._companyRevenue)} · ${x._companyKeys} Key trong kỳ</span>`:''}</td><td><strong>${Number.isNaN(paid.getTime())?'—':paid.toLocaleDateString('vi-VN')}</strong><span class="sub">${Number.isNaN(paid.getTime())?'Không có dữ liệu':paid.toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'})}</span></td><td><span class="badge ${active?'ok':'bad'}">${active?'Còn hiệu lực':'Hết hạn'}</span></td><td><span class="badge ${used>=x.machines?'warn':'ok'}">${used} / ${x.machines} máy</span></td><td>${new Date(x.expires_at).toLocaleDateString('vi-VN')}<span class="sub">${active?Math.ceil((new Date(x.expires_at)-now)/86400000)+' ngày còn lại':'Đã hết hạn'}</span></td><td><div class="devices">${used?x.devices.map(d=>`<div class="device" title="${esc(d.machine_id)}">▣ ${esc(d.device_name||'Máy CRM')} <button class="remove" data-remove="${d.id}" aria-label="Gỡ thiết bị">×</button></div>`).join(''):'<span class="sub">Chưa có thiết bị kích hoạt</span>'}</div></td><td><button class="delete-key" data-delete="${x.id}" data-key="${esc(x.key_value)}">Xóa Key</button></td></tr>`}).join('');document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=async()=>{await navigator.clipboard.writeText(b.dataset.copy);toast('Đã sao chép License Key.')});document.querySelectorAll('[data-remove]').forEach(b=>b.onclick=()=>removeDevice(+b.dataset.remove));document.querySelectorAll('[data-delete]').forEach(b=>b.onclick=()=>deleteLicense(b));document.querySelectorAll('[data-select]').forEach(c=>c.onchange=()=>{let id=+c.dataset.select;c.checked?S.selected.add(id):S.selected.delete(id);updateSelection()});updateSelection()}
+async function removeDevice(id){if(!confirm('Gỡ thiết bị này khỏi Key và giải phóng slot?'))return;try{let r=await fetch('/api/admin/remove-device',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${S.token}`},body:JSON.stringify({deviceId:id})}),j=await r.json();if(!r.ok||!j.success)throw Error(j.message||'Không thể gỡ thiết bị');toast('Đã gỡ thiết bị và giải phóng slot.');load()}catch(e){toast(e.message,true)}}
+async function deleteById(id){let r=await fetch(`/api/admin/licenses/${id}`,{method:'DELETE',headers:{Authorization:`Bearer ${S.token}`}}),j=await r.json();if(!r.ok||!j.success)throw Error(j.message||'Không thể xóa License Key')}
+async function deleteLicense(button){if(!confirm(`Xóa vĩnh viễn Key ${button.dataset.key}?`))return;button.disabled=true;button.textContent='Đang xóa...';try{await deleteById(+button.dataset.delete);S.selected.delete(+button.dataset.delete);toast(`Đã xóa Key ${button.dataset.key}.`);await load()}catch(e){toast(e.message,true);button.disabled=false;button.textContent='Xóa Key'}}
+async function deleteSelected(){let ids=[...S.selected];if(!ids.length)return;if(!confirm(`Xóa vĩnh viễn ${ids.length} License Key đã chọn?`))return;$('bulkDelete').disabled=true;$('bulkDelete').textContent='Đang xóa...';let failed=0;for(let id of ids){try{await deleteById(id);S.selected.delete(id)}catch{failed++}}toast(failed?`Đã xóa ${ids.length-failed} Key, lỗi ${failed} Key.`:`Đã xóa ${ids.length} License Key.`,failed>0);await load()}
+function pricingValues(){return {unitPrice:Number($('priceUnit').value),extraSlotPrice:Number($('extraSlotPrice').value),discounts:{1:Number($('discount1').value),3:Number($('discount3').value),6:Number($('discount6').value),12:Number($('discount12').value)}}}function renderPricePreview(){let p=pricingValues();$('pricePreview').innerHTML=[1,3,6,12].map(m=>{let one=Math.floor(p.unitPrice*m*(1-p.discounts[m]/100)),three=Math.floor((p.unitPrice+2*p.extraSlotPrice)*m*(1-p.discounts[m]/100));return `<article class="stat"><div class="stat-head">GÓI ${m} THÁNG</div><div class="stat-value" style="font-size:22px">${money(one)}</div><div class="stat-note">1 máy · 3 máy: ${money(three)} · giảm ${p.discounts[m]}%</div></article>`}).join('')}async function loadPricing(){let r=await fetch('/api/admin/pricing',{headers:{Authorization:`Bearer ${S.token}`}}),j=await r.json();if(!r.ok||!j.success)throw Error(j.message||'Không thể tải bảng giá');$('priceUnit').value=String(j.data.unitPrice);$('extraSlotPrice').value=String(j.data.extraSlotPrice);[1,3,6,12].forEach(m=>{$(`discount${m}`).value=String(j.data.discounts[m])});renderPricePreview()}$('pricingForm').addEventListener('input',()=>renderPricePreview());$('pricingForm').onsubmit=async e=>{e.preventDefault();let b=$('savePricing');b.disabled=true;b.textContent='Đang lưu...';$('pricingStatus').textContent='';try{let r=await fetch('/api/admin/pricing',{method:'PUT',headers:{'Content-Type':'application/json',Authorization:`Bearer ${S.token}`},body:JSON.stringify(pricingValues())}),j=await r.json();if(!r.ok||!j.success)throw Error(j.message||'Không thể lưu bảng giá');$('pricingStatus').textContent='Đã lưu. Đơn hàng mới sẽ dùng bảng giá này.';toast('Đã cập nhật bảng giá.');renderPricePreview()}catch(err){$('pricingStatus').textContent=err.message;toast(err.message,true)}finally{b.disabled=false;b.textContent='Lưu bảng giá'}}
+const meta={overview:['Tổng quan','Theo dõi hoạt động cấp phép theo thời gian thực'],licenses:['License Keys','Quản lý toàn bộ Key đã phát hành'],orders:['Đơn hàng','Theo dõi đơn thanh toán và doanh thu'],devices:['Thiết bị','Quản lý thiết bị đang chiếm slot'],pricing:['Cài đặt bảng giá','Điều chỉnh đơn giá và ưu đãi cho đơn hàng mới']};function syncPeriod(){['dayPicker','monthPicker','yearPicker'].forEach(id=>$(id).classList.add('hidden'));if(S.period!=='all')$(`${S.period}Picker`).classList.remove('hidden');update()}$('dayPicker').value=S.day;$('monthPicker').value=S.month;$('yearPicker').innerHTML=Array.from(new Set([today.getFullYear(),...S.data.map(x=>orderDate(x).getFullYear()).filter(Number.isFinite)])).sort((a,b)=>b-a).map(y=>`<option value="${y}">${y}</option>`).join('');$('yearPicker').value=S.year;document.querySelectorAll('.nav button').forEach(b=>b.onclick=async()=>{S.view=b.dataset.view;document.querySelectorAll('.nav button').forEach(x=>x.classList.toggle('active',x===b));[$('title').textContent,$('subtitle').textContent]=meta[S.view];let pricing=S.view==='pricing',overview=S.view==='overview';$('statsSection').classList.toggle('hidden',pricing);$('dashboardInsights').classList.toggle('hidden',!overview);$('licensePanel').classList.toggle('hidden',pricing);$('pricingPanel').classList.toggle('hidden',!pricing);if(pricing){try{await loadPricing()}catch(e){toast(e.message,true)}}$('sidebar').classList.remove('open');$('overlay').classList.remove('open');if(!pricing)render()});$('search').oninput=e=>{S.query=e.target.value;render()};$('filter').onchange=e=>{S.filter=e.target.value;render()};$('sort').onchange=e=>{S.sort=e.target.value;render()};$('period').onchange=e=>{S.period=e.target.value;syncPeriod()};$('dayPicker').onchange=e=>{S.day=e.target.value;update()};$('monthPicker').onchange=e=>{S.month=e.target.value;update()};$('yearPicker').onchange=e=>{S.year=e.target.value;update()};$('selectAll').onchange=e=>{rows().forEach(x=>e.target.checked?S.selected.add(x.id):S.selected.delete(x.id));render()};$('bulkDelete').onclick=deleteSelected;$('refresh').onclick=()=>S.view==='pricing'?loadPricing():load();$('logout').onclick=()=>{localStorage.removeItem('admin_token');S.token='';S.data=[];S.selected.clear();$('pass').value='';$('app').classList.add('hidden');$('login').classList.remove('hidden')};$('menu').onclick=()=>{$('sidebar').classList.add('open');$('overlay').classList.add('open')};$('overlay').onclick=()=>{$('sidebar').classList.remove('open');$('overlay').classList.remove('open')};if(S.token)load(true);
+// Quản lý tài khoản Client đồng bộ từ License Server.
+const clientNav=document.createElement('button');clientNav.dataset.view='clients';clientNav.textContent='👥 Tài khoản Client';document.querySelector('.nav').insertBefore(clientNav,document.querySelector('[data-view="pricing"]'));
+const clientPanel=document.createElement('section');clientPanel.id='clientPanel';clientPanel.className='panel hidden';clientPanel.innerHTML=`<div class="panel-head"><div><h2>Tài khoản Client</h2><p>Danh sách đăng ký và trạng thái truy cập CRM trên toàn hệ thống.</p></div><div class="filters"><input id="clientSearch" class="input search" placeholder="Tìm tên đăng nhập..."><select id="clientFilter" class="select"><option value="all">Tất cả</option><option value="ACTIVE">Đang hoạt động</option><option value="BLOCKED">Đã khóa</option></select></div></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>Tên đăng nhập</th><th>Trạng thái</th><th>Ngày đăng ký</th><th>Đăng nhập gần nhất</th><th>Máy gần nhất</th><th>Thao tác</th></tr></thead><tbody id="clientTbody"></tbody></table><div id="clientEmpty" class="empty hidden">Chưa có tài khoản Client.</div></div>`;document.querySelector('.content').append(clientPanel);
+let clientUsers=[];
+async function loadClientUsers(){try{let r=await fetch('/api/admin/client-users',{headers:{Authorization:`Bearer ${S.token}`}}),j=await r.json();if(!r.ok||!j.success)throw Error(j.message||'Không thể tải tài khoản');clientUsers=j.data||[];renderClientUsers()}catch(e){toast(e.message,true)}}
+function renderClientUsers(){let q=($('clientSearch')?.value||'').toLowerCase(),f=$('clientFilter')?.value||'all',a=clientUsers.filter(x=>x.username.toLowerCase().includes(q)&&(f==='all'||x.status===f));$('clientEmpty').classList.toggle('hidden',a.length>0);$('clientTbody').innerHTML=a.map(x=>`<tr><td>${x.id}</td><td><strong>${esc(x.username)}</strong></td><td><span class="badge ${x.status==='ACTIVE'?'ok':'bad'}">${x.status==='ACTIVE'?'Hoạt động':'Đã khóa'}</span></td><td>${x.created_at?new Date(x.created_at+'Z').toLocaleString('vi-VN'):'—'}</td><td>${x.last_login_at?new Date(x.last_login_at+'Z').toLocaleString('vi-VN'):'Chưa đăng nhập'}</td><td><span class="sub">${esc(x.last_machine_id||'—')}</span></td><td><button class="${x.status==='ACTIVE'?'delete-key':'btn'}" data-client-status="${x.id}" data-next="${x.status==='ACTIVE'?'BLOCKED':'ACTIVE'}">${x.status==='ACTIVE'?'Khóa tài khoản':'Mở khóa'}</button></td></tr>`).join('');document.querySelectorAll('[data-client-status]').forEach(b=>b.onclick=()=>setClientStatus(b))}
+async function setClientStatus(b){let action=b.dataset.next==='BLOCKED'?'khóa':'mở khóa';if(!confirm(`Xác nhận ${action} tài khoản này?`))return;b.disabled=true;try{let r=await fetch(`/api/admin/client-users/${b.dataset.clientStatus}/status`,{method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${S.token}`},body:JSON.stringify({status:b.dataset.next})}),j=await r.json();if(!r.ok||!j.success)throw Error(j.message||'Không thể cập nhật');toast(`Đã ${action} tài khoản.`);await loadClientUsers()}catch(e){toast(e.message,true);b.disabled=false}}
+clientNav.onclick=async()=>{S.view='clients';document.querySelectorAll('.nav button').forEach(x=>x.classList.toggle('active',x===clientNav));$('title').textContent='Tài khoản Client';$('subtitle').textContent='Quản lý tài khoản đăng nhập CRM tập trung';$('statsSection').classList.add('hidden');$('dashboardInsights').classList.add('hidden');$('licensePanel').classList.add('hidden');$('pricingPanel').classList.add('hidden');$('clientPanel').classList.remove('hidden');$('sidebar').classList.remove('open');$('overlay').classList.remove('open');await loadClientUsers()};
+$('clientSearch').oninput=renderClientUsers;$('clientFilter').onchange=renderClientUsers;document.querySelectorAll('.nav button:not([data-view="clients"])').forEach(b=>b.addEventListener('click',()=>$('clientPanel').classList.add('hidden')));const oldRefresh=$('refresh').onclick;$('refresh').onclick=()=>S.view==='clients'?loadClientUsers():oldRefresh();
+// Bổ sung gói License và thao tác đặt lại mật khẩu; mật khẩu gốc không bao giờ được trả về Admin.
+$('clientTbody').closest('table').querySelector('thead tr').innerHTML='<th>ID</th><th>Tên đăng nhập</th><th>Tên công ty</th><th>Mật khẩu</th><th>Gói</th><th>Trạng thái</th><th>Ngày đăng ký</th><th>Thao tác</th>';
+function renderClientUsers(){let q=($('clientSearch')?.value||'').toLowerCase(),f=$('clientFilter')?.value||'all',a=clientUsers.filter(x=>`${x.username} ${x.company_name||''}`.toLowerCase().includes(q)&&(f==='all'||x.status===f));$('clientEmpty').classList.toggle('hidden',a.length>0);$('clientTbody').innerHTML=a.map(x=>`<tr><td>${x.id}</td><td><strong>${esc(x.username)}</strong></td><td><strong>${esc(x.company_name||'Chưa cập nhật')}</strong></td><td><code>••••••••</code><span class="sub">Đã mã hóa</span></td><td>${x.package_status==='ACTIVE'?`<strong>Gói ${x.package_months} tháng</strong><span class="sub">Hạn ${new Date(x.package_expires_at).toLocaleDateString('vi-VN')}</span>`:'<span class="badge warn">Chưa có gói</span>'}</td><td><span class="badge ${x.status==='ACTIVE'?'ok':'bad'}">${x.status==='ACTIVE'?'Hoạt động':'Đã khóa'}</span></td><td>${x.created_at?new Date(x.created_at+'Z').toLocaleString('vi-VN'):'—'}</td><td><div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn" data-client-password="${x.id}">Đặt mật khẩu</button><button class="${x.status==='ACTIVE'?'delete-key':'btn'}" data-client-status="${x.id}" data-next="${x.status==='ACTIVE'?'BLOCKED':'ACTIVE'}">${x.status==='ACTIVE'?'Khóa':'Mở khóa'}</button></div></td></tr>`).join('');document.querySelectorAll('[data-client-status]').forEach(b=>b.onclick=()=>setClientStatus(b));document.querySelectorAll('[data-client-password]').forEach(b=>b.onclick=()=>resetClientPassword(b))}
+async function resetClientPassword(b){let password=prompt('Nhập mật khẩu mới (tối thiểu 8 ký tự):');if(password===null)return;if(password.length<8){toast('Mật khẩu phải có ít nhất 8 ký tự.',true);return}b.disabled=true;try{let r=await fetch(`/api/admin/client-users/${b.dataset.clientPassword}/password`,{method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${S.token}`},body:JSON.stringify({password})}),j=await r.json();if(!r.ok||!j.success)throw Error(j.message||'Không thể đặt mật khẩu');toast('Đã đặt lại mật khẩu tài khoản.')}catch(e){toast(e.message,true)}finally{b.disabled=false}}
+// Luôn lấy token đã lưu; nếu phiên Admin hết hạn thì quay về màn đăng nhập thay vì để bảng rỗng.
+function adminToken(){return S.token||localStorage.getItem('admin_token')||''}
+function requireAdminLogin(message='Phiên Admin đã hết hạn. Vui lòng đăng nhập lại.'){localStorage.removeItem('admin_token');S.token='';clientUsers=[];$('app').classList.add('hidden');$('login').classList.remove('hidden');$('loginError').textContent=message}
+async function loadClientUsers(){try{let r=await fetch('/api/admin/client-users',{headers:{Authorization:`Bearer ${adminToken()}`}}),j=await r.json();if(r.status===401){requireAdminLogin(j.message);return}if(!r.ok||!j.success)throw Error(j.message||'Không thể tải tài khoản');clientUsers=j.data||[];renderClientUsers()}catch(e){toast(e.message,true)}}
+setInterval(()=>{if(S.view==='clients'&&!$('app').classList.contains('hidden'))loadClientUsers()},5000);
+// Xóa tài khoản Client (thay cho thao tác khóa cũ).
+function renderClientUsers(){let q=($('clientSearch')?.value||'').toLowerCase(),f=$('clientFilter')?.value||'all',a=clientUsers.filter(x=>`${x.username} ${x.company_name||''}`.toLowerCase().includes(q)&&(f==='all'||x.status===f));$('clientEmpty').classList.toggle('hidden',a.length>0);$('clientTbody').innerHTML=a.map(x=>`<tr><td>${x.id}</td><td><strong>${esc(x.username)}</strong></td><td><strong>${esc(x.company_name||'Chưa cập nhật')}</strong></td><td><code>••••••••</code><span class="sub">Đã mã hóa</span></td><td>${x.package_status==='ACTIVE'?`<strong>Gói ${x.package_months} tháng</strong><span class="sub">Hạn ${new Date(x.package_expires_at).toLocaleDateString('vi-VN')}</span>`:'<span class="badge warn">Chưa có gói</span>'}</td><td><span class="badge ${x.status==='ACTIVE'?'ok':'bad'}">${x.status==='ACTIVE'?'Hoạt động':'Đã khóa'}</span></td><td>${x.created_at?new Date(x.created_at+'Z').toLocaleString('vi-VN'):'—'}</td><td><div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn" data-client-password="${x.id}">Đặt mật khẩu</button><button class="delete-key" data-client-delete="${x.id}" data-client-name="${esc(x.username)}">Xóa</button></div></td></tr>`).join('');document.querySelectorAll('[data-client-delete]').forEach(b=>b.onclick=()=>deleteClientUser(b));document.querySelectorAll('[data-client-password]').forEach(b=>b.onclick=()=>resetClientPassword(b))}
+async function deleteClientUser(b){if(!confirm(`Xóa tài khoản ${b.dataset.clientName}? Tài khoản này sẽ không thể đăng nhập lại.`))return;b.disabled=true;try{let r=await fetch(`/api/admin/client-users/${b.dataset.clientDelete}`,{method:'DELETE',headers:{Authorization:`Bearer ${adminToken()}`}}),j=await r.json();if(!r.ok||!j.success)throw Error(j.message||'Không thể xóa tài khoản');toast('Đã xóa tài khoản.');await loadClientUsers()}catch(e){toast(e.message,true);b.disabled=false}}
+async function deleteAllClientUsers(){if(!clientUsers.length){toast('Không có tài khoản để xóa.');return}if(!confirm(`Xóa toàn bộ ${clientUsers.length} tài khoản Client? Thao tác này không thể hoàn tác.`))return;try{let r=await fetch('/api/admin/client-users',{method:'DELETE',headers:{Authorization:`Bearer ${adminToken()}`}}),j=await r.json();if(!r.ok||!j.success)throw Error(j.message||'Không thể xóa tất cả tài khoản');toast(`Đã xóa ${j.deleted||0} tài khoản.`);await loadClientUsers()}catch(e){toast(e.message,true)}}
+const deleteAllClientButton=document.createElement('button');deleteAllClientButton.className='delete-key';deleteAllClientButton.textContent='Xóa tất cả';deleteAllClientButton.onclick=deleteAllClientUsers;$('clientPanel').querySelector('.filters').append(deleteAllClientButton);
+const selectedClientUsers=new Set();
+$('clientTbody').closest('table').querySelector('thead tr').innerHTML='<th><input id="selectAllClients" type="checkbox" title="Chọn tất cả"></th><th>ID</th><th>Tên đăng nhập</th><th>Tên công ty</th><th>Thành viên</th><th>Mật khẩu</th><th>Gói</th><th>Trạng thái</th><th>Ngày đăng ký</th><th>Thao tác</th>';
+const deleteSelectedClientButton=document.createElement('button');deleteSelectedClientButton.className='delete-key';deleteSelectedClientButton.textContent='Xóa đã chọn (0)';deleteSelectedClientButton.disabled=true;$('clientPanel').querySelector('.filters').insertBefore(deleteSelectedClientButton,deleteAllClientButton);
+function syncClientSelection(){document.querySelectorAll('[data-client-select]').forEach(c=>{c.checked=selectedClientUsers.has(Number(c.dataset.clientSelect))});let visible=[...document.querySelectorAll('[data-client-select]')],checked=visible.filter(c=>c.checked).length;$('selectAllClients').checked=visible.length>0&&checked===visible.length;$('selectAllClients').indeterminate=checked>0&&checked<visible.length;deleteSelectedClientButton.disabled=selectedClientUsers.size===0;deleteSelectedClientButton.textContent=`Xóa đã chọn (${selectedClientUsers.size})`}
+function renderClientUsers(){let q=($('clientSearch')?.value||'').toLowerCase(),f=$('clientFilter')?.value||'all',a=clientUsers.filter(x=>`${x.username} ${x.company_name||''} ${x.member_usernames||''}`.toLowerCase().includes(q)&&(f==='all'||x.status===f));for(const id of [...selectedClientUsers])if(!clientUsers.some(x=>Number(x.id)===id))selectedClientUsers.delete(id);$('clientEmpty').classList.toggle('hidden',a.length>0);$('clientTbody').innerHTML=a.map(x=>{let memberCount=Number(x.member_count)||0;return `<tr><td><input type="checkbox" data-client-select="${x.id}" aria-label="Chọn ${esc(x.username)}"></td><td>${x.id}</td><td><strong>${esc(x.username)}</strong></td><td><strong>${esc(x.company_name||'Chưa cập nhật')}</strong></td><td>${memberCount?`<strong>${memberCount} thành viên</strong>`:'<span class="sub">Không có</span>'}</td><td><code>••••••••</code><span class="sub">Đã mã hóa</span></td><td>${x.package_status==='ACTIVE'?`<strong>Gói ${x.package_months} tháng</strong><span class="sub">Hạn ${new Date(x.package_expires_at).toLocaleDateString('vi-VN')}</span>`:'<span class="badge warn">Chưa có gói</span>'}</td><td><span class="badge ${x.status==='ACTIVE'?'ok':'bad'}">${x.status==='ACTIVE'?'Hoạt động':'Đã khóa'}</span></td><td>${x.created_at?new Date(x.created_at+'Z').toLocaleString('vi-VN'):'—'}</td><td><div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn" data-client-password="${x.id}">Đặt mật khẩu</button><button class="delete-key" data-client-delete="${x.id}" data-client-name="${esc(x.username)}">Xóa</button></div></td></tr>`}).join('');document.querySelectorAll('[data-client-select]').forEach(c=>c.onchange=()=>{let id=Number(c.dataset.clientSelect);c.checked?selectedClientUsers.add(id):selectedClientUsers.delete(id);syncClientSelection()});document.querySelectorAll('[data-client-delete]').forEach(b=>b.onclick=()=>deleteClientUser(b));document.querySelectorAll('[data-client-password]').forEach(b=>b.onclick=()=>resetClientPassword(b));syncClientSelection()}
+$('selectAllClients').onchange=e=>{document.querySelectorAll('[data-client-select]').forEach(c=>{let id=Number(c.dataset.clientSelect);e.target.checked?selectedClientUsers.add(id):selectedClientUsers.delete(id)});syncClientSelection()};
+deleteSelectedClientButton.onclick=async()=>{let ids=[...selectedClientUsers];if(!ids.length)return;if(!confirm(`Xóa ${ids.length} tài khoản đã chọn? Thao tác này không thể hoàn tác.`))return;deleteSelectedClientButton.disabled=true;try{for(const id of ids){let r=await fetch(`/api/admin/client-users/${id}`,{method:'DELETE',headers:{Authorization:`Bearer ${adminToken()}`}}),j=await r.json();if(!r.ok||!j.success)throw Error(j.message||`Không thể xóa tài khoản ID ${id}`)}selectedClientUsers.clear();toast(`Đã xóa ${ids.length} tài khoản.`);await loadClientUsers()}catch(e){toast(e.message,true);await loadClientUsers()}};
+</script>
+<style>
+/* ===== PRICING PANEL REDESIGN ===== */
+#pricingPanel { background: #f8fafc; }
+#pricingPanel .panel-head { background: #fff; border-bottom: 1px solid #e2e8f0; padding: 24px 32px; }
+#pricingPanel .panel-head h2 { font-size: 20px; font-weight: 700; color: #0f172a; margin: 0 0 4px; }
+#pricingPanel .panel-head p { font-size: 13px; color: #64748b; margin: 0; }
+
+#pricingForm {
+  padding: 28px 32px !important;
+  max-width: 100% !important;
+}
+
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.pricing-card {
+  background: #fff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 18px 20px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.pricing-card:focus-within {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
+}
+.pricing-card .card-icon {
+  font-size: 20px;
+  margin-bottom: 10px;
+  display: block;
+}
+.pricing-card .card-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #94a3b8;
+  margin-bottom: 8px;
+}
+.pricing-card input.input {
+  width: 100% !important;
+  margin-top: 0 !important;
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  border-radius: 8px !important;
+  border: 1.5px solid #e2e8f0 !important;
+  padding: 8px 12px !important;
+  background: #f8fafc !important;
+  color: #0f172a !important;
+  outline: none !important;
+  transition: border-color 0.2s !important;
+}
+.pricing-card input.input:focus {
+  border-color: #3b82f6 !important;
+  background: #fff !important;
+}
+
+.pricing-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 20px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #94a3b8;
+}
+.pricing-divider::before, .pricing-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #e2e8f0;
+}
+
+#pricePreview {
+  display: grid !important;
+  grid-template-columns: repeat(4, 1fr) !important;
+  gap: 14px !important;
+  margin-top: 0 !important;
+  margin-bottom: 24px;
+}
+
+#pricePreview article.stat {
+  background: #fff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 18px 16px;
+  text-align: center;
+}
+#pricePreview .stat-head {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #94a3b8;
+  margin-bottom: 10px;
+}
+#pricePreview .stat-value {
+  font-size: 22px !important;
+  font-weight: 800 !important;
+  color: #0f172a !important;
+  line-height: 1.1;
+}
+#pricePreview .stat-note {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+.pricing-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-top: 4px;
+}
+#savePricing {
+  min-width: 140px;
+  font-weight: 600 !important;
+}
+#pricingStatus {
+  font-size: 13px;
+  color: #16a34a;
+  font-weight: 500;
+}
+
+@media (max-width: 768px) {
+  #pricePreview { grid-template-columns: repeat(2, 1fr) !important; }
+  .pricing-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 480px) {
+  #pricePreview { grid-template-columns: 1fr 1fr !important; }
+  .pricing-grid { grid-template-columns: 1fr; }
+  #pricingForm { padding: 16px !important; }
+}
+</style>
+
+<script>
+// Rebuild pricing form UI after DOM ready
+(function() {
+  function rebuildPricingUI() {
+    var form = document.getElementById('pricingForm');
+    if (!form) return;
+
+    // Save current values
+    var ids = ['priceUnit','extraSlotPrice','discount1','discount3','discount6','discount12'];
+    var vals = {};
+    ids.forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el) vals[id] = el.value;
+    });
+
+    form.innerHTML = `
+      <div class="pricing-grid">
+        <div class="pricing-card">
+          <span class="card-icon">💰</span>
+          <span class="card-label">Giá máy đầu tiên / tháng (VNĐ)</span>
+          <input id="priceUnit" class="input" type="number" min="0" max="100000000" step="1" inputmode="numeric" required placeholder="0">
+        </div>
+        <div class="pricing-card">
+          <span class="card-icon">➕</span>
+          <span class="card-label">Giá thuê thêm 1 slot / tháng</span>
+          <input id="extraSlotPrice" class="input" type="number" min="0" max="100000000" step="1" inputmode="numeric" required placeholder="0">
+        </div>
+      </div>
+
+      <div class="pricing-divider">Ưu đãi theo gói</div>
+
+      <div class="pricing-grid">
+        <div class="pricing-card">
+          <span class="card-icon">🗓️</span>
+          <span class="card-label">Giảm gói 1 tháng (%)</span>
+          <input id="discount1" class="input" type="number" min="0" max="90" step="1" required placeholder="0">
+        </div>
+        <div class="pricing-card">
+          <span class="card-icon">📅</span>
+          <span class="card-label">Giảm gói 3 tháng (%)</span>
+          <input id="discount3" class="input" type="number" min="0" max="90" step="1" required placeholder="0">
+        </div>
+        <div class="pricing-card">
+          <span class="card-icon">📆</span>
+          <span class="card-label">Giảm gói 6 tháng (%)</span>
+          <input id="discount6" class="input" type="number" min="0" max="90" step="1" required placeholder="0">
+        </div>
+        <div class="pricing-card">
+          <span class="card-icon">🎁</span>
+          <span class="card-label">Giảm gói 12 tháng (%)</span>
+          <input id="discount12" class="input" type="number" min="0" max="90" step="1" required placeholder="0">
+        </div>
+      </div>
+
+      <div class="pricing-divider">Xem trước bảng giá</div>
+      <div id="pricePreview" class="stats"></div>
+
+      <div class="pricing-actions">
+        <button id="savePricing" class="btn" type="submit">💾 Lưu bảng giá</button>
+        <span id="pricingStatus" class="sub"></span>
+      </div>
+    `;
+
+    // Restore values
+    ids.forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el && vals[id] !== undefined) el.value = vals[id];
+    });
+
+    // Re-attach events
+    form.addEventListener('input', function() {
+      if (typeof renderPricePreview === 'function') renderPricePreview();
+    });
+
+    form.onsubmit = async function(e) {
+      e.preventDefault();
+      var b = document.getElementById('savePricing');
+      var statusEl = document.getElementById('pricingStatus');
+      b.disabled = true; b.textContent = '⏳ Đang lưu...';
+      statusEl.textContent = ''; statusEl.style.color = '#16a34a';
+      try {
+        var vals2 = typeof pricingValues === 'function' ? pricingValues() : {};
+        var r = await fetch('/api/admin/pricing', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (S.token || '') },
+          body: JSON.stringify(vals2)
+        });
+        var j = await r.json();
+        if (!r.ok || !j.success) throw new Error(j.message || 'Không thể lưu bảng giá');
+        statusEl.textContent = '✅ Đã lưu. Đơn hàng mới sẽ dùng bảng giá này.';
+        if (typeof toast === 'function') toast('Đã cập nhật bảng giá.');
+        if (typeof renderPricePreview === 'function') renderPricePreview();
+      } catch(err) {
+        statusEl.style.color = '#dc2626';
+        statusEl.textContent = err.message;
+        if (typeof toast === 'function') toast(err.message, true);
+      } finally {
+        b.disabled = false; b.textContent = '💾 Lưu bảng giá';
+      }
+    };
+  }
+
+  // Run after original scripts finish
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() { setTimeout(rebuildPricingUI, 50); });
+  } else {
+    setTimeout(rebuildPricingUI, 50);
+  }
+
+  // Also hook into pricing nav click to rebuild after load
+  try {
+    var _origLoadPricing = window.loadPricing;
+    window.loadPricing = async function() {
+      var res = _origLoadPricing ? await _origLoadPricing.apply(this, arguments) : null;
+      setTimeout(rebuildPricingUI, 20);
+      return res;
+    };
+  } catch(e) {}
+})();
+</script></body></html>
+
+

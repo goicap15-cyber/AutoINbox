@@ -130,6 +130,7 @@ function ExportFooter({ onExportLeads }) {
 
 export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportLeads, onCloseDrawer, leadStatuses = [], onCreateLeadStatus, onDeleteLeadStatus, onSetReminder, onCompleteReminder, onCancelReminder, onArchiveThread }) {
   const [activeTab, setActiveTab] = useState('INFO');
+  const [nickname, setNickname] = useState('');
   const [phone, setPhone] = useState('');
   const [acceptingPhoneCandidateId, setAcceptingPhoneCandidateId] = useState(null);
   const [phoneCandidateError, setPhoneCandidateError] = useState('');
@@ -188,6 +189,7 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
 
   useEffect(() => {
     if (!contactInfo) return;
+    setNickname(contactInfo.nickname || '');
     setPhone(contactInfo.phone || '');
     setAcceptingPhoneCandidateId(null);
     setPhoneCandidateError('');
@@ -229,6 +231,7 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
     setSavingCustomFields(false);
   }, [
     contactInfo?.thread_id,
+    contactInfo?.nickname,
     contactInfo?.phone,
     contactInfo?.email,
     contactInfo?.address,
@@ -249,6 +252,7 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
 
   const savePayload = (override = {}) => ({
     ...contactInfo,
+    nickname,
     phone,
     email,
     address,
@@ -507,7 +511,8 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
     );
   }
 
-  const name = contactInfo.name || contactInfo.contact_name || 'Khách hàng';
+  const facebookName = contactInfo.name || contactInfo.contact_name || 'Khách hàng';
+  const name = nickname.trim() || facebookName;
   const nameInitials = pickInitials(name);
   const avatarColor = pickAvatarColor(contactInfo.thread_id || name);
   const accountText = contactInfo.account_name || contactInfo.account_id || 'FB Account';
@@ -782,6 +787,18 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
               <div>
                 <DetailRow icon={MessageCircle} label="Nguồn" value="Facebook Messenger" />
                 <DetailRow icon={Link2} label="Tài khoản" value={accountText} />
+                <DetailRow icon={UserRound} label="Biệt danh trong CRM">
+                  <input
+                    type="text"
+                    value={nickname}
+                    onChange={(event) => setNickname(event.target.value.slice(0, 80))}
+                    maxLength={80}
+                    placeholder={facebookName}
+                    aria-label="Biệt danh trong CRM"
+                    className="w-full bg-transparent text-[var(--color-text-primary)] text-sm font-semibold focus:outline-none placeholder:italic placeholder:font-normal placeholder:text-[var(--color-text-muted)]"
+                  />
+                  <p className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">Chỉ hiển thị trong CRM, không đổi tên trên Messenger.</p>
+                </DetailRow>
                 <DetailRow icon={Phone} label="Số điện thoại">
                   <input
                     type="text"

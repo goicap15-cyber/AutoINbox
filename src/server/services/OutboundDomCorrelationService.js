@@ -15,6 +15,116 @@ function updateQueueStatusFromClientMessage(clientMessageId, status, errorReason
 }
 
 class OutboundDomCorrelationService {
+  static findTemporaryIdUpgrade(database, threadId, message, isMedia = false) {
+    if (!message?.fb_message_id) return null;
+    const observedTimestamp = Number(message.timestamp_ms) || Date.parse(message.created_at || '') || Date.now();
+    const mediaClause = isMedia
+      ? `(attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))`
+      : `COALESCE(content, '') = COALESCE(?, '') AND attachment_id IS NULL AND (media_type IS NULL OR media_type = 'text')`;
+    const params = isMedia
+      ? [threadId, message.fb_message_id, observedTimestamp, observedTimestamp, observedTimestamp, observedTimestamp]
+      : [threadId, message.fb_message_id, message.content || '', observedTimestamp, observedTimestamp, observedTimestamp, observedTimestamp];
+    return database.prepare(`
+      SELECT id, client_message_id, fb_message_id, timestamp_ms
+      FROM messages
+      WHERE thread_id = ? AND is_outgoing = 1 AND delivery_status = 'sent'
+        AND fb_message_id IS NOT NULL AND fb_message_id != ?
+        AND fb_message_id NOT LIKE 'mid.%'
+        AND ${mediaClause}
+        AND ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) <= 90000
+      ORDER BY ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) ASC, id DESC
+      LIMIT 1
+    `).get(...params);
+  }
+
+  static collapseStoredTemporaryIdUpgrades(database, threadId) {
+    const officialRows = database.prepare(`
+      SELECT * FROM messages WHERE thread_id = ? AND is_outgoing = 1 AND fb_message_id LIKE 'mid.%' ORDER BY id ASC
+    `).all(threadId);
+    let collapsed = 0;
+    for (const official of officialRows) {
+      const temporary = this.findTemporaryIdUpgrade(database, threadId, official, this.isMediaConfirmationEvent(official));
+      if (!temporary) continue;
+      database.prepare('DELETE FROM messages WHERE id = ?').run(official.id);
+      database.prepare(`
+        UPDATE messages SET fb_message_id = ?, media_type = COALESCE(?, media_type),
+          media_url = COALESCE(?, media_url), local_media_path = COALESCE(?, local_media_path),
+          timestamp_ms = CASE WHEN ? > 0 THEN ? ELSE timestamp_ms END,
+          timestamp_source = COALESCE(?, timestamp_source) WHERE id = ?
+      `).run(official.fb_message_id, official.media_type, official.media_url, official.local_media_path,
+        Number(official.timestamp_ms) || 0, Number(official.timestamp_ms) || 0, official.timestamp_source, temporary.id);
+      collapsed += 1;
+    }
+    return collapsed;
+  }
+
+  static mediaParentMessageId(fbMessageId) {
+    const value = String(fbMessageId || '');
+    return value.endsWith('_media') ? value.slice(0, -'_media'.length) : null;
+  }
+
+  static mergeMediaCompanion(database, threadId, message, isOutgoing) {
+    const parentFbMessageId = this.mediaParentMessageId(message?.fb_message_id);
+    if (!parentFbMessageId) return null;
+    const parent = database.prepare(`
+      SELECT * FROM messages
+      WHERE thread_id = ? AND fb_message_id = ? AND is_outgoing = ?
+      LIMIT 1
+    `).get(threadId, parentFbMessageId, isOutgoing ? 1 : 0);
+
+    // For our own send, Facebook emits a text/base row plus a _media row,
+    // while CRM already owns a temporary attachment row. Upgrade that durable
+    // CRM row first; otherwise merging into the Facebook base leaves two images.
+    if (isOutgoing) {
+      const temporary = this.findTemporaryIdUpgrade(database, threadId, {
+        ...message, fb_message_id: parentFbMessageId
+      }, true);
+      if (temporary) {
+        if (parent && parent.id !== temporary.id) database.prepare('DELETE FROM messages WHERE id = ?').run(parent.id);
+        database.prepare(`
+          UPDATE messages SET fb_message_id = ?, media_type = ?,
+            media_url = CASE WHEN attachment_id IS NOT NULL THEN media_url ELSE COALESCE(?, media_url) END,
+            local_media_path = COALESCE(local_media_path, ?),
+            timestamp_ms = CASE WHEN ? > 0 THEN ? ELSE timestamp_ms END,
+            timestamp_source = COALESCE(?, timestamp_source)
+          WHERE id = ?
+        `).run(parentFbMessageId, message.media_type || 'image', message.media_url || null,
+          message.local_media_path || null, Number(message.timestamp_ms) || 0, Number(message.timestamp_ms) || 0,
+          message.timestamp_source || null, temporary.id);
+        return database.prepare('SELECT * FROM messages WHERE id = ?').get(temporary.id);
+      }
+    }
+    if (!parent) return null;
+    database.prepare(`
+      UPDATE messages SET
+        media_type = CASE WHEN ? IS NOT NULL AND ? != 'text' THEN ? ELSE media_type END,
+        media_url = CASE WHEN attachment_id IS NOT NULL THEN media_url ELSE COALESCE(?, media_url) END,
+        local_media_path = COALESCE(?, local_media_path)
+      WHERE id = ?
+    `).run(message.media_type || null, message.media_type || null, message.media_type || null,
+      message.media_url || null, message.local_media_path || null, parent.id);
+    return database.prepare('SELECT * FROM messages WHERE id = ?').get(parent.id);
+  }
+
+  static collapseStoredMediaCompanions(database, threadId) {
+    const companions = database.prepare(`
+      SELECT media.id AS media_id, media.media_type, media.media_url, media.local_media_path,
+             parent.id AS parent_id
+      FROM messages media
+      JOIN messages parent
+        ON parent.thread_id = media.thread_id
+       AND parent.is_outgoing = media.is_outgoing
+       AND parent.fb_message_id = substr(media.fb_message_id, 1, length(media.fb_message_id) - 6)
+      WHERE media.thread_id = ? AND media.fb_message_id LIKE '%_media'
+    `).all(threadId);
+    for (const row of companions) {
+      const media = database.prepare('SELECT * FROM messages WHERE id = ?').get(row.media_id);
+      this.mergeMediaCompanion(database, threadId, media, Boolean(media.is_outgoing));
+      database.prepare('DELETE FROM messages WHERE id = ?').run(row.media_id);
+    }
+    return companions.length;
+  }
+
   /**
    * Spec 040 T020: a DOM-observed event carries real media evidence
    * (media_url, or a media_type other than 'text') regardless of whether a
@@ -58,10 +168,15 @@ class OutboundDomCorrelationService {
     const windowSeconds = Math.round(OutboundConfirmationService.DEFAULT_CONFIRMATION_WINDOW_MS / 1000);
     const candidate = database.prepare(`
       SELECT outbound.id, outbound.client_message_id, outbound.content FROM messages outbound
-      LEFT JOIN message_queue queued ON outbound.client_message_id = 'queue_' || queued.id
+      LEFT JOIN outbound_attempts attempt ON outbound.latest_attempt_id = attempt.id
+      LEFT JOIN message_queue queued ON (
+        outbound.client_message_id = 'queue_' || queued.id
+        OR attempt.id = queued.outbound_attempt_id
+      )
       WHERE outbound.thread_id = ? AND outbound.is_outgoing = 1 AND outbound.delivery_status = 'pending'
         AND datetime(outbound.created_at) >= datetime('now', '-' || ? || ' seconds')
         AND (queued.id IS NULL OR (queued.attachment_id IS NULL AND queued.manifest_id IS NULL))
+        AND outbound.attachment_id IS NULL AND (outbound.media_type IS NULL OR outbound.media_type = 'text')
       ORDER BY outbound.id DESC LIMIT 1
     `).get(threadId, windowSeconds);
     if (!candidate) return null;
@@ -80,21 +195,26 @@ class OutboundDomCorrelationService {
    * available - unlike the text match above, this cannot require exact
    * content equality. Bounding by the same confirmation window at least
    * keeps a long-stale pending image in this thread from being coincidentally
-   * claimed by an unrelated later image confirmation. It does not fully
-   * resolve two image sends genuinely in flight at once in the same thread
-   * (e.g. a 1:1 rich image racing a campaign image to the same person) - that
-   * would need the extension to tag confirmations with which attempt they
-   * belong to.
+   * claimed by an unrelated later image confirmation.
    */
   static matchPendingImageOutbound(database, threadId) {
     const windowSeconds = Math.round(OutboundConfirmationService.DEFAULT_CONFIRMATION_WINDOW_MS / 1000);
     return database.prepare(`
       SELECT outbound.id, outbound.client_message_id
       FROM messages outbound
-      JOIN message_queue queued ON outbound.client_message_id = 'queue_' || queued.id
+      LEFT JOIN outbound_attempts attempt ON outbound.latest_attempt_id = attempt.id
+      LEFT JOIN message_queue queued ON (
+        outbound.client_message_id = 'queue_' || queued.id
+        OR attempt.id = queued.outbound_attempt_id
+      )
       WHERE outbound.thread_id = ? AND outbound.is_outgoing = 1
         AND outbound.delivery_status = 'pending'
-        AND (queued.attachment_id IS NOT NULL OR queued.manifest_id IS NOT NULL)
+        AND (
+          outbound.attachment_id IS NOT NULL
+          OR (outbound.media_type IS NOT NULL AND outbound.media_type != 'text')
+          OR queued.attachment_id IS NOT NULL
+          OR queued.manifest_id IS NOT NULL
+        )
         AND datetime(outbound.created_at) >= datetime('now', '-' || ? || ' seconds')
       ORDER BY outbound.id DESC LIMIT 1
     `).get(threadId, windowSeconds) || null;
@@ -109,10 +229,18 @@ class OutboundDomCorrelationService {
    */
   static confirmPendingOutbound(database, ioServer, pendingRow, { fbMessageId, tsMs = 0, tsSource = 'unknown', rawMessage }) {
     const confirmedId = fbMessageId || `dom_${pendingRow.client_message_id}`;
-    const existingConfirmed = database.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(confirmedId);
+    const existingConfirmed = database.prepare('SELECT id, is_outgoing FROM messages WHERE fb_message_id = ?').get(confirmedId);
     if (existingConfirmed) {
-      console.log(`[WS] Confirmed ID ${confirmedId} đã tồn tại. Bỏ qua pending match.`);
-      return false;
+      if (existingConfirmed.id === pendingRow.id) {
+        return false;
+      }
+      if (existingConfirmed.is_outgoing === 0) {
+        console.log(`[WS] Removing duplicate misidentified incoming row ${existingConfirmed.id} in favor of pending outbound row ${pendingRow.id}`);
+        database.prepare('DELETE FROM messages WHERE id = ?').run(existingConfirmed.id);
+      } else {
+        console.log(`[WS] Confirmed ID ${confirmedId} đã tồn tại ở row outgoing ${existingConfirmed.id}. Bỏ qua pending match.`);
+        return false;
+      }
     }
     database.prepare(`
       UPDATE messages SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL,
@@ -120,10 +248,38 @@ class OutboundDomCorrelationService {
         timestamp_source = CASE WHEN ? <> 'unknown' THEN ? ELSE timestamp_source END
       WHERE id = ?
     `).run(confirmedId, tsMs, tsMs, tsSource, tsSource, pendingRow.id);
-    updateQueueStatusFromClientMessage(pendingRow.client_message_id, 'sent', null, database);
+
     const updatedMsg = database.prepare('SELECT * FROM messages WHERE id = ?').get(pendingRow.id);
+    const OutboundAttemptRepository = require('../repositories/OutboundAttemptRepository');
+    if (updatedMsg && updatedMsg.latest_attempt_id) {
+      OutboundAttemptRepository.transition(
+        updatedMsg.latest_attempt_id,
+        ['queued', 'dispatching', 'awaiting_confirmation'],
+        'sent',
+        {
+          confirmed_at: new Date(tsMs || Date.now()).toISOString(),
+          confirmation_message_id: confirmedId,
+          confirmation_source: (tsSource === 'page_dom_observer' || tsSource === 'page_dom') ? 'page_dom' : 'personal_dom'
+        },
+        database
+      );
+      const attempt = OutboundAttemptRepository.getById(updatedMsg.latest_attempt_id, database);
+      if (attempt && attempt.queue_id) {
+        MessageQueueRepository.updateStatus(attempt.queue_id, 'sent', null, database);
+      }
+    }
+    updateQueueStatusFromClientMessage(pendingRow.client_message_id, 'sent', null, database);
+
     if (ioServer) {
-      ioServer.emit('MESSAGE_SENT', { thread_id: pendingRow.thread_id || rawMessage.thread_id, client_message_id: pendingRow.client_message_id, fb_message_id: confirmedId, status: 'sent' });
+      const targetThreadId = pendingRow.thread_id || rawMessage?.thread_id;
+      ioServer.emit('MESSAGE_SENT', { thread_id: targetThreadId, client_message_id: pendingRow.client_message_id, fb_message_id: confirmedId, status: 'sent' });
+      ioServer.emit('MESSAGE_SEND_STATUS', {
+        thread_id: targetThreadId,
+        client_message_id: pendingRow.client_message_id,
+        message_id: pendingRow.id,
+        status: 'sent',
+        fb_message_id: confirmedId
+      });
       ioServer.emit('NEW_MESSAGE', {
         ...rawMessage,
         ...updatedMsg,
@@ -134,7 +290,7 @@ class OutboundDomCorrelationService {
         is_outgoing: true,
         timestamp_ms: tsMs || updatedMsg?.timestamp_ms,
         timestamp_source: tsSource || updatedMsg?.timestamp_source,
-        created_at: createdAt
+        created_at: rawMessage?.created_at || updatedMsg?.created_at || new Date().toISOString()
       });
     }
     console.log(`[WS] Đã ghép DOM confirmation vào pending outbound ${pendingRow.client_message_id}`);

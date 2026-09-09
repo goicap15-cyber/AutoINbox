@@ -4,8 +4,9 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
+const { APP_DATA_ROOT } = require('./appDataRoot');
 
-const DATA_DIR = path.join(__dirname, '../../../data');
+const DATA_DIR = APP_DATA_ROOT;
 const AVATAR_DIR = path.join(DATA_DIR, 'avatars');
 
 // Ensure avatar directory exists

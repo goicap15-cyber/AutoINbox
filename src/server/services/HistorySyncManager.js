@@ -25,6 +25,19 @@ class HistorySyncManager {
     `).run(status, cursorStr, error, threadId);
   }
 
+  // Decide PARTIAL vs SYNCED from what the crawler actually reported, instead of
+  // treating "we got a checkpoint back" as proof the history is complete.
+  // Missing/legacy checkpoints (no stop_reason - written before this field
+  // existed) default to SYNCED so already-synced threads are never silently
+  // downgraded to PARTIAL by this change.
+  static resolveStatusFromCheckpoint(checkpoint) {
+    if (!checkpoint || !checkpoint.stop_reason) return 'SYNCED';
+    if (checkpoint.stop_reason === 'on_demand_page') return 'PARTIAL';
+    if (checkpoint.boundary_reached || checkpoint.stop_reason === 'no_scroll_growth') return 'SYNCED';
+    if (checkpoint.stop_reason === 'max_rounds_hit') return 'PARTIAL';
+    return 'SYNCED';
+  }
+
   static getSyncState(threadId, database = getDefaultDb()) {
     const thread = database.prepare('SELECT sync_status, sync_cursor, sync_error FROM threads WHERE id = ?').get(threadId);
     if (!thread) return null;

@@ -17,10 +17,37 @@
     /^Meta$/i,
     /^Trang chủ$/i,
     /^Khôi phục ngay$/i,
+    /^Khôi phục tin nhắn$/i,
+    /^Restore now$/i,
+    /^Restore messages$/i,
+    /^Personal chats are secured with end-to-end encryption/i,
     /^Thiếu lịch sử chat/i,
+    /^Thiếu tin nhắn\.?$/i,
+    /^Không khôi phục được tin nhắn\.?$/i,
     /^Bạn đã tạo nhóm này/i,
     /^Chỉ những người tham gia/i,
     /^Bản quyền Meta/i,
+    /^Thêm tin nhắn được cá nhân h(?:óa|oá)\.?$/i,
+
+    // Right sidebar & header UI elements
+    /^(?:Trang cá nhân|View profile)$/i,
+    /^(?:Tắt thông báo|Mute notifications)$/i,
+    /^(?:Tìm kiếm|Search)$/i,
+    /^(?:Thông tin về đoạn chat|Conversation information|Chat info|Chi tiết cuộc trò chuyện)$/i,
+    /^(?:Tùy chỉnh đoạn chat|Customize chat)$/i,
+    /^(?:File phương tiện,? file và liên kết|Media,? files and links)$/i,
+    /^(?:Quyền riêng tư và hỗ trợ|Privacy and support|Privacy & support)$/i,
+    /^(?:Chủ đề|Theme)$/i,
+    /^(?:Biểu tượng cảm xúc|Emoji)$/i,
+    /^(?:Biệt danh|Nicknames)$/i,
+    /^(?:Tạo nhóm|Create group)$/i,
+    /^(?:Thành viên|Members)$/i,
+    /^(?:Tên người dùng|Username)$/i,
+    /^(?:Gỡ|Remove|Unsend)$/i,
+    /^(?:Trả lời|Reply)$/i,
+    /^(?:Chuyển tiếp|Forward)$/i,
+    /^(?:Ghim|Pin)$/i,
+    /^(?:Sao chép|Copy)$/i,
 
     // Status & Presence (exact standalone matches only)
     /^(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen)$/i,
@@ -42,7 +69,12 @@
     // Full date/time separator header Business Suite renders between message
     // groups (e.g. "13:52 6 Tháng 8, 2026") - mirrors the same addition in
     // src/server/utils/textFilter.js (keep both copies in sync).
-    /^\d{1,2}:\d{2}\s+\d{1,2}\s+Tháng\s+\d{1,2},?\s+\d{4}$/i
+    /^\d{1,2}:\d{2}\s+\d{1,2}\s+Tháng\s+\d{1,2},?\s+\d{4}$/i,
+    // Short date-only separator, no time/year (e.g. "20 Tháng 4") - live
+    // report (2026-08-20) found this leaking in as its own fake message row.
+    /^\d{1,2}\s+Tháng\s+\d{1,2}(?:,?\s*\d{4})?$/i,
+    // Short day-of-week / relative-day separator, same family (spec 047).
+    /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i
   ];
 
   function isSystemOrMetadataText(text) {
@@ -89,8 +121,44 @@
     return text;
   }
 
+  const INVALID_CONTACT_NAME_PATTERNS = [
+    /^(?:Tất cả tin nhắn|Tất cả|All messages|All)$/i,
+    /^(?:Tin nhắn trực tiếp|Direct messages)$/i,
+    /^(?:Hộp thư đến|Hộp thư|Inbox)$/i,
+    /^(?:Chưa đọc|Unread)$/i,
+    /^(?:Đã xong|Done)$/i,
+    /^(?:Gắn dấu sao|Đã gắn dấu sao|Starred)$/i,
+    /^(?:Spam|Thư rác)$/i,
+    /^(?:Bình luận.*|Comments.*)$/i,
+    /^(?:Thông báo|Notifications)$/i,
+    /^(?:Đang hoạt động.*|Hoạt động(?:\s+\d+.*)?|Đã hoạt động.*|Active now|Active recently|Active \d+.*|Online|Offline)$/i,
+    /^(?:Đang|Loading|Đang tải)[.…]*$/i,
+    /^(?:Nhấn Enter để gửi|Press Enter to send)$/i,
+    /^(?:Tin nhắn và cuộc gọi.*|bảo mật.*)$/i,
+    /^(?:Facebook|Messenger|Meta)$/i
+  ];
+
+  function isInvalidContactName(name) {
+    if (!name || typeof name !== 'string') return true;
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.length < 2) return true;
+    for (const pat of INVALID_CONTACT_NAME_PATTERNS) {
+      if (pat.test(trimmed)) return true;
+    }
+    return false;
+  }
+
+  function cleanContactName(rawName, fallback = 'Khách hàng') {
+    if (!rawName || typeof rawName !== 'string') return fallback;
+    const trimmed = rawName.trim();
+    if (isInvalidContactName(trimmed)) return fallback;
+    return trimmed;
+  }
+
   globalThis.FbCrmTextFilter = {
     isSystemOrMetadataText,
-    cleanMessageText
+    cleanMessageText,
+    isInvalidContactName,
+    cleanContactName
   };
 })();

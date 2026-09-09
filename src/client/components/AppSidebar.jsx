@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MessageSquare, Search, Zap, Megaphone, Cpu, UserCheck, ShieldAlert, ChevronLeft, ChevronRight, Sun, Moon, Phone } from 'lucide-react';
+import { MessageSquare, Search, Zap, Megaphone, Cpu, UserCheck, Users, ShieldAlert, ChevronLeft, ChevronRight, Sun, Moon, Phone, Key, CreditCard, LogOut } from 'lucide-react';
 import { SIDEBAR_CLOSE_DELAY_MS, shouldKeepSidebarExpanded } from '../utils/appSidebarPresentation.js';
 
 const ICON_SIZE = 18;
@@ -10,12 +10,14 @@ function supportsPointerHover() {
   return typeof window === 'undefined' || !window.matchMedia || window.matchMedia('(hover: hover)').matches;
 }
 
-export default function AppSidebar({ activeView, onSelectView, onOpenModal, theme, onToggleTheme, hasCheckpoint = false, collapsed = false, onToggleCollapse }) {
+export default function AppSidebar({ activeView, onSelectView, onOpenModal, theme, onToggleTheme, hasCheckpoint = false, collapsed = false, onToggleCollapse, sessionUser, onLogout }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const sidebarRef = useRef(null);
   const closeTimerRef = useRef(null);
   const pointerInsideRef = useRef(false);
   const focusInsideRef = useRef(false);
+
+  const isCompanyAdmin = sessionUser?.company_role !== 'EMPLOYEE';
 
   const navItems = [
     { id: 'chat', label: 'Hội thoại', icon: MessageSquare },
@@ -24,8 +26,20 @@ export default function AppSidebar({ activeView, onSelectView, onOpenModal, them
     { id: 'campaigns', label: 'Chiến dịch', icon: Megaphone, isModal: true },
     { id: 'aiConfig', label: 'Cài đặt AI', icon: Cpu, isModal: true },
     { id: 'phoneAutomation', label: 'Tự động số điện thoại', icon: Phone, isModal: true },
-    { id: 'accounts', label: 'Quản lý', icon: UserCheck, isModal: true }
   ];
+
+  if (isCompanyAdmin) {
+    navItems.push(
+      { id: 'license', label: 'Bản quyền Key', icon: Key, isModal: true },
+      { id: 'payment', label: 'Mua License', icon: CreditCard, isModal: true }
+    );
+  }
+
+  navItems.push({ id: 'accounts', label: 'Quản lý', icon: UserCheck, isModal: true });
+
+  if (isCompanyAdmin) {
+    navItems.push({ id: 'employees', label: 'Nhân viên', icon: Users });
+  }
 
   const cancelScheduledCollapse = () => {
     if (closeTimerRef.current) {
@@ -109,11 +123,19 @@ export default function AppSidebar({ activeView, onSelectView, onOpenModal, them
               <button
                 key={item.id}
                 type="button"
-                onClick={() => item.isModal ? onOpenModal(item.id) : onSelectView(item.id)}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (item.isModal) {
+                    onOpenModal?.(item.id);
+                  } else {
+                    onSelectView?.(item.id);
+                  }
+                }}
                 title={isExpanded ? undefined : item.label}
                 aria-label={item.label}
                 style={{ minWidth: BTN_SIZE, minHeight: BTN_SIZE }}
-                className={'app-sidebar-nav-item group relative flex items-center rounded-lg linear-transition ' + (isActive ? activeClass : idleClass)}
+                className={'app-sidebar-nav-item group relative flex items-center rounded-lg linear-transition cursor-pointer select-none ' + (isActive ? activeClass : idleClass)}
               >
                 {isCheckpointBtn
                   ? <ShieldAlert size={ICON_SIZE} strokeWidth={ICON_STROKE} className="shrink-0 text-[var(--color-danger)]" />
@@ -141,10 +163,15 @@ export default function AppSidebar({ activeView, onSelectView, onOpenModal, them
             <span className="app-sidebar-label" aria-hidden={!isExpanded}>Giao diện</span>
           </button>
 
-          <div title="Tài khoản Admin" className="app-sidebar-account">
-            <span className="app-sidebar-account-avatar">AD</span>
-            <span className="app-sidebar-label" aria-hidden={!isExpanded}>Tài khoản Admin</span>
+          <div title={sessionUser?.username || 'Tài khoản'} className="app-sidebar-account">
+            <span className="app-sidebar-account-avatar">{String(sessionUser?.username || 'U').slice(0, 2).toUpperCase()}</span>
+            <span className="app-sidebar-label" aria-hidden={!isExpanded}>{sessionUser?.username || 'Tài khoản'}</span>
           </div>
+
+          <button type="button" onClick={onLogout} title={isExpanded ? undefined : 'Đăng xuất'} aria-label="Đăng xuất" style={{ minWidth: BTN_SIZE, minHeight: BTN_SIZE }} className="app-sidebar-control">
+            <LogOut size={ICON_SIZE} strokeWidth={ICON_STROKE} className="shrink-0" />
+            <span className="app-sidebar-label" aria-hidden={!isExpanded}>Đăng xuất</span>
+          </button>
 
           {onToggleCollapse && (
             <button

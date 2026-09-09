@@ -10,6 +10,7 @@ const {
   assertSafePath,
   AttachmentValidationError
 } = require('./attachmentValidation');
+const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 
 const STAGED_RETENTION_MS = 24 * 60 * 60 * 1000;
 
@@ -41,7 +42,7 @@ function mapValidationError(error) {
 
 class OutboundAttachmentService {
   static getDefaultStorageDir() {
-    return path.join(__dirname, '../../../data/outbound-attachments');
+    return path.join(APP_DATA_ROOT, 'outbound-attachments');
   }
 
   static parseMultipartBody(buffer, contentType) {

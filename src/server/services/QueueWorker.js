@@ -201,6 +201,8 @@ class QueueWorker {
         queue_id: message.id,
         outbound_attempt_id: message.outbound_attempt_id || null,
         thread_id: message.thread_id,
+        thread_url: message.thread_url || null,
+        expected_contact_name: message.expected_contact_name || null,
         account_id: message.account_id,
         content: message.content,
         source_type: message.source_type,

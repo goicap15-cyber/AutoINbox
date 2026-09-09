@@ -13,3 +13,21 @@ dist/
 release/
 graphify-out/
 .DS_Store
+
+# Bundled Chrome for Testing binaries (spec 046) - fetched locally via
+# chrome-bundling/fetchChromeForTesting.js, hundreds of MB per OS, never
+# committed. Only the placeholder .gitkeep files stay tracked.
+bin/chrome-win/*
+bin/chrome-mac/*
+bin/chrome-linux/*
+!bin/chrome-win/.gitkeep
+!bin/chrome-mac/.gitkeep
+!bin/chrome-linux/.gitkeep
+
+# Build and scratch artifacts
+release-*/
+scratch/
+*.exe
+*.dll
+*.zip
+

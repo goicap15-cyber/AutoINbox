@@ -36,6 +36,7 @@ function withPersonalFixture(run) {
     }
   };
   seedPersonalThread(db, { id: 'thread-personal-image' });
+  db.prepare('UPDATE threads SET thread_url = ?, contact_name = ? WHERE id = ?').run('https://www.facebook.com/messages/t/thread-personal-image', 'Personal Contact', 'thread-personal-image');
   const capabilityOptions = {
     database: db,
     getConnection: () => ws,
@@ -98,6 +99,8 @@ test('personal_messenger image queue builds a v2 envelope with no page_id and co
   assert.equal(envelope.type, 'SEND_QUEUED_MESSAGE');
   assert.equal(envelope.data.contract_version, 2);
   assert.equal(envelope.data.source_type, 'personal_messenger');
+  assert.equal(envelope.data.thread_url, 'https://www.facebook.com/messages/t/thread-personal-image');
+  assert.equal(envelope.data.expected_contact_name, 'Personal Contact');
   assert.equal(envelope.data.outbound_attempt_id, accepted.attempt_id);
   assert.equal(envelope.data.idempotency_key, null);
   assert.equal(envelope.data.attachment.id, attachment.id);

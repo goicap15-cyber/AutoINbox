@@ -11,6 +11,7 @@ const {
   sanitizeFilename,
   checksumSha256
 } = require('./attachmentValidation');
+const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 
 const DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const ALLOWED_IMAGE_MIME_TYPES = Object.freeze([
@@ -48,7 +49,7 @@ function toCampaignAttachmentError(error) {
 
 class CampaignAttachmentService {
   static getDefaultStorageDir() {
-    return path.join(__dirname, '../../../data/campaign-attachments');
+    return path.join(APP_DATA_ROOT, 'campaign-attachments');
   }
 
   static parseMultipartBody(buffer, contentType) {
@@ -99,8 +100,8 @@ class CampaignAttachmentService {
   }, {
     database = require('../database/db'),
     storageDir = this.getDefaultStorageDir(),
-    imageEnabled = process.env.CAMPAIGN_IMAGE_ENABLED === 'true',
-    fileEnabled = process.env.CAMPAIGN_FILE_ENABLED === 'true',
+    imageEnabled = process.env.CAMPAIGN_IMAGE_ENABLED !== 'false',
+    fileEnabled = process.env.CAMPAIGN_FILE_ENABLED !== 'false',
     maxBytes = DEFAULT_MAX_IMAGE_BYTES,
     allowAnyFile = fileEnabled
   } = {}) {

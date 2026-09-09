@@ -1,70 +1,58 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { PhoneCall, PhoneOff, Check, X } from 'lucide-react';
 
 export default function IncomingCallModal({ callInfo, onClose, onSelectThread, onAnswerCall }) {
-  if (!callInfo) return null;
+  const [pendingAction, setPendingAction] = useState(null);
+  const [actionError, setActionError] = useState('');
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      onClose?.();
-    }, 30000);
+    setPendingAction(null);
+    setActionError('');
+  }, [callInfo]);
+
+  useEffect(() => {
+    if (!callInfo) return undefined;
+    const timer = setTimeout(() => onClose?.(), 30000);
     return () => clearTimeout(timer);
   }, [callInfo, onClose]);
 
-  const handleAccept = () => {
-    if (callInfo.thread_id) {
-      onSelectThread?.(callInfo.thread_id);
-    }
-    onAnswerCall?.('accept', callInfo.thread_id || callInfo.external_thread_id);
-    onClose?.();
-  };
+  if (!callInfo) return null;
 
-  const handleDecline = () => {
-    onAnswerCall?.('decline', callInfo.thread_id || callInfo.external_thread_id);
-    onClose?.();
+  const answer = (action) => {
+    if (pendingAction) return;
+    if (callInfo.thread_id) onSelectThread?.(callInfo.thread_id);
+    setPendingAction(action);
+    setActionError('');
+    onAnswerCall?.(
+      action,
+      callInfo.external_thread_id || callInfo.thread_id,
+      (success, message) => {
+        if (success) {
+          onClose?.();
+          return;
+        }
+        setPendingAction(null);
+        setActionError(message || 'Call action failed. Please try again.');
+      },
+      callInfo.source_tab_id,
+      callInfo.source_frame_id,
+      callInfo.account_id,
+      callInfo.call_id
+    );
   };
 
   return (
     <div className="fixed top-5 right-5 z-[9999]">
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-4 shadow-2xl border border-white/20 flex items-center gap-4 min-w-[340px] max-w-[440px]">
-        <div className="relative flex-shrink-0">
-          <div className="absolute -inset-1.5 rounded-full bg-emerald-500/40 animate-ping opacity-75"></div>
-          <div className="w-12 h-12 rounded-full bg-emerald-500 text-white flex items-center justify-center shadow-lg relative z-10">
-            <PhoneCall size={24} className="animate-bounce" />
-          </div>
-        </div>
-
+        <div className="w-12 h-12 rounded-full bg-emerald-500 flex items-center justify-center"><PhoneCall size={24} /></div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-full">
-              📞 Cuộc gọi đang reo...
-            </span>
-            <button onClick={onClose} className="text-white/60 hover:text-white transition-colors p-1" title="Đóng">
-              <X size={16} />
-            </button>
-          </div>
-          <h4 className="font-semibold text-sm truncate mt-1.5">
-            {callInfo.caller_name || 'Khách hàng'}
-          </h4>
-          <p className="text-xs text-white/70 mt-0.5">
-            Khách đang gọi đến trên Facebook Messenger
-          </p>
-
-          <div className="flex items-center gap-2 mt-3.5">
-            <button
-              onClick={handleAccept}
-              className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-3 py-2 rounded-xl flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-95"
-            >
-              <Check size={16} />
-              Chấp nhận
-            </button>
-            <button
-              onClick={handleDecline}
-              className="flex-1 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold px-3 py-2 rounded-xl flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-95"
-            >
-              <PhoneOff size={16} />
-              Từ chối
-            </button>
+          <div className="flex justify-between"><span className="text-xs font-bold text-emerald-300">📞 CUỘC GỌI ĐANG REO...</span><button onClick={onClose}><X size={16} /></button></div>
+          <h4 className="font-semibold text-sm truncate mt-1.5">{callInfo.caller_name || 'Khách hàng'}</h4>
+          <p className="text-xs text-white/70">Khách đang gọi đến trên Facebook Messenger</p>
+          {actionError && <p className="mt-2 text-xs text-rose-300">{actionError}</p>}
+          <div className="flex gap-2 mt-3.5">
+            <button disabled={!!pendingAction} onClick={() => answer('accept')} className="flex-1 bg-emerald-600 disabled:opacity-60 text-xs font-semibold px-3 py-2 rounded-xl flex justify-center gap-1.5"><Check size={16} />{'Ch\u1ea5p nh\u1eadn'}</button>
+            <button disabled={!!pendingAction} onClick={() => answer('decline')} className="flex-1 bg-rose-600 disabled:opacity-60 text-xs font-semibold px-3 py-2 rounded-xl flex justify-center gap-1.5"><PhoneOff size={16} />{pendingAction === 'decline' ? '\u0110ang t\u1eeb ch\u1ed1i...' : 'T\u1eeb ch\u1ed1i'}</button>
           </div>
         </div>
       </div>

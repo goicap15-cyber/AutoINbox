@@ -53,7 +53,7 @@ export default function ChatHeader({
   const sourceLabel = sourceType === 'page_messenger' ? `Page · ${sourceName}` : `Messenger · ${sourceName}`;
   const sourceStatus = activeThread.source_status || source?.status || 'ACTIVE';
   const isExtConnected = sourceType === 'page_messenger' ? sourceStatus === 'ACTIVE' : (account ? account.is_extension_connected !== false : true);
-  const customerName = activeThread.contact_name || activeThread.name || 'Khách hàng';
+  const customerName = activeThread.nickname || activeThread.contact_name || activeThread.name || 'Khách hàng';
   const avatarColor = pickAvatarColor(activeThread.id || customerName);
   const showAccountPill = accounts.length > 1;
   const messengerUrl = sourceType === 'page_messenger' ? null : (activeThread.thread_url || `https://facebook.com/messages/t/${activeThread.external_thread_id || activeThread.id}`);

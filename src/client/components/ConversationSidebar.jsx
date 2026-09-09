@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Edit, Filter, Megaphone, X }  from 'lucide-react';
+import { Search, Edit, Filter, Megaphone, RefreshCw, X }  from 'lucide-react';
 import ConversationFilters from './ConversationFilters.jsx';
 import ConversationItem from './ConversationItem.jsx';
 import ConversationFilterPopover from './ConversationFilterPopover.jsx';
@@ -16,16 +16,19 @@ import { sortDueReminders } from '../utils/reminderPresentation.js';
 export default function ConversationSidebar({
   threads = [], activeThreadId, onSelectThread,
   activeTab, onTabChange, searchQuery, onSearchChange, isConnected, onOpenSearch,
+  waitingCount = 0,
   accounts = [],
   inboxSources = [],
   leadStatuses = [],
   campaignSelectionMode = false,
   selectedCampaignThreadIds = [],
   onToggleCampaignThread,
-  onStartCampaignSelection, onCancelCampaignSelection, onCreateCampaign
+  onStartCampaignSelection, onCancelCampaignSelection, onCreateCampaign,
+  onBulkHistorySync, onContinueFacebookSync, onCancelFacebookSync, bulkHistoryProgress
 }) {
   const [appliedFilters, setAppliedFilters] = useState(() => normalizeFilters(createDefaultFilters()));
   const [isFilterPopoverOpen, setIsFilterPopoverOpen] = useState(false);
+  const [isSyncMenuOpen, setIsSyncMenuOpen] = useState(false);
   const filterButtonRef = useRef(null);
 
   const activeFilterCount = countActiveFilters(appliedFilters);
@@ -36,6 +39,9 @@ export default function ConversationSidebar({
 
   const visibleThreads = threads.filter((thread) => {
     if (!matchesConversationFilters(thread, appliedFilters)) return false;
+    const isMessageRequest = ['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(String(thread.inbox_folder || 'INBOX'));
+    if (activeTab === 'WAITING' && !isMessageRequest) return false;
+    if (activeTab !== 'WAITING' && isMessageRequest) return false;
     if (activeTab === 'ASSIGNED' && thread.status !== 'ASSIGNED') return false;
     if (activeTab === 'UNPROCESSED' && thread.status !== 'UNPROCESSED') return false;
     if (activeTab === 'COMPLETED' && thread.status !== 'COMPLETED') return false;
@@ -83,6 +89,26 @@ export default function ConversationSidebar({
           </div>
 
           <div className="flex gap-1.5 shrink-0 items-center">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setIsSyncMenuOpen((open) => !open)}
+                disabled={!isConnected}
+                className="p-1.5 hover:bg-[var(--color-bg-hover)] rounded-full transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                title="Điều khiển đồng bộ Facebook"
+                aria-label="Điều khiển đồng bộ Facebook"
+                aria-haspopup="menu"
+                aria-expanded={isSyncMenuOpen}
+              >
+                <RefreshCw size={17} className={`text-[var(--color-text-muted)] ${bulkHistoryProgress?.status === 'running' ? 'animate-spin' : ''}`} strokeWidth={1.75} />
+              </button>
+              {isSyncMenuOpen && (
+                <div role="menu" className="absolute right-0 top-9 z-50 w-40 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-panel)] p-1.5 shadow-xl">
+                  <button type="button" role="menuitem" onClick={() => { setIsSyncMenuOpen(false); onContinueFacebookSync?.(); }} className="w-full rounded-lg px-3 py-2 text-left text-xs font-semibold text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]">Đồng bộ tiếp</button>
+                  <button type="button" role="menuitem" onClick={() => { setIsSyncMenuOpen(false); onCancelFacebookSync?.(); }} className="w-full rounded-lg px-3 py-2 text-left text-xs font-semibold text-[var(--color-danger)] hover:bg-red-50">Hủy đồng bộ</button>
+                </div>
+              )}
+            </div>
             <button onClick={onOpenSearch} className="p-1.5 hover:bg-[var(--color-bg-hover)] rounded-full transition-colors cursor-pointer" title="Tìm kiếm nhanh" aria-label="Tìm kiếm nhanh">
               <Edit size={17} className="text-[var(--color-text-muted)]" strokeWidth={1.75} />
             </button>
@@ -119,6 +145,7 @@ export default function ConversationSidebar({
                 isOpen={isFilterPopoverOpen}
                 appliedFilters={appliedFilters}
                 inboxSources={inboxSources}
+                accounts={accounts}
                 leadStatuses={leadStatuses}
                 tagOptions={getAvailableTagOptions(threads)}
                 onApply={(nextFilters) => setAppliedFilters(nextFilters)}
@@ -140,7 +167,19 @@ export default function ConversationSidebar({
           <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] pointer-events-none" strokeWidth={1.75} />
         </div>
 
-        <ConversationFilters activeTab={activeTab} onTabChange={onTabChange} />
+        <ConversationFilters activeTab={activeTab} onTabChange={onTabChange} waitingCount={waitingCount} />
+        {bulkHistoryProgress && (
+          <div className="flex items-center justify-between rounded-lg bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-muted)]">
+            <span>
+              {bulkHistoryProgress.status === 'running'
+                ? 'Đang đồng bộ tất cả tin nhắn'
+                : `Đồng bộ xong${bulkHistoryProgress.failed ? `, lỗi ${bulkHistoryProgress.failed}` : ''}`}
+            </span>
+            <span className="font-semibold tabular-nums text-[var(--color-text-primary)]">
+              {Number(bulkHistoryProgress.completed || 0) + Number(bulkHistoryProgress.failed || 0)}/{Number(bulkHistoryProgress.total || 0)}
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y bg-[var(--color-bg-panel)]">

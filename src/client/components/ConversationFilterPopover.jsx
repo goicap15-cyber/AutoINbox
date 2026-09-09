@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Archive, BellRing, Check, CircleDot, Filter, Globe, Mail, MessageCircle, RotateCcw, Tag, User, X } from 'lucide-react';
+import { Archive, BellRing, Check, ChevronDown, CircleDot, Filter, Globe, Mail, MessageCircle, RotateCcw, Tag, User, X } from 'lucide-react';
 import ConversationFilterRuleBuilder from './ConversationFilterRuleBuilder.jsx';
 import {
   SOURCE_TYPE_KEYS,
@@ -38,13 +38,14 @@ function FilterSection({ title, icon: Icon, children }) {
   </section>;
 }
 
-export default function ConversationFilterPopover({ isOpen, appliedFilters, inboxSources = [], leadStatuses = [], tagOptions = [], onApply, onClose, openerRef }) {
+export default function ConversationFilterPopover({ isOpen, appliedFilters, inboxSources = [], accounts = [], leadStatuses = [], tagOptions = [], onApply, onClose, openerRef }) {
   const [draftFilters, setDraftFilters] = useState(() => normalizeFilters(appliedFilters));
   const [validationMessage, setValidationMessage] = useState('');
+  const [expandedSourceGroup, setExpandedSourceGroup] = useState(null); // 'personal' | 'page' | null
   const popoverRef = useRef(null);
 
   useEffect(() => {
-    if (isOpen) { setDraftFilters(normalizeFilters(cloneFilters(appliedFilters))); setValidationMessage(''); }
+    if (isOpen) { setDraftFilters(normalizeFilters(cloneFilters(appliedFilters))); setValidationMessage(''); setExpandedSourceGroup(null); }
   }, [isOpen, appliedFilters]);
 
   useEffect(() => {
@@ -70,7 +71,7 @@ export default function ConversationFilterPopover({ isOpen, appliedFilters, inbo
   const invalidRuleCount = (draftFilters.rules || []).filter((rule) => !isManualRuleComplete(rule)).length;
   const handleApply = () => {
     if (invalidRuleCount) { setValidationMessage('Hoàn thiện hoặc xóa điều kiện tự nhập trước khi áp dụng.'); return; }
-    onApply?.(sanitizeFilters(draftFilters, inboxSources, leadStatuses));
+    onApply?.(sanitizeFilters(draftFilters, inboxSources, leadStatuses, accounts));
     onClose?.();
     openerRef?.current?.focus();
   };
@@ -85,7 +86,58 @@ export default function ConversationFilterPopover({ isOpen, appliedFilters, inbo
     <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3.5">
       <FilterSection title="Bộ lọc nhanh" icon={Filter}><div className="flex flex-wrap gap-1.5">{QUICK_OPTIONS.map(({ value, label, icon: Icon }) => <ToggleOption key={value} selected={draftFilters.quickFilters.includes(value)} onClick={() => setDraftFilters((current) => toggleQuickFilter(current, value))}><Icon size={12} />{label}</ToggleOption>)}</div></FilterSection>
       <FilterSection title="Phạm vi" icon={Archive}><div className="grid grid-cols-3 gap-1">{[{ value: 'inbox', label: 'Inbox' }, { value: 'archived', label: 'Đã lưu' }, { value: 'all', label: 'Tất cả' }].map((option) => <ToggleOption key={option.value} selected={draftFilters.archiveScope === option.value} onClick={() => changeSingle('archiveScope', option.value)} className="justify-center">{option.label}</ToggleOption>)}</div></FilterSection>
-      <FilterSection title="Nguồn hội thoại" icon={Globe}><div className="grid grid-cols-2 gap-1.5">{sourceTypes.includes(SOURCE_TYPE_KEYS.PERSONAL) && <ToggleOption selected={draftFilters.sourceKeys.includes(SOURCE_TYPE_KEYS.PERSONAL)} onClick={() => toggle('sourceKeys', SOURCE_TYPE_KEYS.PERSONAL)}><User size={12} />Messenger cá nhân</ToggleOption>}{sourceTypes.includes(SOURCE_TYPE_KEYS.PAGE) && <ToggleOption selected={draftFilters.sourceKeys.includes(SOURCE_TYPE_KEYS.PAGE)} onClick={() => toggle('sourceKeys', SOURCE_TYPE_KEYS.PAGE)}><MessageCircle size={12} />Facebook Page</ToggleOption>}{inboxSources.map((source) => <ToggleOption key={source.id} selected={draftFilters.sourceKeys.includes('source:' + source.id)} onClick={() => toggle('sourceKeys', 'source:' + source.id)} className="col-span-2"><span className="truncate">{source.display_name || source.name || source.external_id || 'Nguồn hội thoại'}</span></ToggleOption>)}</div></FilterSection>
+      <FilterSection title="Nguồn hội thoại" icon={Globe}>
+        {(() => {
+          const personalKeys = draftFilters.sourceKeys.filter((key) => key === SOURCE_TYPE_KEYS.PERSONAL || key.startsWith('account:'));
+          const pageKeys = draftFilters.sourceKeys.filter((key) => key === SOURCE_TYPE_KEYS.PAGE || key.startsWith('source:'));
+          const pageSources = inboxSources.filter((s) => s && s.source_type === 'page_messenger');
+          const personalAccounts = accounts.filter((account) => account?.id != null);
+          return <div className="space-y-1.5">
+            <div className="grid grid-cols-2 gap-1.5">
+              <ToggleOption
+                selected={expandedSourceGroup === 'personal'}
+                onClick={() => setExpandedSourceGroup((current) => (current === 'personal' ? null : 'personal'))}
+              >
+                <User size={12} />Cá nhân{personalKeys.length > 0 ? ` (${personalKeys.length})` : ''}
+                <ChevronDown size={12} className={'ml-auto transition-transform ' + (expandedSourceGroup === 'personal' ? 'rotate-180' : '')} />
+              </ToggleOption>
+              <ToggleOption
+                selected={expandedSourceGroup === 'page'}
+                onClick={() => setExpandedSourceGroup((current) => (current === 'page' ? null : 'page'))}
+              >
+                <MessageCircle size={12} />Fanpage{pageKeys.length > 0 ? ` (${pageKeys.length})` : ''}
+                <ChevronDown size={12} className={'ml-auto transition-transform ' + (expandedSourceGroup === 'page' ? 'rotate-180' : '')} />
+              </ToggleOption>
+            </div>
+            {expandedSourceGroup === 'personal' && (
+              <div className="space-y-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-1.5">
+                <ToggleOption selected={draftFilters.sourceKeys.includes(SOURCE_TYPE_KEYS.PERSONAL)} onClick={() => toggle('sourceKeys', SOURCE_TYPE_KEYS.PERSONAL)} className="w-full">
+                  <User size={12} />Tất cả tài khoản cá nhân
+                </ToggleOption>
+                {personalAccounts.length === 0 && <p className="px-2 py-1 text-[11px] text-[var(--color-text-muted)]">Chưa có tài khoản cá nhân nào.</p>}
+                {personalAccounts.map((account) => (
+                  <ToggleOption key={'account:' + account.id} selected={draftFilters.sourceKeys.includes('account:' + account.id)} onClick={() => toggle('sourceKeys', 'account:' + account.id)} className="w-full">
+                    <User size={11} /><span className="truncate">{account.name || account.id}</span>
+                  </ToggleOption>
+                ))}
+              </div>
+            )}
+            {expandedSourceGroup === 'page' && (
+              <div className="space-y-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-1.5">
+                <ToggleOption selected={draftFilters.sourceKeys.includes(SOURCE_TYPE_KEYS.PAGE)} onClick={() => toggle('sourceKeys', SOURCE_TYPE_KEYS.PAGE)} className="w-full">
+                  <MessageCircle size={12} />Tất cả Fanpage
+                </ToggleOption>
+                {pageSources.length === 0 && <p className="px-2 py-1 text-[11px] text-[var(--color-text-muted)]">Chưa có Fanpage nào kết nối.</p>}
+                {pageSources.map((source) => (
+                  <ToggleOption key={source.id} selected={draftFilters.sourceKeys.includes('source:' + source.id)} onClick={() => toggle('sourceKeys', 'source:' + source.id)} className="w-full">
+                    <span className="truncate">{source.display_name || source.name || source.external_id || 'Nguồn hội thoại'}</span>
+                  </ToggleOption>
+                ))}
+              </div>
+            )}
+          </div>;
+        })()}
+      </FilterSection>
       <FilterSection title="Trạng thái xử lý" icon={CircleDot}><div className="grid grid-cols-3 gap-1">{WORKFLOW_OPTIONS.map((option) => <ToggleOption key={option.value} selected={draftFilters.workflowStates.includes(option.value)} onClick={() => toggle('workflowStates', option.value)} className="justify-center"><span className={'h-2 w-2 rounded-full ' + option.color} />{option.label}</ToggleOption>)}</div></FilterSection>
       {leadStatuses.length > 0 && <FilterSection title="Trạng thái khách hàng" icon={CircleDot}><div className="flex flex-wrap gap-1.5">{leadStatuses.map((status) => <ToggleOption key={status.id} selected={draftFilters.statusIds.includes(String(status.id))} onClick={() => toggle('statusIds', String(status.id))}><span className="h-2 w-2 rounded-full" style={{ backgroundColor: status.color || 'var(--color-accent)' }} />{status.name}</ToggleOption>)}</div></FilterSection>}
       <FilterSection title="Nhãn" icon={Tag}><div className="flex flex-wrap gap-1.5">{tagOptions.length ? tagOptions.map((tag) => <ToggleOption key={tag.value} selected={draftFilters.tagNames.includes(tag.value)} onClick={() => toggle('tagNames', tag.value)}><Tag size={11} />{tag.label}</ToggleOption>) : <p className="text-[11px] text-[var(--color-text-muted)]">Chưa có nhãn trong danh sách.</p>}</div></FilterSection>

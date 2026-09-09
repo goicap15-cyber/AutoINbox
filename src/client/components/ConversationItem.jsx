@@ -23,8 +23,8 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
   const source = inboxSources.find((item) => String(item.id) === String(thread.source_id));
   const isOnline = account ? account.is_extension_connected !== false : true;
   const unreadCount = Number(thread.unread_count || (thread.is_unread ? 1 : 0));
-  const avatarColor = pickAvatarColor(thread.id || thread.contact_name);
-  const title = thread.contact_name || thread.name || 'Khách hàng';
+  const avatarColor = pickAvatarColor(thread.id || thread.nickname || thread.contact_name);
+  const title = thread.nickname || thread.contact_name || thread.name || 'Khách hàng';
   const preview = thread.last_message || 'Chưa có tin nhắn';
   const showAccountName = accounts.length > 1;
   const accountName = account ? (account.name || account.id) : (thread.account_id || 'Facebook');

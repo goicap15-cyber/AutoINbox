@@ -31,7 +31,7 @@ class OutboundConfirmationService {
       'FROM outbound_attempts a JOIN messages m ON m.id = a.message_id ' +
       'LEFT JOIN outbound_attachments oa ON oa.id = a.attachment_id ' +
       "WHERE m.thread_id = ? AND m.is_outgoing = 1 AND m.delivery_status = 'pending' " +
-      "AND a.status IN ('dispatching', 'awaiting_confirmation')"
+      "AND a.status IN ('queued', 'dispatching', 'awaiting_confirmation')"
     ).all(threadId);
 
     const candidates = rows.filter((row) => {
@@ -39,8 +39,8 @@ class OutboundConfirmationService {
       if (!Number.isFinite(dispatchTime) || Math.abs(observedTime - dispatchTime) > windowMs) {
         return false;
       }
-      if (row.attachment_id && row.attachment_media_type !== mediaType) return false;
-      if (!row.attachment_id && mediaType !== 'text') return false;
+      if (row.attachment_id && row.attachment_media_type !== mediaType && mediaType !== 'text') return false;
+      if (!row.attachment_id && mediaType !== 'text' && row.message_media_type !== mediaType) return false;
       const expectedText = String(row.content || '').trim();
       const observedText = String(content || '').trim();
       if (expectedText && observedText && expectedText !== observedText) return false;

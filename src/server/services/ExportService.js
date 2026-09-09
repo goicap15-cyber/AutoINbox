@@ -2,8 +2,9 @@ const ExcelJS = require('exceljs');
 const path = require('path');
 const fs = require('fs');
 const db = require('../database/db');
+const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 
-const EXPORT_DIR = path.join(__dirname, '../../../data/exports');
+const EXPORT_DIR = path.join(APP_DATA_ROOT, 'exports');
 if (!fs.existsSync(EXPORT_DIR)) {
   fs.mkdirSync(EXPORT_DIR, { recursive: true });
 }

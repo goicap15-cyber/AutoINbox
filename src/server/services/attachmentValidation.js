@@ -15,6 +15,13 @@ const SAFE_FILE_EXTENSIONS = Object.freeze({
 const EXECUTABLE_EXTENSIONS = new Set(['.exe', '.dll', '.com', '.bat', '.cmd', '.msi', '.scr', '.ps1', '.vbs', '.js', '.jse', '.jar', '.sh', '.bin']);
 const ZIP_CONTAINER_MIMES = new Set(['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.android.package-archive']);
 
+const FILE_MIME_CAPABILITIES = Object.fromEntries(
+  Object.entries(SAFE_FILE_EXTENSIONS).map(([extension, mimeType]) => [mimeType, Object.freeze({
+    extension,
+    extensions: Object.freeze(Object.entries(SAFE_FILE_EXTENSIONS).filter(([, value]) => value === mimeType).map(([key]) => key)),
+    mediaType: 'file'
+  })])
+);
 const MIME_CAPABILITIES = Object.freeze({
   'image/jpeg': Object.freeze({
     extension: '.jpg',
@@ -35,7 +42,8 @@ const MIME_CAPABILITIES = Object.freeze({
     extension: '.pdf',
     extensions: Object.freeze(['.pdf']),
     mediaType: 'file'
-  })
+  }),
+  ...FILE_MIME_CAPABILITIES
 });
 
 class AttachmentValidationError extends Error {
@@ -273,7 +281,14 @@ function validateAttachment({
     throw new AttachmentValidationError('ATTACHMENT_EXECUTABLE_RISK', 'Executable file types are not allowed.', { extension: originalExtension });
   }
   const compatibleContainer = detectedMimeType === 'application/zip' && ZIP_CONTAINER_MIMES.has(normalizedDeclared);
-  const effectiveMimeType = (compatibleContainer ? normalizedDeclared : detectedMimeType) || (allowAnyFile ? (normalizedDeclared || SAFE_FILE_EXTENSIONS[originalExtension] || 'application/octet-stream') : null);
+  const extensionMimeType = SAFE_FILE_EXTENSIONS[originalExtension] || null;
+  // Browsers/Windows frequently report an empty or vendor-specific MIME for
+  // ordinary documents. The allow-list is anchored to the sanitized file
+  // extension; known byte signatures still win and are mismatch-checked.
+  const declaredSafeFile = extensionMimeType && !detectedMimeType;
+  const effectiveMimeType = (compatibleContainer ? normalizedDeclared : detectedMimeType) ||
+    (declaredSafeFile ? extensionMimeType : null) ||
+    (allowAnyFile ? (normalizedDeclared || extensionMimeType || 'application/octet-stream') : null);
   if (!effectiveMimeType) {
     throw new AttachmentValidationError(
       'ATTACHMENT_UNSUPPORTED',

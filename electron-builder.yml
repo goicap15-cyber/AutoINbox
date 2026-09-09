@@ -7,12 +7,20 @@ directories:
   buildResources: build
   output: release
 
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "node_modules/better-sqlite3/build/**/*"
+
 # ─── Files to bundle ───────────────────────────────────────────────────
 files:
   - dist/server/**/*
   - dist/client/**/*
   - dist/extension/**/*
+  - chrome-bundling/resolveChromePath.js
+  - .env
   - src/electron.js
+  - src/preload.js
   - data/.gitkeep
   - node_modules/**/*
   - package.json
@@ -20,13 +28,14 @@ files:
   - "!**/*.map"
   - "!**/*.md"
   - "!scripts/**/*"
-  - "!*.log"
+  - "!node_modules/better-sqlite3/prebuilds/**"
+  - "!node_modules/emoji-picker-react/**"
+  - "!node_modules/react/**"
+  - "!node_modules/react-dom/**"
+  - "!node_modules/react-colorful/**"
 
-# ─── Extra Resources (Chrome Portable + Extension) ─────────────────────
+# ─── Extra Resources (Extension - shared by every OS target) ───────────
 extraResources:
-  - from: bin/chrome-win
-    to: bin/chrome-win
-    filter: "**/*"
   - from: dist/extension
     to: extension
 
@@ -35,32 +44,63 @@ win:
   target:
     - target: nsis
       arch: [x64]
-  icon: build/icon.ico
+  # Spec 046: bin/chrome-win/ is fetched locally via
+  # `npm run fetch-chrome:win` (never committed - see .gitignore) before
+  # running electron-builder. Scoped to win: specifically (not the shared
+  # top-level extraResources) so building for one OS never fails just
+  # because another OS's Chrome bundle hasn't been fetched on this machine.
+  extraResources:
+    - from: bin/chrome-win
+      to: bin/chrome-win
+      filter: "**/*"
 
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
-  installerIcon: build/icon.ico
-  uninstallerIcon: build/icon.ico
-  installerHeaderIcon: build/icon.ico
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: FB Messenger CRM
-  include: build/installer.nsh   # optional custom NSIS script
 
 # ─── Linux AppImage (dev testing) ──────────────────────────────────────
 linux:
   target: AppImage
   icon: build/icon.png
   category: Office
+  # Spec 046: bin/chrome-linux/ via `npm run fetch-chrome:linux`. Scoped
+  # here, same reasoning as win.extraResources above.
+  extraResources:
+    - from: bin/chrome-linux
+      to: bin/chrome-linux
+      filter: "**/*"
 
 # ─── Mac DMG (optional) ────────────────────────────────────────────────
 mac:
   target: dmg
   icon: build/icon.icns
   darkModeSupport: true
+  # Spec 046: bin/chrome-mac/ via `npm run fetch-chrome:mac`. Scoped here,
+  # same reasoning as win.extraResources above.
+  extraResources:
+    - from: bin/chrome-mac
+      to: bin/chrome-mac
+      filter: "**/*"
 
 # ─── App metadata ──────────────────────────────────────────────────────
 compression: maximum
 removePackageScripts: true
 nodeGypRebuild: false
+npmRebuild: false
+# better-sqlite3 ships a prebuilt binary and its own binding.gyp SKIPS real
+# compilation whenever one is present for the host platform+arch, regardless
+# of which Node ABI it was built for (its lib/binding.js prebuild lookup has
+# no ABI check at all) - so electron-builder's own default rebuild step (and
+# `buildDependenciesFromSource: true`, tried and confirmed ineffective for
+# this specific package) silently produce nothing, and the packaged app
+# segfaulted on `new Database(...)` (dev-installed prebuild is built for the
+# system Node's ABI, not Electron's - live-reproduced + isolated with a
+# minimal repro outside this codebase, 2026-08-20). npmRebuild disables
+# electron-builder's own no-op rebuild step entirely; the REAL fix is
+# scripts/rebuild-native-for-electron.js, run explicitly around this command
+# (see package.json's dist:* scripts) - it hides the prebuild so
+# better-sqlite3 falls through to a real from-source build, then restores it
+# afterward so dev mode (`npm start`, system Node ABI) keeps working.

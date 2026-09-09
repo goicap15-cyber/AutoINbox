@@ -38,12 +38,13 @@ class AssignmentManager {
   }
 
   // Lấy danh sách hội thoại theo tab/filter
-  getThreadsByFilter(userId, role, tab = 'ALL', sourceFilter = 'all') {
+  getThreadsByFilter(userId, role, tab = 'ALL', sourceFilter = 'all', companyId = userId, companyRole = 'EMPLOYEE', username = '') {
     let query = `
-      SELECT t.*, c.phone, c.email, c.address, c.tags, c.lead_captured, c.avatar_url,
+      SELECT t.*, c.nickname, c.phone, c.email, c.address, c.tags, c.lead_captured, c.avatar_url,
         s.source_type, s.display_name AS source_name, s.status AS source_status, s.external_id AS source_external_id,
         c.status_id, ls.name AS status_name, ls.color AS status_color, r.due_at AS reminder_due_at, r.note AS reminder_note, r.status AS reminder_status
       FROM threads t
+      JOIN accounts a ON a.id = t.account_id
       LEFT JOIN contacts c ON c.thread_id = t.id
       LEFT JOIN inbox_sources s ON s.id = t.source_id
       LEFT JOIN lead_statuses ls ON ls.id = c.status_id
@@ -52,19 +53,36 @@ class AssignmentManager {
     const params = [];
     const where = [];
 
-    if (tab === 'ASSIGNED') {
-      where.push('t.status = ? AND t.assigned_user_id = ?');
-      params.push('ASSIGNED', userId);
-    } else if (tab === 'UNPROCESSED') {
-      where.push('t.status = ?');
-      params.push('UNPROCESSED');
-    } else if (tab === 'COMPLETED') {
-      where.push('t.status = ?');
-      params.push('COMPLETED');
-    } else if (role !== 'ADMIN') {
-      // Tab ALL: staff chỉ thấy thread của mình + chưa xử lý; admin thấy tất cả
-      where.push('(t.assigned_user_id = ? OR t.status = ?)');
-      params.push(userId, 'UNPROCESSED');
+    if (role !== 'ADMIN') {
+      where.push('a.company_id = ?');
+      params.push(companyId);
+      if (companyRole !== 'ADMIN') {
+        where.push('EXISTS (SELECT 1 FROM account_user_assignments aua WHERE aua.account_id=a.id AND aua.user_id=?)');
+        params.push(userId);
+      }
+    }
+
+    if (tab === 'WAITING') {
+      where.push("COALESCE(t.inbox_folder, 'INBOX') IN ('MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')");
+      where.push('t.archived_at IS NULL');
+    } else {
+      // Every normal CRM view is the accepted inbox only. Message requests
+      // remain exclusively in WAITING until an outgoing reply promotes them.
+      where.push("COALESCE(t.inbox_folder, 'INBOX') = 'INBOX'");
+      if (tab === 'ASSIGNED') {
+        where.push('t.status = ? AND t.assigned_user_id = ?');
+        params.push('ASSIGNED', userId);
+      } else if (tab === 'UNPROCESSED') {
+        where.push('t.status = ?');
+        params.push('UNPROCESSED');
+      } else if (tab === 'COMPLETED') {
+        where.push('t.status = ?');
+        params.push('COMPLETED');
+      } else if (companyRole !== 'ADMIN' && role !== 'ADMIN') {
+        // Tab ALL: staff chỉ thấy thread của mình + chưa xử lý; admin thấy tất cả
+        where.push('(t.assigned_user_id = ? OR t.status = ?)');
+        params.push(userId, 'UNPROCESSED');
+      }
     }
 
     if (sourceFilter && sourceFilter !== 'all' && sourceFilter !== 'ALL') {

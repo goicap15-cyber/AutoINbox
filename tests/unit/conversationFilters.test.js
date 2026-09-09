@@ -80,14 +80,27 @@ describe('conversationFilters.js pure utility', () => {
       });
     });
 
-    test('drops a source type that is no longer represented by any source', () => {
+    test('always retains core source type keys (PERSONAL and PAGE) regardless of available sources', () => {
+      // type:personal_messenger and type:page_messenger are core selectors that are always valid.
+      // They should never be stripped by sanitizeFilters even if no inbox_sources row matches.
       const sanitized = sanitizeFilters(
         { sourceKeys: [SOURCE_TYPE_KEYS.PERSONAL, SOURCE_TYPE_KEYS.PAGE, SOURCE_TYPE_KEYS.PAGE], statusIds: [] },
         [{ id: 'personal-1', source_type: 'personal_messenger' }],
         []
       );
 
-      assert.deepEqual(sanitized, { sourceKeys: [SOURCE_TYPE_KEYS.PERSONAL], statusIds: [] });
+      assert.deepEqual(sanitized, { sourceKeys: [SOURCE_TYPE_KEYS.PERSONAL, SOURCE_TYPE_KEYS.PAGE], statusIds: [] });
+    });
+
+    test('spec 044: drops account: key once the account is removed, mirroring source: keys for Pages', () => {
+      const filters = {
+        sourceKeys: ['account:acc-1', 'account:acc-removed'],
+        statusIds: []
+      };
+      const availableAccounts = [{ id: 'acc-1', name: 'Nguyễn Văn A' }];
+
+      const sanitized = sanitizeFilters(filters, [], [], availableAccounts);
+      assert.deepEqual(sanitized, { sourceKeys: ['account:acc-1'], statusIds: [] });
     });
   });
 
@@ -117,6 +130,17 @@ describe('conversationFilters.js pure utility', () => {
       assert.equal(matchesConversationFilters(threadPageA, filterPage100), true);
       assert.equal(matchesConversationFilters(threadPageB, filterPage100), false);
       assert.equal(matchesConversationFilters(threadPersonal, filterPage100), false);
+    });
+
+    test('spec 044: filters by specific personal account ID', () => {
+      const threadAccountA = { id: 't4', source_type: 'personal_messenger', account_id: 'acc-a', status_id: 1 };
+      const threadAccountB = { id: 't5', source_type: 'personal_messenger', account_id: 'acc-b', status_id: 1 };
+      const filterAccountA = { sourceKeys: ['account:acc-a'], statusIds: [] };
+
+      assert.equal(matchesConversationFilters(threadAccountA, filterAccountA), true);
+      assert.equal(matchesConversationFilters(threadAccountB, filterAccountA), false);
+      // A page thread never matches an account: key even if IDs happened to collide.
+      assert.equal(matchesConversationFilters(threadPageA, { sourceKeys: ['account:acc-1'], statusIds: [] }), false);
     });
 
     test('OR matching within source group', () => {
