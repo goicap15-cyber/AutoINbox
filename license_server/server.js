@@ -240,11 +240,13 @@ app.post('/api/sepay/webhook', async (req, res) => {
     console.log('[SePay Webhook Received]:', JSON.stringify(payload));
 
     // SePay gửi payload dạng: { transferAmount: 198000, content: "FB889234 CHUYEN TIEN", ... }
-    const content = payload.content || payload.description || '';
-    const transferAmount = parseFloat(payload.transferAmount || payload.amount || 0);
+    const content = [payload.content, payload.description, payload.referenceCode, payload.transactionContent]
+      .filter(Boolean).join(' ');
+    const rawAmount = payload.transferAmount ?? payload.amount ?? payload.transfer_amount ?? payload.creditAmount ?? 0;
+    const transferAmount = Number(String(rawAmount).replace(/[^0-9.-]/g, ''));
 
     // Tìm mã đơn hàng FBXXXXXX trong nội dung chuyển khoản
-    const match = content.match(/FB\d{6}/i);
+    const match = String(content).replace(/\s+/g, '').match(/FB\d{6}/i);
 
     if (!match) {
       console.log('[SePay Webhook] Không tìm thấy mã đơn FBxxxxxx trong nội dung:', content);

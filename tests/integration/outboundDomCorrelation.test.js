@@ -185,3 +185,87 @@ test('isMediaConfirmationEvent treats media evidence as a confirmation even with
     false
   );
 });
+
+test('matches a temporary numeric outbound id to a later official mid by Messenger timestamp', () => withDatabase((db) => {
+  db.prepare('INSERT OR IGNORE INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-upgrade', 'Test', '/tmp/test');
+  db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
+    .run('thread-upgrade', 'thread-upgrade', 'acct-upgrade', 'Khach hang');
+  db.prepare(`INSERT INTO messages
+    (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, is_outgoing, delivery_status, timestamp_ms, created_at)
+    VALUES ('thread-upgrade', '7503047504317053640', 'client_one', 'acct-upgrade', 'same text', 'text', 1, 'sent', 100000, datetime('now', '-30 seconds'))`).run();
+
+  const match = OutboundDomCorrelationService.findTemporaryIdUpgrade(db, 'thread-upgrade', {
+    fb_message_id: 'mid.$OFFICIAL', content: 'same text', media_type: 'text', timestamp_ms: 100000
+  }, false);
+  assert.ok(match);
+  assert.equal(match.client_message_id, 'client_one');
+}));
+
+test('collapses stored numeric and official ids for the same outbound text', () => withDatabase((db) => {
+  db.prepare('INSERT OR IGNORE INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-collapse', 'Test', '/tmp/test');
+  db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
+    .run('thread-collapse', 'thread-collapse', 'acct-collapse', 'Khach hang');
+  db.prepare(`INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, is_outgoing, delivery_status, timestamp_ms)
+    VALUES ('thread-collapse', '7503047504317053640', 'client_one', 'acct-collapse', 'same text', 'text', 1, 'sent', 100000)`).run();
+  db.prepare(`INSERT INTO messages (thread_id, fb_message_id, sender_id, content, media_type, is_outgoing, delivery_status, timestamp_ms)
+    VALUES ('thread-collapse', 'mid.$OFFICIAL', 'acct-collapse', 'same text', 'text', 1, 'sent', 100000)`).run();
+
+  assert.equal(OutboundDomCorrelationService.collapseStoredTemporaryIdUpgrades(db, 'thread-collapse'), 1);
+  const rows = db.prepare('SELECT fb_message_id, client_message_id FROM messages WHERE thread_id = ?').all('thread-collapse');
+  assert.deepEqual(rows, [{ fb_message_id: 'mid.$OFFICIAL', client_message_id: 'client_one' }]);
+}));
+
+test('merges a Messenger _media companion into its caption/base row', () => withDatabase((db) => {
+  db.prepare('INSERT OR IGNORE INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-media', 'Test', '/tmp/test');
+  db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
+    .run('thread-media', 'thread-media', 'acct-media', 'Khach hang');
+  db.prepare(`INSERT INTO messages
+    (thread_id, fb_message_id, sender_id, content, media_type, is_outgoing, delivery_status)
+    VALUES ('thread-media', 'mid.$ONE', 'acct-media', 'caption', 'text', 1, 'sent')`).run();
+
+  const merged = OutboundDomCorrelationService.mergeMediaCompanion(db, 'thread-media', {
+    fb_message_id: 'mid.$ONE_media', media_type: 'image', media_url: 'https://example.test/image.jpg'
+  }, true);
+
+  assert.ok(merged);
+  assert.equal(merged.fb_message_id, 'mid.$ONE');
+  assert.equal(merged.content, 'caption');
+  assert.equal(merged.media_type, 'image');
+  assert.equal(merged.media_url, 'https://example.test/image.jpg');
+  assert.equal(db.prepare('SELECT COUNT(*) AS total FROM messages WHERE thread_id = ?').get('thread-media').total, 1);
+}));
+
+test('merges an official media companion into the existing temporary attachment row', () => withDatabase((db) => {
+  db.prepare('INSERT OR IGNORE INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-temp-media', 'Test', '/tmp/test');
+  db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
+    .run('thread-temp-media', 'thread-temp-media', 'acct-temp-media', 'Khach hang');
+  db.prepare(`INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, media_url, is_outgoing, delivery_status, timestamp_ms)
+    VALUES ('thread-temp-media', '7503000', 'client-img', 'acct-temp-media', '', 'image', '/api/local', 1, 'sent', 137000)`).run();
+  db.prepare(`INSERT INTO messages (thread_id, fb_message_id, sender_id, content, media_type, is_outgoing, delivery_status, timestamp_ms)
+    VALUES ('thread-temp-media', 'mid.$IMG', 'acct-temp-media', '57', 'text', 1, 'sent', 100002)`).run();
+
+  const merged = OutboundDomCorrelationService.mergeMediaCompanion(db, 'thread-temp-media', {
+    fb_message_id: 'mid.$IMG_media', content: '', media_type: 'image', media_url: 'https://facebook/image.jpg',
+    timestamp_ms: 100001, timestamp_source: 'dom_order'
+  }, true);
+  assert.ok(merged);
+  assert.equal(merged.client_message_id, 'client-img');
+  assert.equal(merged.fb_message_id, 'mid.$IMG');
+  assert.equal(db.prepare('SELECT COUNT(*) total FROM messages WHERE thread_id = ?').get('thread-temp-media').total, 1);
+}));
+
+test('collapses media companion rows already stored in the database', () => withDatabase((db) => {
+  db.prepare('INSERT OR IGNORE INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-old-media', 'Test', '/tmp/test');
+  db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
+    .run('thread-old-media', 'thread-old-media', 'acct-old-media', 'Khach hang');
+  db.prepare(`INSERT INTO messages
+    (thread_id, fb_message_id, sender_id, content, media_type, is_outgoing, delivery_status)
+    VALUES ('thread-old-media', 'mid.$OLD', 'acct-old-media', 'caption', 'text', 1, 'sent')`).run();
+  db.prepare(`INSERT INTO messages
+    (thread_id, fb_message_id, sender_id, content, media_type, media_url, is_outgoing, delivery_status)
+    VALUES ('thread-old-media', 'mid.$OLD_media', 'acct-old-media', '', 'image', 'https://example.test/old.jpg', 1, 'sent')`).run();
+
+  assert.equal(OutboundDomCorrelationService.collapseStoredMediaCompanions(db, 'thread-old-media'), 1);
+  const rows = db.prepare('SELECT fb_message_id, content, media_type, media_url FROM messages WHERE thread_id = ?').all('thread-old-media');
+  assert.deepEqual(rows, [{ fb_message_id: 'mid.$OLD', content: 'caption', media_type: 'image', media_url: 'https://example.test/old.jpg' }]);
+}));

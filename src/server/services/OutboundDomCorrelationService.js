@@ -15,6 +15,116 @@ function updateQueueStatusFromClientMessage(clientMessageId, status, errorReason
 }
 
 class OutboundDomCorrelationService {
+  static findTemporaryIdUpgrade(database, threadId, message, isMedia = false) {
+    if (!message?.fb_message_id) return null;
+    const observedTimestamp = Number(message.timestamp_ms) || Date.parse(message.created_at || '') || Date.now();
+    const mediaClause = isMedia
+      ? `(attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))`
+      : `COALESCE(content, '') = COALESCE(?, '') AND attachment_id IS NULL AND (media_type IS NULL OR media_type = 'text')`;
+    const params = isMedia
+      ? [threadId, message.fb_message_id, observedTimestamp, observedTimestamp, observedTimestamp, observedTimestamp]
+      : [threadId, message.fb_message_id, message.content || '', observedTimestamp, observedTimestamp, observedTimestamp, observedTimestamp];
+    return database.prepare(`
+      SELECT id, client_message_id, fb_message_id, timestamp_ms
+      FROM messages
+      WHERE thread_id = ? AND is_outgoing = 1 AND delivery_status = 'sent'
+        AND fb_message_id IS NOT NULL AND fb_message_id != ?
+        AND fb_message_id NOT LIKE 'mid.%'
+        AND ${mediaClause}
+        AND ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) <= 90000
+      ORDER BY ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) ASC, id DESC
+      LIMIT 1
+    `).get(...params);
+  }
+
+  static collapseStoredTemporaryIdUpgrades(database, threadId) {
+    const officialRows = database.prepare(`
+      SELECT * FROM messages WHERE thread_id = ? AND is_outgoing = 1 AND fb_message_id LIKE 'mid.%' ORDER BY id ASC
+    `).all(threadId);
+    let collapsed = 0;
+    for (const official of officialRows) {
+      const temporary = this.findTemporaryIdUpgrade(database, threadId, official, this.isMediaConfirmationEvent(official));
+      if (!temporary) continue;
+      database.prepare('DELETE FROM messages WHERE id = ?').run(official.id);
+      database.prepare(`
+        UPDATE messages SET fb_message_id = ?, media_type = COALESCE(?, media_type),
+          media_url = COALESCE(?, media_url), local_media_path = COALESCE(?, local_media_path),
+          timestamp_ms = CASE WHEN ? > 0 THEN ? ELSE timestamp_ms END,
+          timestamp_source = COALESCE(?, timestamp_source) WHERE id = ?
+      `).run(official.fb_message_id, official.media_type, official.media_url, official.local_media_path,
+        Number(official.timestamp_ms) || 0, Number(official.timestamp_ms) || 0, official.timestamp_source, temporary.id);
+      collapsed += 1;
+    }
+    return collapsed;
+  }
+
+  static mediaParentMessageId(fbMessageId) {
+    const value = String(fbMessageId || '');
+    return value.endsWith('_media') ? value.slice(0, -'_media'.length) : null;
+  }
+
+  static mergeMediaCompanion(database, threadId, message, isOutgoing) {
+    const parentFbMessageId = this.mediaParentMessageId(message?.fb_message_id);
+    if (!parentFbMessageId) return null;
+    const parent = database.prepare(`
+      SELECT * FROM messages
+      WHERE thread_id = ? AND fb_message_id = ? AND is_outgoing = ?
+      LIMIT 1
+    `).get(threadId, parentFbMessageId, isOutgoing ? 1 : 0);
+
+    // For our own send, Facebook emits a text/base row plus a _media row,
+    // while CRM already owns a temporary attachment row. Upgrade that durable
+    // CRM row first; otherwise merging into the Facebook base leaves two images.
+    if (isOutgoing) {
+      const temporary = this.findTemporaryIdUpgrade(database, threadId, {
+        ...message, fb_message_id: parentFbMessageId
+      }, true);
+      if (temporary) {
+        if (parent && parent.id !== temporary.id) database.prepare('DELETE FROM messages WHERE id = ?').run(parent.id);
+        database.prepare(`
+          UPDATE messages SET fb_message_id = ?, media_type = ?,
+            media_url = CASE WHEN attachment_id IS NOT NULL THEN media_url ELSE COALESCE(?, media_url) END,
+            local_media_path = COALESCE(local_media_path, ?),
+            timestamp_ms = CASE WHEN ? > 0 THEN ? ELSE timestamp_ms END,
+            timestamp_source = COALESCE(?, timestamp_source)
+          WHERE id = ?
+        `).run(parentFbMessageId, message.media_type || 'image', message.media_url || null,
+          message.local_media_path || null, Number(message.timestamp_ms) || 0, Number(message.timestamp_ms) || 0,
+          message.timestamp_source || null, temporary.id);
+        return database.prepare('SELECT * FROM messages WHERE id = ?').get(temporary.id);
+      }
+    }
+    if (!parent) return null;
+    database.prepare(`
+      UPDATE messages SET
+        media_type = CASE WHEN ? IS NOT NULL AND ? != 'text' THEN ? ELSE media_type END,
+        media_url = CASE WHEN attachment_id IS NOT NULL THEN media_url ELSE COALESCE(?, media_url) END,
+        local_media_path = COALESCE(?, local_media_path)
+      WHERE id = ?
+    `).run(message.media_type || null, message.media_type || null, message.media_type || null,
+      message.media_url || null, message.local_media_path || null, parent.id);
+    return database.prepare('SELECT * FROM messages WHERE id = ?').get(parent.id);
+  }
+
+  static collapseStoredMediaCompanions(database, threadId) {
+    const companions = database.prepare(`
+      SELECT media.id AS media_id, media.media_type, media.media_url, media.local_media_path,
+             parent.id AS parent_id
+      FROM messages media
+      JOIN messages parent
+        ON parent.thread_id = media.thread_id
+       AND parent.is_outgoing = media.is_outgoing
+       AND parent.fb_message_id = substr(media.fb_message_id, 1, length(media.fb_message_id) - 6)
+      WHERE media.thread_id = ? AND media.fb_message_id LIKE '%_media'
+    `).all(threadId);
+    for (const row of companions) {
+      const media = database.prepare('SELECT * FROM messages WHERE id = ?').get(row.media_id);
+      this.mergeMediaCompanion(database, threadId, media, Boolean(media.is_outgoing));
+      database.prepare('DELETE FROM messages WHERE id = ?').run(row.media_id);
+    }
+    return companions.length;
+  }
+
   /**
    * Spec 040 T020: a DOM-observed event carries real media evidence
    * (media_url, or a media_type other than 'text') regardless of whether a
@@ -122,7 +232,7 @@ class OutboundDomCorrelationService {
     const existingConfirmed = database.prepare('SELECT id, is_outgoing FROM messages WHERE fb_message_id = ?').get(confirmedId);
     if (existingConfirmed) {
       if (existingConfirmed.id === pendingRow.id) {
-        return true;
+        return false;
       }
       if (existingConfirmed.is_outgoing === 0) {
         console.log(`[WS] Removing duplicate misidentified incoming row ${existingConfirmed.id} in favor of pending outbound row ${pendingRow.id}`);

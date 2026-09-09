@@ -409,8 +409,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       const senderRole = await resolveSenderTabRole(sender?.tab);
       const isExplicitIncoming = message.data?.is_outgoing === false || message.data?.is_outgoing === 0;
-      const mayForward = FbCrmMessengerTabRoles.canForwardRealtime(senderRole)
-        || (isExplicitIncoming && FbCrmMessengerTabRoles.canForwardIncomingRealtime?.(senderRole));
+      const isCallLog = /cu\u1ed9c g\u1ecdi|g\u1ecdi tho\u1ea1i|g\u1ecdi video|missed call|voice call|video call/i.test(String(message.data?.content || ''));
+      // History navigation mounts old call rows as if they were newly added
+      // DOM nodes. Never let that surface feed the realtime call scanner: the
+      // canonical history pass below persists those rows with Facebook IDs.
+      const mayForward = isCallLog
+        ? FbCrmMessengerTabRoles.canForwardCallRealtime(senderRole)
+        : (FbCrmMessengerTabRoles.canForwardRealtime(senderRole)
+          || (isExplicitIncoming && FbCrmMessengerTabRoles.canForwardIncomingRealtime?.(senderRole)));
       if (!mayForward) {
         console.log(`[FB Engine] Skip NEW_MESSAGE_FROM_FB from role=${senderRole || 'unregistered'} tab=${sender?.tab?.id || 'unknown'}`);
         return;
@@ -418,7 +424,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       let msgData = message.data;
       const messageThreadKey = String(msgData?.thread_id || '').split(':').pop();
       const recentOutgoingCallAt = recentOutgoingCallThreads.get(messageThreadKey) || 0;
-      const isCallLog = /cuộc gọi|gọi thoại|gọi video|missed call|voice call|video call/i.test(String(msgData?.content || ''));
       if (isCallLog && Date.now() - recentOutgoingCallAt < 5 * 60 * 1000 && msgData?.is_outgoing) {
         console.log(`[FB Engine] Skip duplicate outgoing DOM call log for thread=${messageThreadKey}`);
         return;
@@ -601,9 +606,11 @@ async function assertMessengerRecoveryDialogResolved(tabId) {
   // overlay mounted in a permanent loading-skeleton state and prevents the
   // operator from entering their PIN. While the dialog is visible, fail the
   // automated send safely and let the operator resolve it in Facebook.
-  const state = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => {
+  let state = {};
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    state = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
       const recoveryPattern = /kh\u00f4i ph\u1ee5c|restore (?:chat|message)|m\u00e3 pin|\bpin\b|secure storage/i;
       const visibleDialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"]')]
         .filter((dialog) => {
@@ -612,20 +619,27 @@ async function assertMessengerRecoveryDialogResolved(tabId) {
         });
       const recoveryDialogOpen = visibleDialogs.some((dialog) => {
         const text = `${dialog.innerText || ''} ${dialog.getAttribute('aria-label') || ''}`;
-        if (recoveryPattern.test(text)) return true;
-        return Boolean(dialog.querySelector('input[type="password"], input[inputmode="numeric"], input[autocomplete="one-time-code"]'));
+        return recoveryPattern.test(text);
       });
       const composerAvailable = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
         .some((el) => {
         const rect = el.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
         });
-      return { recoveryDialogOpen, composerAvailable };
-    }
-  }).then((rows) => rows?.[0]?.result || {}).catch(() => ({}));
-  if (state.recoveryDialogOpen || !state.composerAvailable) {
+        return { recoveryDialogOpen, composerAvailable };
+      }
+    }).then((rows) => rows?.[0]?.result || {}).catch(() => ({}));
+    if (state.recoveryDialogOpen || state.composerAvailable) break;
+    await delay(250);
+  }
+  if (state.recoveryDialogOpen) {
     const error = new Error('Messenger recovery dialog is blocking the composer');
     error.code = 'MESSENGER_RECOVERY_DIALOG_BLOCKED';
+    throw error;
+  }
+  if (!state.composerAvailable) {
+    const error = new Error('Messenger composer is not ready');
+    error.code = 'MESSENGER_COMPOSER_NOT_READY';
     throw error;
   }
   return true;
@@ -885,6 +899,8 @@ async function handleSendPersonalMessageWithAttachment({ thread_id, thread_url =
       sendToBackend('SEND_MESSAGE_RESULT', { thread_id, client_message_id, success: false, error: 'Không tìm thấy Tab Facebook hoạt động', error_code: 'FACEBOOK_TAB_NOT_FOUND' });
       return;
     }
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => null);
+    await delay(300);
 
     const recipientPsid = thread_id.includes(':') ? thread_id.split(':')[1] : thread_id;
     const onThread = await ensureTabOnThread(tab, recipientPsid, thread_url, null, null, expected_contact_name);
@@ -3173,10 +3189,14 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     return;
   }
 
-  if (!isPersonalNavigationCurrent(navigationToken)) return;
+  if (!isPersonalNavigationCurrent(navigationToken)) {
+    sendToBackend('THREAD_MESSAGES_SYNCED', { account_id: targetAcc, thread_id, messages: [], reason: 'navigation_superseded', mode, cursor });
+    return;
+  }
   const onTargetThread = await ensureTabOnThread(tab, navigationThreadId, thread_url, page_id, navigationToken, contact_name);
   if (!isPersonalNavigationCurrent(navigationToken)) {
     console.log(`[FB Engine] Bỏ sync thread ${thread_id}: đã có click Messenger cá nhân mới hơn.`);
+    sendToBackend('THREAD_MESSAGES_SYNCED', { account_id: targetAcc, thread_id, messages: [], reason: 'navigation_superseded', mode, cursor });
     return;
   }
   const currentTabThreadId = await getCurrentThreadIdInTab(tab.id);
@@ -3195,6 +3215,17 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
       cursor
     });
     return;
+  }
+
+  // Older Messenger rows are virtualized only while the history tab is
+  // active. Keep the Chrome window fully off-screen, but temporarily activate
+  // this tab so its renderer continues lazy-loading during CRM scroll sync.
+  let previousActiveTabId = null;
+  if (!page_id && ['ondemand_viewport', 'ondemand_older'].includes(mode)) {
+    const [activeTab] = await chrome.tabs.query({ active: true, windowId: tab.windowId }).catch(() => []);
+    if (activeTab?.id && activeTab.id !== tab.id) previousActiveTabId = activeTab.id;
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => null);
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
   try {
@@ -3438,6 +3469,10 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           return text || labels || media ? `fallback_${stringHash(`${text}|${labels}|${media}`)}` : '';
         }
 
+        function historyViewportIdentity(container) {
+          return collectMessageRows(container).map((row) => historyRowIdentity(row)).filter(Boolean).join('||');
+        }
+
         async function forceLoadOlder(container) {
           const scroller = findHistoryScroller(container);
           if (!scroller) return { moved: false, reason: 'no_scroll_container' };
@@ -3489,23 +3524,30 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           // preserving direction; this also prevents tiny trackpad deltas
           // from producing a visually imperceptible crawl.
           const scaledDelta = Math.sign(rawDelta) * Math.max(
-            Math.abs(rawDelta) * 3,
-            Math.min(900, Math.max(420, scroller.clientHeight * 0.85))
+            Math.abs(rawDelta) * 9,
+            Math.min(2700, Math.max(1260, scroller.clientHeight * 2.55))
           );
-          const delta = Math.max(-2800, Math.min(2800, scaledDelta));
+          const delta = Math.max(-7200, Math.min(7200, scaledDelta));
           if (!delta) return { moved: false, reason: 'zero_delta' };
           const beforeTop = scroller.scrollTop;
-          const beforeIdentity = historyRowIdentity(collectMessageRows(container)[0]);
+          const beforeIdentity = historyViewportIdentity(container);
           scroller.focus?.({ preventScroll: true });
-          scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: delta, deltaMode: 0, bubbles: true, cancelable: true }));
-          scroller.scrollBy?.({ top: delta, behavior: 'auto' });
-          scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+          // One CRM gesture intentionally advances Messenger by three wheel
+          // steps. Yield between them so Facebook can mount the intermediate
+          // virtual page instead of jumping past content that was never DOM.
+          const stepDelta = delta / 3;
+          for (let step = 0; step < 3; step++) {
+            scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: stepDelta, deltaMode: 0, bubbles: true, cancelable: true }));
+            scroller.scrollBy?.({ top: stepDelta, behavior: 'auto' });
+            scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+            await new Promise((resolve) => setTimeout(resolve, 160));
+          }
           let stableRounds = 0;
           let lastIdentity = beforeIdentity;
           let lastTop = beforeTop;
           for (let round = 0; round < 24; round++) {
             await new Promise((resolve) => setTimeout(resolve, 100));
-            const identity = historyRowIdentity(collectMessageRows(container)[0]);
+            const identity = historyViewportIdentity(container);
             const top = scroller.scrollTop;
             const loading = !!container.querySelector('svg[aria-label="Loading"], div[role="progressbar"]');
             if (!loading && identity === lastIdentity && top === lastTop) stableRounds += 1;
@@ -3514,7 +3556,11 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             lastTop = top;
             if (stableRounds >= 4) break;
           }
-          return { moved: beforeTop !== scroller.scrollTop || beforeIdentity !== lastIdentity };
+          // A scrollTop change alone is not proof that React finished swapping
+          // the virtual page. Only report success after the complete mounted
+          // row set changed; otherwise the caller would parse the old page and
+          // CRM would appear not to synchronize.
+          return { moved: beforeIdentity !== lastIdentity, scrollMoved: beforeTop !== scroller.scrollTop };
         }
 
         async function loadOlderMessages(container, modeStr) {
@@ -4176,6 +4222,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     const parsedResult = results?.[0]?.result;
     if (!isPersonalNavigationCurrent(navigationToken)) {
       console.log(`[FB Engine] Cancelled stale history result for thread ${thread_id}: a newer conversation owns the history tab.`);
+      sendToBackend('THREAD_MESSAGES_SYNCED', { account_id: targetAcc, thread_id, messages: [], reason: 'navigation_superseded', mode, cursor });
       return { ok: false, cancelled: true };
     }
     const parsedMessages = Array.isArray(parsedResult) ? parsedResult : (parsedResult?.messages || []);
@@ -4245,6 +4292,10 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     console.error('[FB Engine] Lỗi sync thread messages:', err.message);
     sendToBackend('THREAD_MESSAGES_SYNCED', { account_id: targetAcc, thread_id, messages: [], reason: 'timeout' });
     return false;
+  } finally {
+    if (previousActiveTabId) {
+      await chrome.tabs.update(previousActiveTabId, { active: true }).catch(() => null);
+    }
   }
 }
 
@@ -4675,53 +4726,37 @@ async function handleTriggerMessengerCall({ thread_id, account_id = user_id, cal
   }
 }
 
-async function handleAnswerIncomingCall({ action, thread_id, source_tab_id, source_frame_id }) {
-  try {
-    console.log(`[FB Engine] 📞 Realizing call answer action=${action} for thread=${thread_id}`);
-    const message = { type: 'ANSWER_INCOMING_CALL', action, thread_id };
+async function handleAnswerIncomingCall({ action, thread_id, source_tab_id, source_frame_id, call_id }) {
+  const message = { type: 'ANSWER_INCOMING_CALL', action, thread_id };
+  let lastError = 'Call button was not found in Messenger';
 
-    if (Number.isInteger(source_tab_id)) {
-      const frameId = Number.isInteger(source_frame_id) ? source_frame_id : 0;
-      let sent = false;
-      await chrome.tabs.sendMessage(source_tab_id, message, { frameId }).then(() => {
-        sent = true;
-      }).catch((err) => {
-        console.warn('[FB Engine] Direct message to source tab failed:', err.message);
-      });
-      if (sent) return;
+  try {
+    let tabId = Number.isInteger(source_tab_id) ? source_tab_id : null;
+    let frameId = tabId && Number.isInteger(source_frame_id) ? source_frame_id : 0;
+
+    // Handle the action on exactly one tab. Prefer the tab that emitted the
+    // ringing event; otherwise use the first managed Messenger tab only.
+    if (!tabId) {
+      const tabs = await chrome.tabs.query({ url: '*://*.facebook.com/messages/*' }).catch(() => []);
+      tabId = tabs.find((tab) => Number.isInteger(tab.id))?.id || null;
+      frameId = 0;
     }
 
-    // Fallback if source_tab_id is missing or failed: send ONLY to the first Facebook tab
-    const tabs = await chrome.tabs.query({ url: '*://*.facebook.com/*' }).catch(() => []);
-    if (tabs.length > 0 && tabs[0].id) {
-      await chrome.tabs.sendMessage(tabs[0].id, message).catch(() => null);
+    if (!tabId) {
+      sendToBackend('ANSWER_INCOMING_CALL_RESULT', { action, thread_id, call_id, source_tab_id: null, success: false, error: lastError });
+      return;
     }
-  } catch (error) {
-    console.error('[FB Engine] Lỗi điều khiển cuộc gọi:', error);
-  }
-}
 
-// Separate call-control helper. Keeping this name distinct is important:
-// function declarations are hoisted, and the old duplicate name overwrote
-// the message-request helper that accepts a { x, y } point object.
-async function dispatchCallTrustedMouseClick(tabId, x, y) {
-  const target = { tabId };
-  try {
-    await chrome.debugger.attach(target, '1.3');
-    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
-      type: 'mouseMoved', x, y, button: 'none'
-    });
-    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
-      type: 'mousePressed', x, y, button: 'left', clickCount: 1
-    });
-    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
-      type: 'mouseReleased', x, y, button: 'left', clickCount: 1
-    });
-    return { success: true };
+    const response = await chrome.tabs.sendMessage(tabId, message, { frameId });
+    if (response?.success) {
+      sendToBackend('ANSWER_INCOMING_CALL_RESULT', { action, thread_id, call_id, source_tab_id: tabId, success: true });
+      return;
+    }
+
+    lastError = response?.error || lastError;
+    sendToBackend('ANSWER_INCOMING_CALL_RESULT', { action, thread_id, call_id, source_tab_id: tabId, success: false, error: lastError });
   } catch (error) {
-    return { success: false, error: error.message };
-  } finally {
-    try { await chrome.debugger.detach(target); } catch (_) {}
+    sendToBackend('ANSWER_INCOMING_CALL_RESULT', { action, thread_id, call_id, source_tab_id, success: false, error: error?.message || lastError });
   }
 }
 

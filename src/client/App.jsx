@@ -398,6 +398,21 @@ export default function App() {
       setMessages(prev => {
         const currentMsgs = prev[tidStr] || [];
         let updated;
+        const newIsMedia = !!(newMsg.attachment_id || newMsg.media_url || (newMsg.media_type && newMsg.media_type !== 'text'));
+        const optimisticIdx = currentMsgs.findIndex((message) => {
+          if (!newMsg.is_outgoing || !message.is_outgoing || !message.client_message_id) return false;
+          // A local bubble may already be marked sent by the provisional numeric
+          // confirmation before Messenger emits its final mid.* observation.
+          // Keep correlating it for a short arrival window so the final event
+          // replaces the bubble instead of flashing a duplicate until reload.
+          const localCreatedAt = Date.parse(message.created_at || '') || 0;
+          const isRecentLocal = localCreatedAt > 0 && Date.now() - localCreatedAt <= 120000;
+          if (!isRecentLocal) return false;
+          const existingIsMedia = !!(message.attachment_id || message.media_url || (message.media_type && message.media_type !== 'text'));
+          return newIsMedia
+            ? existingIsMedia
+            : !existingIsMedia && String(message.content || '') === String(newMsg.content || '');
+        });
         if (newMsg.client_message_id) {
           // Feature 021: a Page send's local optimistic bubble is created
           // with the CRM's own id, but the server necessarily broadcasts a
@@ -421,6 +436,13 @@ export default function App() {
               client_message_id: newMsg.client_message_id,
               status: newMsg.status || newMsg.delivery_status || 'sent'
             };
+          } else if (optimisticIdx >= 0) {
+            updated = [...currentMsgs];
+            updated[optimisticIdx] = {
+              ...currentMsgs[optimisticIdx],
+              ...newMsg,
+              status: newMsg.status || newMsg.delivery_status || 'sent'
+            };
           } else {
             updated = [...currentMsgs, { ...newMsg, status: newMsg.status || newMsg.delivery_status || 'sent' }];
           }
@@ -429,10 +451,11 @@ export default function App() {
             (newMsg.fb_message_id && message.fb_message_id === newMsg.fb_message_id) ||
             (newMsg.id != null && message.id === newMsg.id)
           ));
-          if (existsIdx >= 0) {
+          const mergeIdx = existsIdx >= 0 ? existsIdx : optimisticIdx;
+          if (mergeIdx >= 0) {
             updated = [...currentMsgs];
-            updated[existsIdx] = {
-              ...currentMsgs[existsIdx],
+            updated[mergeIdx] = {
+              ...currentMsgs[mergeIdx],
               ...newMsg,
               status: newMsg.status || newMsg.delivery_status || 'sent'
             };
@@ -527,7 +550,7 @@ export default function App() {
         const currentMsgs = prev[tidStr] || [];
         return {
           ...prev,
-          [tidStr]: currentMsgs.map(m => m.client_message_id === client_message_id ? { ...m, status: 'failed', delivery_status: 'failed', error } : m)
+          [tidStr]: currentMsgs.filter(m => m.client_message_id !== client_message_id)
         };
       });
     });
@@ -571,7 +594,7 @@ export default function App() {
         [tidStr]: (prev[tidStr] || []).map((message) => (
           message.client_message_id === statusEvent.client_message_id ||
           (statusEvent.message_id && Number(message.id) === Number(statusEvent.message_id))
-            ? {
+            ? statusEvent.status === 'failed' ? null : {
                 ...message,
                 attempt_id: statusEvent.attempt_id || message.attempt_id,
                 latest_attempt_id: statusEvent.attempt_id || message.latest_attempt_id,
@@ -585,7 +608,7 @@ export default function App() {
                 error: statusEvent.error || null
               }
             : message
-        ))
+        )).filter(Boolean)
       }));
     });
 
@@ -596,9 +619,9 @@ export default function App() {
         Object.keys(next).forEach((threadId) => {
           next[threadId] = next[threadId].map((message) => (
             message.client_message_id === client_message_id
-              ? { ...message, status: 'failed', delivery_status: 'failed', error: { code, message: error } }
+              ? null
               : message
-          ));
+          )).filter(Boolean);
         });
         return next;
       });
@@ -1335,7 +1358,7 @@ export default function App() {
         callInfo={incomingCallInfo}
         onClose={() => setIncomingCallInfo(null)}
         onSelectThread={(tid) => setActiveThreadId(tid)}
-        onAnswerCall={(action, thread_id, callback, source_tab_id = null) => {
+        onAnswerCall={(action, thread_id, callback, source_tab_id = null, source_frame_id = 0, account_id = null, call_id = null) => {
           if (!socket) {
             callback?.(false, 'Extension Facebook chưa kết nối');
             return;
@@ -1390,7 +1413,7 @@ export default function App() {
             finish(false, 'Hết thời gian chờ extension phản hồi');
           }, 10000);
 
-          socket.emit('ANSWER_INCOMING_CALL', { action, thread_id, source_tab_id });
+          socket.emit('ANSWER_INCOMING_CALL', { action, thread_id, source_tab_id, source_frame_id, account_id, call_id });
         }}
       />
 

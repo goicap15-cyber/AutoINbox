@@ -104,7 +104,7 @@ class LicenseChecker {
         };
       }
     } catch (err) {
-      console.warn('[LicenseChecker] Failed to connect to Central Server (5055):', err.message);
+      console.warn(`[LicenseChecker] Failed to connect to Central Server (${LICENSE_SERVER_URL}):`, err.message);
       // Nếu mất mạng tạm thời nhưng có Key cũ và trước đó đã valid ➔ Cho phép grace period 1 ngày
       if (this.cachedStatus.isLicensed) {
         console.log('[LicenseChecker] Using grace period cache.');

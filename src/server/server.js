@@ -658,6 +658,29 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 // ── Helper: gửi tin nhắn qua Extension WebSocket ──────────────────────────
+function deleteOutboundMessageRows({ messageId = null, threadId = null, clientMessageId = null, failedOnly = false } = {}) {
+  const clauses = [];
+  const params = [];
+  if (messageId != null) { clauses.push('id = ?'); params.push(messageId); }
+  if (threadId != null) { clauses.push('thread_id = ?'); params.push(String(threadId)); }
+  if (clientMessageId != null) { clauses.push('client_message_id = ?'); params.push(String(clientMessageId)); }
+  if (!clauses.length) return 0;
+  const failedClause = failedOnly ? " AND delivery_status = 'failed'" : '';
+  const rows = db.prepare(`SELECT id FROM messages WHERE ${clauses.join(' AND ')}${failedClause}`).all(...params);
+  if (!rows.length) return 0;
+  return db.transaction((messageIds) => {
+    const attempts = db.prepare(`SELECT id FROM outbound_attempts WHERE message_id IN (${messageIds.map(() => '?').join(',')})`).all(...messageIds);
+    if (attempts.length) {
+      const attemptIds = attempts.map((row) => row.id);
+      const placeholders = attemptIds.map(() => '?').join(',');
+      db.prepare(`UPDATE message_queue SET outbound_attempt_id = NULL WHERE outbound_attempt_id IN (${placeholders})`).run(...attemptIds);
+      db.prepare(`UPDATE messages SET latest_attempt_id = NULL WHERE latest_attempt_id IN (${placeholders})`).run(...attemptIds);
+      db.prepare(`DELETE FROM outbound_attempts WHERE id IN (${placeholders})`).run(...attemptIds);
+    }
+    return db.prepare(`DELETE FROM messages WHERE id IN (${messageIds.map(() => '?').join(',')})`).run(...messageIds).changes;
+  })(rows.map((row) => row.id));
+}
+
 async function sendViaExtension(thread_id, text, client_message_id = null) {
   // Tìm account_id của thread
   const thread = db.prepare(
@@ -732,10 +755,7 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
       `).get(clientMsgId);
       if (!pending) return;
       const timeoutError = 'Extension không xác nhận kết quả gửi trong 30 giây';
-      db.prepare(`
-        UPDATE messages SET delivery_status = 'failed', delivery_error = ?
-        WHERE id = ?
-      `).run(timeoutError, pending.id);
+      deleteOutboundMessageRows({ messageId: pending.id });
       io.emit('MESSAGE_SEND_FAILED', {
         thread_id,
         client_message_id: clientMsgId,
@@ -1059,15 +1079,14 @@ wss.on('connection', (ws, req) => {
               setTimeout(() => {
                 const stillPending = db.prepare(`SELECT id FROM messages WHERE client_message_id = ? AND delivery_status = 'pending'`).get(client_message_id);
                 if (!stillPending) return;
-                db.prepare(`UPDATE messages SET delivery_status = 'failed', delivery_error = ? WHERE id = ?`).run(failureText, stillPending.id);
+              deleteOutboundMessageRows({ messageId: stillPending.id });
                 io.emit('MESSAGE_SEND_FAILED', { thread_id, client_message_id, success: false, status: 'failed', error: failureText, error_code: error_code || 'CONFIRMATION_TIMEOUT' });
               }, 5000);
             } else {
               // Lỗi chắc chắn không thể gửi: giữ lịch sử nhưng chuyển failed ngay.
-              db.prepare(`
-                UPDATE messages SET delivery_status = 'failed', delivery_error = ?
+              db.prepare(`DELETE FROM messages
                 WHERE (client_message_id = ? OR fb_message_id = ?) AND is_outgoing = 1
-              `).run(failureText, client_message_id, `pending_${client_message_id}`);
+              `).run(client_message_id, `pending_${client_message_id}`);
               io.emit('MESSAGE_SEND_FAILED', { thread_id, client_message_id, success: false, status: 'failed', error: failureText, error_code });
             }
           }
@@ -1200,7 +1219,14 @@ wss.on('connection', (ws, req) => {
               is_unread: true
             });
             const stableCallId = m.fb_message_id;
-            const existingCall = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(stableCallId);
+            const callTimestamp = Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now();
+            const existingCall = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(stableCallId)
+              || db.prepare(`
+                SELECT id FROM messages
+                WHERE thread_id = ? AND media_type = 'call' AND content = ?
+                  AND ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) <= 60000
+                ORDER BY id DESC LIMIT 1
+              `).get(callThreadId, m.content, callTimestamp, callTimestamp);
             const normalizedCallContent = String(m.content || '').toLocaleLowerCase('vi-VN');
             const isExplicitMissedIncoming = /(?:nhỡ|bỏ lỡ|missed)/i.test(normalizedCallContent);
             const hasRawAvatarEvidence = m.direction_evidence === 'call_article_avatar'
@@ -1401,6 +1427,20 @@ wss.on('connection', (ws, req) => {
           const createdAt = (m.created_at && !isNaN(Date.parse(m.created_at))) ? m.created_at : new Date().toISOString();
 
           const safeSenderId = m.sender_id || (isOutgoing ? String(targetAccountId) : 'CONTACT');
+          // Messenger exposes a caption/base id and an `id_media` companion
+          // for one logical image. Fold the media record into the base row.
+          const mergedMediaCompanion = OutboundDomCorrelationService.mergeMediaCompanion(
+            db, canonicalThreadId, m, isOutgoing
+          );
+          if (mergedMediaCompanion) {
+            io.emit('NEW_MESSAGE', withAttachmentAccessUrl({
+              ...mergedMediaCompanion,
+              thread_id: canonicalThreadId,
+              account_id: targetAccountId,
+              status: mergedMediaCompanion.delivery_status || 'sent'
+            }));
+            break;
+          }
           // Composer fallback không có official GraphQL ID; ghép confirmation DOM
           // vào bản pending gần nhất cùng thread/nội dung thay vì tạo bubble thứ hai.
           if (isOutgoing && (m.source === 'dom_observer' || m.source === 'page_dom_observer') && (m.content || m.media_url || (m.media_type && m.media_type !== 'text'))) {
@@ -1492,14 +1532,11 @@ wss.on('connection', (ws, req) => {
               // a plain insert - a real duplicate row for the same send.
               // Recognize "already sent, same content, different id, very
               // recent" as an id upgrade and update in place instead.
-              if (m.fb_message_id) {
-                const recentSent = db.prepare(`
-                  SELECT id, client_message_id, fb_message_id FROM messages
-                  WHERE thread_id = ? AND content = ? AND is_outgoing = 1 AND delivery_status = 'sent'
-                    AND fb_message_id IS NOT NULL AND fb_message_id != ?
-                    AND datetime(created_at) >= datetime('now', '-8 seconds')
-                  ORDER BY id DESC LIMIT 1
-                `).get(canonicalThreadId, m.content, m.fb_message_id);
+               if (m.fb_message_id) {
+                 const observedAsMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
+                 const recentSent = OutboundDomCorrelationService.findTemporaryIdUpgrade(
+                   db, canonicalThreadId, { ...m, timestamp_ms: tsMs, created_at: createdAt }, observedAsMedia
+                 );
                 if (recentSent) {
                   db.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?').run(m.fb_message_id, recentSent.id);
                   console.log(`[WS] Nâng cấp fb_message_id tạm ${recentSent.fb_message_id} -> ${m.fb_message_id} (id ${recentSent.id}), cùng 1 tin gửi đi`);
@@ -1528,10 +1565,7 @@ wss.on('connection', (ws, req) => {
                 if (looksLikeSameAttempt) {
                   console.warn(`[WS] ⚠️ COMPOSER_CONTENT_MISMATCH: pending content="${pendingContent.substring(0, 40)}" vs DOM content="${domContent.substring(0, 40)}" | thread=${canonicalThreadId}`);
                   console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_CONTENT_MISMATCH', thread_id: String(canonicalThreadId), client_message_id: mismatchPending.client_message_id, pending_len: pendingContent.length, dom_len: domContent.length, at: new Date().toISOString() }));
-                  db.prepare(`
-                    UPDATE messages SET delivery_status = 'failed', delivery_error = 'COMPOSER_CONTENT_MISMATCH'
-                    WHERE id = ?
-                  `).run(mismatchPending.id);
+                  deleteOutboundMessageRows({ messageId: mismatchPending.id });
                   io.emit('MESSAGE_SEND_FAILED', { thread_id: canonicalThreadId, client_message_id: mismatchPending.client_message_id, success: false, status: 'failed', error: 'COMPOSER_CONTENT_MISMATCH', error_code: 'COMPOSER_CONTENT_MISMATCH' });
                   // Discard the mismatched DOM bubble entirely — do not insert it
                   break;
@@ -1832,6 +1866,10 @@ wss.on('connection', (ws, req) => {
           io.emit('INCOMING_CALL_ENDED', msg.data || {});
           break;
 
+        case 'ANSWER_INCOMING_CALL_RESULT':
+          io.emit('ANSWER_INCOMING_CALL_RESULT', msg.data || {});
+          break;
+
         case 'MESSAGE_REQUEST_ACTION_RESULT': {
           const result = msg.data || {};
           const requestId = String(result.request_id || '');
@@ -1840,7 +1878,10 @@ wss.on('connection', (ws, req) => {
           messageRequestActionOwners.delete(requestId);
           if (result.success && result.action !== 'query') {
             const threadId = String(owner.threadId);
-            if (result.action === 'accept' || result.action === 'continue') {
+            // "Continue" only expands Messenger's second-stage request
+            // controls (Accept / Delete / Block). Keep the thread in the
+            // request inbox until the operator chooses a terminal action.
+            if (result.action === 'accept') {
               db.prepare("UPDATE threads SET inbox_folder = 'INBOX' WHERE id = ?").run(threadId);
               io.emit('THREAD_INBOX_FOLDER_CHANGED', { thread_id: threadId, inbox_folder: 'INBOX' });
             } else if (result.action === 'delete' || result.action === 'block') {
@@ -2030,6 +2071,21 @@ wss.on('connection', (ws, req) => {
             const HistorySyncManager = require('./services/HistorySyncManager');
             HistorySyncManager.updateSyncStatus(thread_id, 'FAILED', null, reason);
             console.log(`[WS] History sync failed for thread=${thread_id}; automatic retry is disabled.`);
+
+            // Always finish the CRM request, even when Facebook navigation or
+            // its virtualized DOM was not ready. Keep all persisted messages.
+            const persistedRows = db.prepare(`
+              SELECT * FROM messages WHERE thread_id = ?
+              ORDER BY COALESCE(sequence_order, id) ASC, id ASC
+            `).all(thread_id);
+            io.emit('THREAD_MESSAGES_UPDATED', {
+              thread_id,
+              account_id,
+              messages: persistedRows.map(withAttachmentAccessUrl),
+              authoritative: true,
+              sync_status: 'FAILED',
+              sync_error: reason
+            });
             return;
 
             // marker_mismatch/sidebar_mismatch/no_rows/no_main_container are DOM-timing
@@ -2725,11 +2781,17 @@ io.on('connection', (socket) => {
   });
 
   socket.on('ANSWER_INCOMING_CALL', ({ action, thread_id, account_id, source_tab_id, source_frame_id, call_id } = {}) => {
-    if (action !== 'accept' && action !== 'decline') return;
+    if (action !== 'accept' && action !== 'decline') {
+      socket.emit('ANSWER_INCOMING_CALL_RESPONSE', { success: false, action, thread_id, error: 'Invalid call action' });
+      return;
+    }
     const targetAccount = account_id || extensionConnections.keys().next().value;
     const extension = targetAccount ? extensionConnections.get(targetAccount) : null;
     if (extension?.readyState === WebSocket.OPEN) {
-      extension.send(JSON.stringify({ type: 'ANSWER_INCOMING_CALL', data: { action, thread_id, source_tab_id, source_frame_id, call_id } }));
+      extension.send(JSON.stringify({ type: 'ANSWER_INCOMING_CALL', data: { action, thread_id, account_id: targetAccount, source_tab_id, source_frame_id, call_id } }));
+      socket.emit('ANSWER_INCOMING_CALL_RESPONSE', { success: true, action, thread_id });
+    } else {
+      socket.emit('ANSWER_INCOMING_CALL_RESPONSE', { success: false, action, thread_id, error: 'Facebook extension is not connected' });
     }
   });
 
@@ -3780,6 +3842,11 @@ app.get('/api/ollama/health', async (req, res) => {
 // Messages REST API - With UI Guard Filter
 app.get('/api/threads/:id/messages', (req, res) => {
   if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
+  OutboundDomCorrelationService.collapseStoredMediaCompanions(db, req.params.id);
+  OutboundDomCorrelationService.collapseStoredTemporaryIdUpgrades(db, req.params.id);
+  // A failed outbound attempt is terminal. Remove it before reading so an old
+  // pending row can never reappear as a retry bubble after app startup.
+  deleteOutboundMessageRows({ threadId: req.params.id, failedOnly: true });
   // `id` is the durable per-database receive sequence. is_outgoing identifies
   // the side (0 = customer, 1 = operator); timestamps are display-only.
   const msgs = db.prepare(`

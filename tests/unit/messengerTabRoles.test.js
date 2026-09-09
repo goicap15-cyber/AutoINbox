@@ -36,8 +36,8 @@ test('live interaction and discovery surfaces forward realtime events', () => {
   assert.equal(Roles.canForwardCallRealtime(null), false);
 });
 
-test('history surface forwards incoming only through the dedicated policy', () => {
+test('history surface never forwards remounted rows as realtime messages', () => {
   assert.equal(Roles.canForwardRealtime('history'), false);
-  assert.equal(Roles.canForwardIncomingRealtime('history'), true);
+  assert.equal(Roles.canForwardIncomingRealtime('history'), false);
   assert.equal(Roles.canForwardIncomingRealtime('requests'), false);
 });

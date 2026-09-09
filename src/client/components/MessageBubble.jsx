@@ -49,6 +49,9 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   const isVideoCall = lowerContent.includes('video');
 
   const hasMedia = Boolean(msg.local_media_path || msg.media_url);
+  // Messenger can echo stale composer text as an image caption even though
+  // CRM sent the image separately. Hide that transport artefact.
+  const visibleContent = isOutgoing && hasMedia && msg.media_type === 'image' ? '' : content;
   if (!content && !hasMedia && !isUnsent) return null;
 
   return (
@@ -100,7 +103,7 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
           ) : (
             <>
               <MediaViewer mediaType={msg.media_type} mediaUrl={msg.media_url} localMediaPath={msg.local_media_path} />
-              {content && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words ${hasMedia ? 'mt-1.5' : ''}`}>{content}</p>}
+              {visibleContent && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words ${hasMedia ? 'mt-1.5' : ''}`}>{visibleContent}</p>}
             </>
           )}
         </div>

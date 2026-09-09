@@ -78,7 +78,10 @@ class ConversationRepository {
             thread_url = COALESCE(?, thread_url),
             last_message = COALESCE(?, last_message),
             is_unread = COALESCE(?, is_unread),
-            inbox_folder = COALESCE(?, inbox_folder)
+            inbox_folder = CASE
+              WHEN inbox_folder = 'INBOX' AND ? IN ('MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE') THEN inbox_folder
+              ELSE COALESCE(?, inbox_folder)
+            END
         WHERE id = ?
       `).run(
           external_thread_id, 
@@ -87,6 +90,7 @@ class ConversationRepository {
           thread_url, 
           last_message, 
           is_unread === undefined ? null : (is_unread ? 1 : 0), 
+          normalizedInboxFolder,
           normalizedInboxFolder,
           existing.id
       );

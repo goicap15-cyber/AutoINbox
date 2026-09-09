@@ -32,10 +32,10 @@
   }
 
   function canForwardIncomingRealtime(role) {
-    // A history tab is also the active DOM surface used by on-demand CRM
-    // navigation. It may forward only confirmed incoming observations; its
-    // outgoing/history rows remain blocked by canForwardRealtime above.
-    return canForwardRealtime(role) || role === 'history';
+    // History navigation deliberately remounts old DOM rows. Forwarding its
+    // observer events races the authoritative history batch and turns old
+    // messages/calls into apparent realtime duplicates.
+    return canForwardRealtime(role);
   }
 
   function canForwardCallRealtime(role) {

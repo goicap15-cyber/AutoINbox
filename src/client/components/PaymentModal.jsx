@@ -20,6 +20,7 @@ export default function PaymentModal({ isOpen, onClose, onActivated, existingLic
   const [savingCompany, setSavingCompany] = useState(false);
   const [pricing, setPricing] = useState(null);
   const [pricingError, setPricingError] = useState('');
+  const [paymentError, setPaymentError] = useState('');
 
   // Reset state when opening modal
   useEffect(() => {
@@ -33,6 +34,7 @@ export default function PaymentModal({ isOpen, onClose, onActivated, existingLic
       setCompanyName('');
       setCompanyError('');
       setSavingCompany(false);
+      setPaymentError('');
     }
   }, [isOpen, isUpgrade]);
 
@@ -59,7 +61,11 @@ export default function PaymentModal({ isOpen, onClose, onActivated, existingLic
         const res = await fetch(`${LICENSE_SERVER_URL}/api/orders/status/${orderData.orderCode}`);
         const json = await res.json();
 
-        if (json.success && json.data.status === 'PAID' && json.data.keyValue) {
+        if (!res.ok || !json.success) throw new Error(json.message || json.error || 'Không kiểm tra được trạng thái thanh toán');
+        if (json.data.status === 'PAID' && !json.data.keyValue) {
+          throw new Error('Thanh toán đã được ghi nhận nhưng máy chủ chưa tạo License Key.');
+        }
+        if (json.data.status === 'PAID' && json.data.keyValue) {
           clearInterval(interval);
           const keyValue = json.data.keyValue;
           setActivatedKey(keyValue);
@@ -82,6 +88,7 @@ export default function PaymentModal({ isOpen, onClose, onActivated, existingLic
         }
       } catch (err) {
         console.error('Polling payment status error:', err);
+        setPaymentError(err.message || 'Không kiểm tra được trạng thái thanh toán.');
       }
     }, 5000);
 
@@ -112,12 +119,13 @@ export default function PaymentModal({ isOpen, onClose, onActivated, existingLic
       const json = await res.json();
       if (json.success) {
         setOrderData(json.data);
+        setPaymentError('');
         setStep(2);
       } else {
         alert('Tạo đơn hàng thất bại: ' + (json.error || 'Lỗi kết nối'));
       }
     } catch (err) {
-      alert('Không thể kết nối đến Central License Server (5055): ' + err.message);
+      alert('Không thể kết nối đến Central License Server: ' + LICENSE_SERVER_URL + '\n' + err.message);
     } finally {
       setLoading(false);
     }
@@ -297,6 +305,7 @@ export default function PaymentModal({ isOpen, onClose, onActivated, existingLic
                 <RefreshCw className="w-4 h-4 animate-spin" />
                 <span>Đang chờ chuyển khoản... Sau khi chuyển khoản, vui lòng đợi khoảng 5 giây để hệ thống xác nhận và cấp Key tự động.</span>
               </div>
+              {paymentError && <p className="text-sm text-red-400">{paymentError}</p>}
 
               {/* Chi tiết thông tin CK */}
               <div className="text-left space-y-2.5 p-3.5 rounded-lg bg-[var(--color-bg-surface,#132235)] border border-[var(--color-border,#284057)] text-sm">

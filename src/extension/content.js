@@ -65,28 +65,45 @@
 
   function triggerCallAnswer(action, callback) {
     stopAllRingtoneAudio();
-    var deadline = Date.now() + 3000;
-    function attempt() {
-      var candidate = findIncomingCallCandidate();
-      var button = action === 'accept'
-        ? ((candidate && candidate.acceptButton) || findIncomingCallActionButton('accept'))
-        : (findIncomingCallActionButton('decline') || (candidate && candidate.declineButton));
-
-      if (button && isVisibleCallElement(button)) {
-        try { button.focus({ preventScroll: true }); } catch (_) {}
-        var rect = button.getBoundingClientRect();
-        var eventInit = { bubbles: true, cancelable: true, composed: true, view: window, button: 0, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
-        if (window.PointerEvent) button.dispatchEvent(new PointerEvent('pointerdown', eventInit));
-        button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-        button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-        if (window.PointerEvent) button.dispatchEvent(new PointerEvent('pointerup', eventInit));
-        button.click();
-        stopAllRingtoneAudio();
-        callback?.(true);
-        return;
+    var targetLabel = action === 'accept' ? 'Ch\u1ea5p nh\u1eadn' : 'T\u1eeb ch\u1ed1i';
+    var deadline = Date.now() + 5000;
+    var completed = false;
+    function finish(success) {
+      if (completed) return;
+      completed = true;
+      callback?.(!!success);
+    }
+    function findExactButton() {
+      var selectors = action === 'accept'
+        ? ['[aria-label="Ch\u1ea5p nh\u1eadn"][role="button"]', '[aria-label="Ch\u1ea5p nh\u1eadn"]', '[role="button"][aria-label*="Accept"]', '[role="button"][aria-label*="Answer"]']
+        : ['[aria-label="T\u1eeb ch\u1ed1i"][role="button"]', '[aria-label="T\u1eeb ch\u1ed1i"]', '[role="button"][aria-label*="Decline"]', '[role="button"][aria-label*="Reject"]'];
+      for (var i = 0; i < selectors.length; i++) {
+        var exact = document.querySelector(selectors[i]);
+        if (exact && isVisibleCallElement(exact)) return exact;
       }
-      if (Date.now() < deadline) window.setTimeout(attempt, 150);
-      else callback?.(false);
+      var allButtons = document.querySelectorAll('[role="button"], button');
+      for (var j = 0; j < allButtons.length; j++) {
+        var button = allButtons[j];
+        if (!isVisibleCallElement(button)) continue;
+        var txt = (button.textContent || '').trim();
+        if (txt === targetLabel || txt.includes(targetLabel)) return button;
+        if (callButtonIntent(button) === action) return button;
+      }
+      return null;
+    }
+    function attempt() {
+      if (completed) return;
+      var btn = findExactButton();
+      if (btn) {
+        try {
+          btn.click();
+          stopAllRingtoneAudio();
+          finish(true);
+          return;
+        } catch (_) {}
+      }
+      if (Date.now() < deadline) window.setTimeout(attempt, 100);
+      else finish(false);
     }
     attempt();
   }
@@ -106,7 +123,8 @@
           return true;
         }
         if (msg.type === 'GET_INCOMING_CALL_BUTTON_RECT') {
-          var button = findIncomingCallActionButton(msg.action);
+          var candidate = findIncomingCallCandidate();
+          var button = (candidate && (msg.action === 'accept' ? candidate.acceptButton : candidate.declineButton)) || findIncomingCallActionButton(msg.action);
           if (!button || !isVisibleCallElement(button)) {
             sendResponse?.({ success: false });
             return;
@@ -971,9 +989,11 @@
     const rows = Array.from(log.querySelectorAll('div[role="row"], div[role="article"]')).slice(-24);
     for (const row of rows) {
       for (const parsed of parseMessagesFromDOMNode(row, true)) {
-        if (parsed.is_outgoing) continue;
+        const parsedText = String(parsed.content || '').toLocaleLowerCase('vi-VN');
+        const isCallRow = /(?:cu?c g?i|nh?|b? l?|audio call|video call|missed call|call ended)/i.test(parsedText);
+        if (parsed.is_outgoing && !isCallRow) continue;
         const fbMessageId = makeDomMessageId(thread_id, parsed);
-        if (lastObservedMessages.get(fbMessageId) === false) continue;
+        if (lastObservedMessages.get(fbMessageId) === parsed.is_outgoing) continue;
         const networkTime = recentNetworkEmits.get(`${thread_id}:${parsed.content}`);
         if (networkTime && Date.now() - networkTime < 2500) {
           lastObservedMessages.set(fbMessageId, false);
@@ -998,11 +1018,11 @@
             type: 'NEW_MESSAGE_FROM_FB',
             data: {
               thread_id,
-              sender_id: null,
+              sender_id: parsed.is_outgoing ? capturedUserId : null,
               sender_name: parsed.sender_name,
               content: parsed.content,
-              is_outgoing: false,
-              sender_role: 'customer',
+              is_outgoing: parsed.is_outgoing,
+              sender_role: parsed.is_outgoing ? 'operator' : 'customer',
               fb_message_id: fbMessageId,
               media_type: parsed.media_type || 'text',
               media_url: parsed.media_url || null,
@@ -1049,7 +1069,7 @@
       observerPaused = false;
     }, 3000);
   }, 1000);
-  setInterval(reconcileLatestIncomingMessages, 750);
+  setInterval(reconcileLatestIncomingMessages, 250);
 
   // ── Call Log Scanner ────────────────────────────────────────────────────────
   // Quét span[dir="auto"] chứa text cuộc gọi mỗi 2 giây.
@@ -1094,6 +1114,27 @@
         '[role="log"][aria-label*="Messages in the conversation"]'
       ) || document.querySelector('div[role="main"] [role="log"]');
       if (!mainContainer) return;
+
+      // DOM virtualization remounts historical call rows while the history
+      // viewport is away from the latest messages. Those are not realtime
+      // calls. Reset the baseline while away from the bottom so returning to
+      // the latest viewport also establishes a fresh baseline without emits.
+      var callScroller = mainContainer;
+      var scrollProbe = mainContainer;
+      while (scrollProbe && scrollProbe !== document.body) {
+        if (scrollProbe.scrollHeight > scrollProbe.clientHeight + 8) {
+          callScroller = scrollProbe;
+          break;
+        }
+        scrollProbe = scrollProbe.parentElement;
+      }
+      var distanceFromBottom = Math.max(0, callScroller.scrollHeight - callScroller.clientHeight - callScroller.scrollTop);
+      if (distanceFromBottom > 120) {
+        _callSeenCounts.clear();
+        _callPendingDirections.clear();
+        _callBaselineReady = false;
+        return;
+      }
 
       var spans = mainContainer.querySelectorAll('span[dir="auto"]');
       var contactHeading = document.querySelector('header h1, header h2, [role="main"] h1, [role="main"] h2, span[aria-level="1"]');
@@ -1288,7 +1329,9 @@
     } catch(e) {}
   }
 
-  setInterval(scanCallLogsNow, 500);
+  // Synthetic call scanning is deliberately disabled: virtualized historical
+  // call rows can remount and look new. The canonical stable-id observer below
+  // handles fresh calls without creating fake call_dom_* events.
 
   // Incoming-call detector. A candidate is valid only when Facebook exposes a
   // visible modal dialog containing BOTH call action buttons and an SVG icon in
@@ -1306,12 +1349,22 @@
 
   function callButtonIntent(button) {
     if (!button) return null;
-    var ariaLabel = normalizeCallText(button.getAttribute('aria-label') || '');
-    var visibleText = normalizeCallText(button.textContent || '');
-    var combined = ariaLabel + ' ' + visibleText;
+    var labels = [
+      button.getAttribute('aria-label'),
+      button.getAttribute('title'),
+      button.getAttribute('data-tooltip-content'),
+      button.textContent
+    ];
+    var labelled = button.querySelectorAll ? button.querySelectorAll('[aria-label], [title], svg title') : [];
+    for (var i = 0; i < labelled.length; i++) {
+      labels.push(labelled[i].getAttribute('aria-label'));
+      labels.push(labelled[i].getAttribute('title'));
+      labels.push(labelled[i].textContent);
+    }
+    var combined = normalizeCallText(labels.filter(Boolean).join(' '));
 
-    if (/chap nhan|accept|answer|tra loi|nghe|nhac may/.test(combined)) return 'accept';
-    if (/tu choi|decline|reject/.test(combined)) return 'decline';
+    if (/chap nhan|accept|answer|answer call|tra loi|nghe|nhac may|pick up/.test(combined)) return 'accept';
+    if (/tu choi|decline|reject|decline call|dismiss|hang up|end call|ignore|ket thuc|bo qua|khong nghe|huy cuoc goi/.test(combined)) return 'decline';
     return null;
   }
 
@@ -1319,6 +1372,11 @@
   // the CRM popup exists, Facebook may re-render the two control columns at
   // different times. Requiring both buttons again here made either action miss.
   function findIncomingCallActionButton(action) {
+    var targetLabel = action === 'accept' ? 'Ch\u1ea5p nh\u1eadn' : 'T\u1eeb ch\u1ed1i';
+    var exact = document.querySelector('[aria-label="' + targetLabel + '"][role="button"]') ||
+      document.querySelector('[aria-label="' + targetLabel + '"]');
+    if (exact && isVisibleCallElement(exact)) return exact;
+
     var allButtons = document.querySelectorAll('[role="button"], button, a');
     for (var i = 0; i < allButtons.length; i++) {
       var target = allButtons[i];
@@ -1328,6 +1386,91 @@
       }
     }
     return null;
+  }
+
+  function findKnownMessengerDeclineButton() {
+    var root = liveIncomingCallCandidate?.dialog || document;
+    var selectors = [
+      'div[role="button"][tabindex="0"][aria-label="T\u1eeb ch\u1ed1i"].x1i10hfl.x1ejq31n.x18oe1m7.x1sy0etr',
+      'div[role="button"][tabindex="0"][aria-label="T\u1eeb ch\u1ed1i"]',
+      '[role="button"][aria-label="T\u1eeb ch\u1ed1i"]'
+    ];
+    for (var i = 0; i < selectors.length; i++) {
+      var exact = root.querySelector(selectors[i]);
+      if (exact && isVisibleCallElement(exact)) return exact;
+    }
+
+    // Stable icon fingerprint from the supplied Messenger DOM. Facebook's x*
+    // classes are generated and can change, while this decline-X vector is the
+    // actual control graphic. Always climb back to the clickable role=button.
+    var paths = root.querySelectorAll('svg path');
+    for (var j = 0; j < paths.length; j++) {
+      var pathData = String(paths[j].getAttribute('d') || '').trim();
+      if (!pathData.startsWith('m12.631 25.138 5.196-5.189')) continue;
+      var button = paths[j].closest('[role="button"], button');
+      if (button && isVisibleCallElement(button)) return button;
+    }
+    return null;
+  }
+
+  function findCallButtonFromRingingText(action) {
+    var candidate = liveIncomingCallCandidate || findIncomingCallCandidate();
+    var root = candidate?.dialog || null;
+    if (!root || !isVisibleCallElement(root)) return null;
+    var pattern = action === 'accept'
+      ? /chap nhan|accept|answer|tra loi|nghe|nhac may|pick up/
+      : /tu choi|decline|reject|dismiss|hang up|end call|ket thuc|bo qua|khong nghe|huy cuoc goi/;
+    var nodes = root.querySelectorAll('[aria-label], [title], [role="button"], button, span, div');
+    var best = null;
+    var bestArea = Infinity;
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      if (!isVisibleCallElement(node)) continue;
+      var ownLabel = normalizeCallText((node.getAttribute?.('aria-label') || '') + ' ' + (node.getAttribute?.('title') || ''));
+      var ownText = normalizeCallText(node.textContent || '');
+      if (!pattern.test(ownLabel) && !(ownText.length > 0 && ownText.length <= 80 && pattern.test(ownText))) continue;
+      var clickable = node.matches?.('[role="button"], button')
+        ? node
+        : node.closest?.('[role="button"], button') || node.querySelector?.('[role="button"], button');
+      if (!clickable || !root.contains(clickable) || !isVisibleCallElement(clickable)) continue;
+      var rect = clickable.getBoundingClientRect();
+      var area = rect.width * rect.height;
+      if (area < bestArea) { best = clickable; bestArea = area; }
+    }
+    return best;
+  }
+
+  function findDeclineButtonBesideAccept() {
+    var acceptButton = findIncomingCallActionButton('accept');
+    if (!acceptButton) return null;
+    var root = acceptButton.closest?.('[role="dialog"], [role="alertdialog"]');
+    if (!root) {
+      var candidate = findIncomingCallCandidate();
+      root = candidate?.dialog || null;
+    }
+    if (!root) return null;
+
+    var acceptRect = acceptButton.getBoundingClientRect();
+    var acceptX = acceptRect.left + acceptRect.width / 2;
+    var acceptY = acceptRect.top + acceptRect.height / 2;
+    var controls = root.querySelectorAll('[role="button"], button');
+    var best = null;
+    var bestScore = Infinity;
+    for (var i = 0; i < controls.length; i++) {
+      var control = controls[i];
+      if (control === acceptButton || control.contains(acceptButton) || acceptButton.contains(control)) continue;
+      if (!isVisibleCallElement(control) || callButtonIntent(control) === 'accept') continue;
+      var rect = control.getBoundingClientRect();
+      var x = rect.left + rect.width / 2;
+      var y = rect.top + rect.height / 2;
+      var dx = Math.abs(x - acceptX);
+      var dy = Math.abs(y - acceptY);
+      if (dx < 20 || dx > 320 || dy > 70) continue;
+      var score = dx + dy * 4;
+      if (callButtonIntent(control) === 'decline') score -= 1000;
+      if (score < bestScore) { best = control; bestScore = score; }
+    }
+    return best;
   }
 
   function extractCallerNameFromDialog(dialog) {
@@ -1391,10 +1534,10 @@
       // The supplied Facebook DOM exposes these exact aria-labels on the
       // clickable role=button nodes. Prefer them before fuzzy text matching.
       var acceptButton = dialog.querySelector(
-        '[role="button"][aria-label="Chấp nhận"], [role="button"][aria-label="Accept"], [role="button"][aria-label="Answer"]'
+        '[role="button"][aria-label="Ch\u1ea5p nh\u1eadn"], [role="button"][aria-label="Accept"], [role="button"][aria-label="Answer"]'
       );
       var declineButton = dialog.querySelector(
-        '[role="button"][aria-label="Từ chối"], [role="button"][aria-label="Decline"], [role="button"][aria-label="Reject"]'
+        '[role="button"][aria-label="T\u1eeb ch\u1ed1i"], [role="button"][aria-label="Decline"], [role="button"][aria-label="Reject"]'
       );
       var buttons = dialog.querySelectorAll('[role="button"], button, a');
       for (var j = 0; j < buttons.length; j++) {
@@ -1415,9 +1558,11 @@
   }
 
   var incomingCallState = { phase: 'IDLE', signature: null, stableScans: 0, callId: null, callerName: '' };
+  var liveIncomingCallCandidate = null;
   function scanIncomingCallDialog() {
     try {
       var candidate = findIncomingCallCandidate();
+      liveIncomingCallCandidate = candidate || null;
       if (!candidate) {
         if (incomingCallState.phase === 'RINGING') {
           stopAllRingtoneAudio();

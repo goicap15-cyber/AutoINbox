@@ -363,6 +363,7 @@ class ProcessManager {
           '--disable-background-timer-throttling',
           '--disable-backgrounding-occluded-windows',
           '--disable-renderer-backgrounding',
+          '--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling',
           '--disable-popup-blocking',
           '--disable-notifications',
           '--autoplay-policy=no-user-gesture-required'
@@ -479,6 +480,7 @@ class ProcessManager {
           '--disable-background-timer-throttling',
           '--disable-backgrounding-occluded-windows',
           '--disable-renderer-backgrounding',
+          '--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling',
           '--disable-popup-blocking',
           '--disable-notifications',
           '--autoplay-policy=no-user-gesture-required'
