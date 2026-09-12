@@ -9,7 +9,10 @@ import {
   ArrowLeft,
   Phone,
   Video,
-  Info
+  Info,
+  Eye,
+  EyeOff,
+  RefreshCw
 } from 'lucide-react';
 
 const AVATAR_COLORS = ['#2684ff', '#a855f7', '#0fbd74', '#ec4899', '#ff6b2c', '#00b8a9', '#6366f1', '#ff3b4f'];
@@ -57,6 +60,31 @@ export default function ChatHeader({
   const avatarColor = pickAvatarColor(activeThread.id || customerName);
   const showAccountPill = accounts.length > 1;
   const messengerUrl = sourceType === 'page_messenger' ? null : (activeThread.thread_url || `https://facebook.com/messages/t/${activeThread.external_thread_id || activeThread.id}`);
+  const [chromeToggling, setChromeToggling] = React.useState(false);
+  const isChromeRunning = account?.is_chrome_running === true;
+  const isChromeHidden = account?.chrome_display_mode === 'BACKGROUND';
+
+  const handleToggleChromeWindow = async () => {
+    if (!account || chromeToggling) return;
+    setChromeToggling(true);
+    try {
+      const endpoint = isChromeHidden
+        ? `/api/accounts/${account.id}/open`
+        : `/api/accounts/${account.id}/background`;
+      const res = await fetch(endpoint, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        const errorMsg = data?.error || (isChromeHidden ? 'Không thể hiện cửa sổ Chrome' : 'Không thể ẩn cửa sổ Chrome');
+        console.error('Lỗi chuyển đổi hiển thị Chrome:', errorMsg);
+        alert(errorMsg);
+      }
+    } catch (err) {
+      console.error('Lỗi chuyển đổi hiển thị Chrome:', err);
+      alert('Lỗi kết nối khi chuyển đổi hiển thị Chrome: ' + err.message);
+    } finally {
+      setChromeToggling(false);
+    }
+  };
 
   return (
     <div className="h-[var(--header-height)] border-b border-[var(--color-border)] px-4 flex items-center justify-between bg-[var(--color-bg-panel)] shrink-0 select-none">
@@ -123,6 +151,21 @@ export default function ChatHeader({
         {messengerUrl && (
           <HeaderIconButton title="Mở Messenger" href={messengerUrl} className="text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]">
             <ExternalLink size={18} strokeWidth={1.75} />
+          </HeaderIconButton>
+        )}
+        {sourceType === 'personal_messenger' && isChromeRunning && (
+          <HeaderIconButton
+            title={isChromeHidden ? "Hiện cửa sổ Chrome" : "Ẩn cửa sổ Chrome"}
+            onClick={handleToggleChromeWindow}
+            className="text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]"
+          >
+            {chromeToggling ? (
+              <RefreshCw size={17} className="animate-spin" />
+            ) : isChromeHidden ? (
+              <Eye size={18} strokeWidth={1.75} />
+            ) : (
+              <EyeOff size={18} strokeWidth={1.75} />
+            )}
           </HeaderIconButton>
         )}
         <HeaderIconButton title="Thông tin khách hàng" onClick={() => onShowLeadPanel?.()}>

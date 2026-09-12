@@ -5,33 +5,7 @@ import { collapseMessengerMediaCompanions } from '../utils/messageDedup.js';
 
 const AVATAR_COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#ec4899', '#f97316', '#14b8a6', '#6366f1', '#ef4444'];
 
-function getMessageDateKey(msg) {
-  if (!msg) return null;
-  const ts = Number(msg.timestamp_ms);
-  const date = new Date(Number.isFinite(ts) && ts > 0 ? ts : (msg.created_at || msg.time || 0));
-  if (Number.isNaN(date.getTime()) || date.getTime() === 0) return null;
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-}
-
-function formatDateSeparatorLabel(msg) {
-  if (!msg) return '';
-  const ts = Number(msg.timestamp_ms);
-  const date = new Date(Number.isFinite(ts) && ts > 0 ? ts : (msg.created_at || msg.time || 0));
-  if (Number.isNaN(date.getTime()) || date.getTime() === 0) return '';
-  const today = new Date();
-  const yesterday = new Date();
-  yesterday.setDate(today.getDate() - 1);
-
-  if (date.toDateString() === today.toDateString()) return 'Hôm nay';
-  if (date.toDateString() === yesterday.toDateString()) return 'Hôm qua';
-
-  return date.toLocaleDateString('vi-VN', {
-    weekday: 'long',
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric'
-  });
-}
+import { getMessageDateKey, formatDateSeparatorLabel } from '../utils/messageTimestampPresentation.js';
 
 export default function MessageList({ messages = [], activeThread, onSyncThread, onRetryMessage, onViewportScroll, historySyncing = false }) {
   const containerRef = useRef(null);

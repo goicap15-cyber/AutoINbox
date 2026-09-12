@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, ExternalLink, ShieldAlert, RefreshCw, PlusCircle, Trash2 } from 'lucide-react';
+import { X, ExternalLink, ShieldAlert, RefreshCw, PlusCircle, Trash2, Eye, EyeOff, Power } from 'lucide-react';
 
 export default function AccountManagerModal({ onClose, onSourcesChanged, onFacebookSyncStart, socket, sessionUser }) {
   const isCompanyAdmin = sessionUser?.company_role === 'ADMIN';
@@ -96,13 +96,26 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
       setPendingKey(null);
       setInitialAccountIds(null);
     };
+    const handleAccountDisplayChanged = ({ account_id, is_chrome_running, chrome_display_mode }) => {
+      setAccounts((currentAccounts) => currentAccounts.map((account) => (
+        String(account.id) === String(account_id)
+          ? {
+              ...account,
+              is_chrome_running,
+              chrome_display_mode: chrome_display_mode || (is_chrome_running ? 'VISIBLE' : 'STOPPED')
+            }
+          : account
+      )));
+    };
     socket.on('ACCOUNT_STATUS_CHANGED', handleAccountStatus);
     socket.on('EXTENSION_CONNECTION_CHANGED', handleExtensionConnection);
     socket.on('ACCOUNT_LINK_FAILED', handleAccountLinkFailed);
+    socket.on('ACCOUNT_DISPLAY_CHANGED', handleAccountDisplayChanged);
     return () => {
       socket.off('ACCOUNT_STATUS_CHANGED', handleAccountStatus);
       socket.off('EXTENSION_CONNECTION_CHANGED', handleExtensionConnection);
       socket.off('ACCOUNT_LINK_FAILED', handleAccountLinkFailed);
+      socket.off('ACCOUNT_DISPLAY_CHANGED', handleAccountDisplayChanged);
     };
   }, [socket, addingSession, pendingKey, initialAccountIds, initialDisconnectedAccountIds, onSourcesChanged]);
 
@@ -179,17 +192,59 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
     }
   };
 
-  const handleStartChrome = async (accountId) => {
-    setStartingId(accountId);
-    onFacebookSyncStart?.(accountId, true);
+  const handleStartChrome = async (accountId, { background = false } = {}) => {
+    const actionKey = `${accountId}:${background ? 'bg' : 'vis'}`;
+    setStartingId(actionKey);
+    if (!background) {
+      onFacebookSyncStart?.(accountId, true);
+    }
+    setAccountActionError('');
     try {
-      const res = await fetch(`/api/accounts/${accountId}/start`, { method: 'POST' });
+      const res = await fetch(`/api/accounts/${accountId}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ background })
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) throw new Error(data.error || 'Không thể mở Chrome');
       await loadAccounts();
     } catch (error) {
-      onFacebookSyncStart?.(accountId, false);
+      if (!background) {
+        onFacebookSyncStart?.(accountId, false);
+      }
       setAccountActionError(error.message || 'Không thể mở Chrome');
+    } finally {
+      setStartingId(null);
+    }
+  };
+
+  const handleToggleChromeDisplay = async (accountId, action) => {
+    const actionKey = `${accountId}:${action}`;
+    setStartingId(actionKey);
+    setAccountActionError('');
+    try {
+      const res = await fetch(`/api/accounts/${accountId}/${action}`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || 'Thao tác thất bại');
+      await loadAccounts();
+    } catch (error) {
+      setAccountActionError(error.message || 'Thao tác thất bại');
+    } finally {
+      setStartingId(null);
+    }
+  };
+
+  const handleStopChrome = async (accountId) => {
+    const actionKey = `${accountId}:stop`;
+    setStartingId(actionKey);
+    setAccountActionError('');
+    try {
+      const res = await fetch(`/api/accounts/${accountId}/stop`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || 'Không thể tắt Chrome');
+      await loadAccounts();
+    } catch (error) {
+      setAccountActionError(error.message || 'Không thể tắt Chrome');
     } finally {
       setStartingId(null);
     }
@@ -395,7 +450,7 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
                       </div>
                       <div>
                         <h4 className="text-xs font-semibold text-slate-100">{acc.name || 'Tài khoản Facebook'}</h4>
-                        <div className="flex items-center gap-2 mt-0.5">
+                        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                           <span className="text-[10px] text-slate-500 font-mono">ID: {acc.id}</span>
                           <span
                             className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
@@ -406,6 +461,26 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
                           >
                             {isConnected ? 'Đã kết nối' : 'Chưa kết nối'}
                           </span>
+                          {acc.chrome_display_mode === 'BACKGROUND' ? (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                              Đang chạy ngầm
+                            </span>
+                          ) : acc.chrome_display_mode === 'VISIBLE' ? (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-sky-500/10 text-sky-400 border border-sky-500/20 flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+                              Đang hiển thị
+                            </span>
+                          ) : acc.chrome_display_mode === 'SYNC_MINIMIZED' ? (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                              Đang thu nhỏ
+                            </span>
+                          ) : (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-slate-500/10 text-slate-400 border border-slate-500/20">
+                              Chưa mở
+                            </span>
+                          )}
                           {isCheckpoint && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-red-500/10 text-red-400 border border-red-500/20">
                               Checkpoint / 2FA
@@ -416,23 +491,74 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
                     </div>
 
                     <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleStartChrome(acc.id)}
-                        disabled={startingId === acc.id || deletingId === acc.id}
-                        className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors border disabled:opacity-50 ${
-                          isCheckpoint
-                            ? 'bg-red-600 hover:bg-red-500 text-white border-red-500'
-                            : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700/60'
-                        }`}
-                      >
-                        {startingId === acc.id ? <RefreshCw size={13} className="animate-spin" /> : <ExternalLink size={13} />}
-                        <span>{startingId === acc.id ? 'Đang kết nối...' : (isCompanyAdmin ? 'Kết nối Facebook' : 'Kết nối')}</span>
-                      </button>
+                      {!acc.is_chrome_running ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleStartChrome(acc.id, { background: false })}
+                            disabled={startingId !== null || deletingId === acc.id}
+                            className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors border disabled:opacity-50 ${
+                              isCheckpoint
+                                ? 'bg-red-600 hover:bg-red-500 text-white border-red-500'
+                                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700/60'
+                            }`}
+                            title="Mở trình duyệt Chrome ở chế độ hiển thị"
+                          >
+                            {startingId === `${acc.id}:vis` ? <RefreshCw size={13} className="animate-spin" /> : <ExternalLink size={13} />}
+                            <span>{startingId === `${acc.id}:vis` ? 'Đang mở...' : (isCompanyAdmin ? 'Kết nối' : 'Kết nối')}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleStartChrome(acc.id, { background: true })}
+                            disabled={startingId !== null || deletingId === acc.id}
+                            className="px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors border bg-slate-800/80 hover:bg-slate-700 text-slate-300 border-slate-700/60 disabled:opacity-50"
+                            title="Mở Chrome chạy ngầm dưới nền Windows"
+                          >
+                            {startingId === `${acc.id}:bg` ? <RefreshCw size={13} className="animate-spin" /> : <EyeOff size={13} />}
+                            <span>{startingId === `${acc.id}:bg` ? 'Đang mở...' : 'Mở ẩn'}</span>
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          {acc.chrome_display_mode === 'BACKGROUND' ? (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleChromeDisplay(acc.id, 'open')}
+                              disabled={startingId !== null || deletingId === acc.id}
+                              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors border bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border-sky-500/30 disabled:opacity-50"
+                              title="Hiển thị cửa sổ Chrome lên màn hình"
+                            >
+                              {startingId === `${acc.id}:open` ? <RefreshCw size={13} className="animate-spin" /> : <Eye size={13} />}
+                              <span>{startingId === `${acc.id}:open` ? 'Đang xử lý...' : 'Hiện Chrome'}</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleChromeDisplay(acc.id, 'background')}
+                              disabled={startingId !== null || deletingId === acc.id}
+                              className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors border bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700/60 disabled:opacity-50"
+                              title="Ẩn cửa sổ Chrome xuống nền Windows"
+                            >
+                              {startingId === `${acc.id}:background` ? <RefreshCw size={13} className="animate-spin" /> : <EyeOff size={13} />}
+                              <span>{startingId === `${acc.id}:background` ? 'Đang xử lý...' : 'Ẩn Chrome'}</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleStopChrome(acc.id)}
+                            disabled={startingId !== null || deletingId === acc.id}
+                            className="px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center gap-1 transition-colors border bg-red-500/10 hover:bg-red-500/20 text-red-400 border-red-500/20 disabled:opacity-50"
+                            title="Tắt tiến trình Chrome"
+                          >
+                            {startingId === `${acc.id}:stop` ? <RefreshCw size={13} className="animate-spin" /> : <Power size={13} />}
+                            <span>{startingId === `${acc.id}:stop` ? '...' : 'Tắt'}</span>
+                          </button>
+                        </>
+                      )}
                       {isCompanyAdmin && <button
                         type="button"
                         onClick={() => handleDeleteAccount(acc)}
-                        disabled={deletingId === acc.id || startingId === acc.id}
+                        disabled={deletingId === acc.id || startingId !== null}
                         aria-label={`Xóa tài khoản ${acc.name || acc.id}`}
                         title="Xóa tài khoản khỏi CRM"
                         className="p-1.5 rounded-md text-red-400 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-colors disabled:opacity-50"

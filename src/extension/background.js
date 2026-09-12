@@ -258,6 +258,20 @@ function connectWebSocket() {
           console.log("[FB Engine] 🔄 Đang sync lịch sử tin nhắn thread:", message.data);
           await handleSyncThreadMessages(message.data);
           break;
+        case 'PAGE_BATCH_ACK': {
+          console.log('[FB Engine] 📩 Nhận PAGE_BATCH_ACK từ backend:', message.data);
+          chrome.tabs.query({ url: ['*://business.facebook.com/*', '*://*.facebook.com/*'] }, (tabs) => {
+            tabs.forEach(tab => {
+              if (tab?.id) {
+                chrome.tabs.sendMessage(tab.id, {
+                  type: 'PAGE_BATCH_ACK',
+                  data: message.data
+                }).catch(() => {});
+              }
+            });
+          });
+          break;
+        }
         case 'BULK_HISTORY_SYNC':
           console.log('[FB Engine] Starting bulk history sync:', message.data);
           await handleBulkHistorySync(message.data);
@@ -449,6 +463,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendToBackend('CONTENT_DEBUG', message.data);
   }
 
+  if (message.type === 'PAGE_SCROLLER_DEBUG') {
+    sendToBackend('PAGE_SCROLLER_DEBUG', message.data);
+  }
+
   if (message.type === 'NEW_PAGE_MESSAGE_FROM_DOM') {
     const msgData = message.data;
     console.log('[FB Engine] 📨 NEW_PAGE_MESSAGE_FROM_DOM từ page_content:', JSON.stringify(msgData).substring(0, 300));
@@ -456,6 +474,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ...msgData,
       account_id: user_id || msgData.account_id,
       source_type: 'page_messenger',
+    });
+  }
+
+  if (message.type === 'PAGE_THREAD_MESSAGES_SYNCED_V1') {
+    const msgData = message.data;
+    console.log('[FB Engine] 📦 PAGE_THREAD_MESSAGES_SYNCED_V1 từ page_content:', JSON.stringify(msgData).substring(0, 300));
+    sendToBackend('PAGE_THREAD_MESSAGES_SYNCED_V1', {
+      ...msgData,
+      account_id: user_id || msgData.account_id,
+      source_type: 'page_messenger'
+    });
+  }
+
+  if (message.type === 'UPGRADE_MESSAGE_TIMESTAMP') {
+    const msgData = message.data;
+    sendToBackend('UPGRADE_MESSAGE_TIMESTAMP', {
+      ...msgData,
+      account_id: user_id || msgData?.account_id
     });
   }
 
@@ -2058,13 +2094,7 @@ async function handleSendQueuedMessage(data) {
 async function getBusinessSuiteTab(pageId) {
   const role = `page:${pageId}`;
   const registered = await getRegisteredTab(role);
-  // Never trust a registered tab blindly: getRegisteredTab only confirms the
-  // tab still exists, not that it's still showing Business Suite for THIS
-  // page. Facebook's shared-identity session (see getFacebookTab) or a
-  // manual navigation can move it elsewhere; without this check a send could
-  // silently land on whatever the tab now shows - the wrong Page or the
-  // personal surface - instead of failing safely.
-  if (registered && isBusinessSuiteUrl(registered.url) && String(registered.url || '').includes(`asset_id=${pageId}`)) {
+  if (registered && isBusinessSuiteUrl(registered.url) && (String(registered.url || '').includes(`asset_id=${pageId}`) || String(registered.url || '').includes(`mailbox_id=${pageId}`))) {
     return registered;
   }
   if (registered) await unregisterTab(role);
@@ -2072,7 +2102,10 @@ async function getBusinessSuiteTab(pageId) {
   return new Promise((resolve) => {
     chrome.tabs.query({ url: ['*://business.facebook.com/*'] }, async (tabs) => {
       if (!tabs || tabs.length === 0) return resolve(null);
-      const tab = tabs.find(t => t.url && t.url.includes(`asset_id=${pageId}`));
+      let tab = tabs.find((t) => t.url && (t.url.includes(`asset_id=${pageId}`) || t.url.includes(`mailbox_id=${pageId}`)));
+      if (!tab && tabs.length > 0) {
+        tab = tabs.find((t) => isBusinessSuiteUrl(t.url));
+      }
       if (tab?.id) await registerTab(role, tab.id);
       resolve(tab || null);
     });
@@ -2945,7 +2978,7 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
       return false;
     }
 
-    const targetBizUrl = `https://business.facebook.com/latest/inbox/messenger?asset_id=${encodeURIComponent(pId)}&selected_item_id=${encodeURIComponent(targetId)}`;
+    const targetBizUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(pId)}&mailbox_id=${encodeURIComponent(pId)}&selected_item_id=${encodeURIComponent(targetId)}&thread_type=FB_MESSAGE`;
     try {
       const loadPromise = waitForTabComplete(tab.id, 8000);
       await chrome.tabs.update(tab.id, { url: targetBizUrl });
@@ -3213,6 +3246,49 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
       reason: 'url_mismatch',
       mode,
       cursor
+    });
+    return;
+  }
+
+  if (page_id) {
+    console.log(`[FB Engine] 🚀 Page sync delegating to page_content in tab ${tab.id} for thread ${thread_id}`);
+    if (['ondemand_older', 'page_scroll_older', 'ondemand_viewport'].includes(mode)) {
+      (async () => {
+        try {
+          const [activeTab] = await chrome.tabs.query({ active: true, windowId: tab.windowId }).catch(() => []);
+          if (activeTab?.id && activeTab.id !== tab.id) {
+            await chrome.tabs.update(tab.id, { active: true }).catch(() => null);
+            setTimeout(() => {
+              chrome.tabs.update(activeTab.id, { active: true }).catch(() => null);
+            }, 600);
+          }
+        } catch (e) {}
+      })();
+    }
+    chrome.tabs.sendMessage(tab.id, {
+      type: 'REQUEST_PAGE_BATCH_SYNC',
+      data: {
+        account_id: targetAcc,
+        thread_id,
+        page_id,
+        mode: mode === 'ondemand_older' ? 'page_scroll_older' : 'page_initial',
+        cursor
+      }
+    }).catch((err) => {
+      console.warn('[FB Engine] Không gửi được REQUEST_PAGE_BATCH_SYNC tới page_content:', err.message);
+      sendToBackend('PAGE_SCROLLER_DEBUG', {
+        thread_id,
+        stage: 'TAB_DISCONNECTED',
+        error: err.message
+      });
+      sendToBackend('THREAD_MESSAGES_SYNCED', {
+        account_id: targetAcc,
+        thread_id,
+        messages: [],
+        reason: 'tab_extension_invalidated',
+        mode,
+        cursor
+      });
     });
     return;
   }

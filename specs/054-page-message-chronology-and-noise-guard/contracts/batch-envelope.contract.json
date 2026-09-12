@@ -1,0 +1,131 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PageBatchEnvelopeContractV1",
+  "description": "Hợp đồng dữ liệu Batch Envelope độc quyền cho Fanpage gửi qua sự kiện PAGE_THREAD_MESSAGES_SYNCED_V1 và phản hồi ACK từ Server",
+  "definitions": {
+    "BatchEnvelope": {
+      "type": "object",
+      "required": [
+        "thread_id",
+        "session_epoch",
+        "generation",
+        "scan_id",
+        "batch_sequence",
+        "mode",
+        "messages"
+      ],
+      "properties": {
+        "thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "enum": ["UNKNOWN_THREAD", "unknown_dom", ""]
+          }
+        },
+        "account_id": { "type": ["string", "null"] },
+        "page_id": { "type": ["string", "null"] },
+        "session_epoch": { "type": "string", "description": "Session/Tab epoch UUID created on mount/tab open" },
+        "generation": { "type": "integer", "minimum": 1, "description": "Generation counter per session_epoch, increments on retry" },
+        "scan_id": { "type": "string", "format": "uuid" },
+        "batch_sequence": { "type": "integer", "minimum": 1 },
+        "mode": {
+          "type": "string",
+          "enum": ["page_initial", "page_scroll_older", "page_realtime_reconcile"]
+        },
+        "boundary_evidence": {
+          "type": "object",
+          "properties": {
+            "previous_oldest_message_id": { "type": ["string", "null"] },
+            "crawler_confirmed_scroll": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "content",
+              "media_type",
+              "is_outgoing",
+              "sender_id",
+              "sender_role",
+              "direction_status",
+              "direction_confidence",
+              "dom_order",
+              "timestamp_ms",
+              "timestamp_source"
+            ],
+            "properties": {
+              "fb_message_id": { "type": ["string", "null"] },
+              "client_message_id": { "type": ["string", "null"] },
+              "content": { "type": ["string", "null"] },
+              "media_type": {
+                "type": "string",
+                "enum": ["text", "image", "video", "voice", "file", "call"]
+              },
+              "media_url": { "type": ["string", "null"] },
+              "is_outgoing": { "type": ["boolean", "null"] },
+              "sender_id": { "type": "string", "minLength": 1 },
+              "sender_role": {
+                "type": "string",
+                "enum": ["customer", "operator"]
+              },
+              "sender_name": { "type": ["string", "null"] },
+              "avatar_url": { "type": ["string", "null"] },
+              "direction_status": {
+                "type": "string",
+                "enum": ["confirmed", "pending"]
+              },
+              "direction_source": { "type": "string" },
+              "direction_confidence": {
+                "type": "string",
+                "enum": ["high", "medium", "low", "unknown"]
+              },
+              "dom_order": { "type": "integer", "minimum": 0 },
+              "timestamp_ms": { "type": "integer", "minimum": 0 },
+              "timestamp_source": {
+                "type": "string",
+                "enum": [
+                  "facebook_timestamp",
+                  "facebook_label",
+                  "separator_date_clock",
+                  "realtime_delta",
+                  "dom_order",
+                  "unknown"
+                ]
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "BatchAck": {
+      "type": "object",
+      "required": ["thread_id", "session_epoch", "generation", "scan_id", "status"],
+      "properties": {
+        "thread_id": { "type": "string" },
+        "session_epoch": { "type": "string" },
+        "generation": { "type": "integer" },
+        "scan_id": { "type": "string" },
+        "batch_sequence": { "type": "integer" },
+        "status": {
+          "type": "string",
+          "enum": ["committed", "duplicate", "retry_required", "rejected"]
+        },
+        "reason": { "type": ["string", "null"] },
+        "persisted_count": { "type": "integer" },
+        "sequence_range": {
+          "type": "object",
+          "properties": {
+            "min": { "type": "integer" },
+            "max": { "type": "integer" }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

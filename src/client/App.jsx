@@ -464,14 +464,22 @@ export default function App() {
           }
         }
         
-        // Database insertion order is the canonical chat sequence. Direction
-        // is stored separately in is_outgoing (0 = customer, 1 = operator),
-        // so timestamps are display metadata only and never move a bubble.
+        // Prioritize chronological timestamp order; fall back to sequence_order / id for close timestamps
         updated.sort((a, b) => {
+          const timeA = (a.timestamp_ms && Number(a.timestamp_ms) > 0) ? Number(a.timestamp_ms) : 0;
+          const timeB = (b.timestamp_ms && Number(b.timestamp_ms) > 0) ? Number(b.timestamp_ms) : 0;
+          if (timeA > 0 && timeB > 0 && Math.abs(timeA - timeB) > 120000) {
+            return timeA - timeB;
+          }
           const sequenceA = Number(a.sequence_order ?? a.id);
           const sequenceB = Number(b.sequence_order ?? b.id);
-          if (!Number.isFinite(sequenceA) || !Number.isFinite(sequenceB)) return 0;
-          return sequenceA - sequenceB || Number(a.id || 0) - Number(b.id || 0);
+          if (Number.isFinite(sequenceA) && Number.isFinite(sequenceB) && sequenceA !== sequenceB) {
+            return sequenceA - sequenceB;
+          }
+          if (timeA > 0 && timeB > 0 && timeA !== timeB) {
+            return timeA - timeB;
+          }
+          return Number(a.id || 0) - Number(b.id || 0);
         });
 
         return { ...prev, [tidStr]: updated };
@@ -508,7 +516,7 @@ export default function App() {
         const currentMsgs = prev[tidStr] || [];
         return {
           ...prev,
-          [tidStr]: currentMsgs.map(m => m.client_message_id === client_message_id ? { ...m, status: 'sent', delivery_status: 'sent', fb_message_id: fb_message_id || m.fb_message_id, error: null } : m)
+          [tidStr]: currentMsgs.map(m => (m.client_message_id === client_message_id || m.client_message_id === client_message_id + '_media') ? { ...m, status: 'sent', delivery_status: 'sent', fb_message_id: fb_message_id || m.fb_message_id, error: null } : m)
         };
       });
       // Keep the optimistic sent state while Facebook's late DOM confirmation
@@ -550,7 +558,7 @@ export default function App() {
         const currentMsgs = prev[tidStr] || [];
         return {
           ...prev,
-          [tidStr]: currentMsgs.filter(m => m.client_message_id !== client_message_id)
+          [tidStr]: currentMsgs.filter(m => m.client_message_id !== client_message_id && m.client_message_id !== client_message_id + '_media')
         };
       });
     });
@@ -571,7 +579,7 @@ export default function App() {
       setMessages((prev) => ({
         ...prev,
         [tidStr]: (prev[tidStr] || []).map((message) => (
-          message.client_message_id === accepted.client_message_id
+          (message.client_message_id === accepted.client_message_id || message.client_message_id === accepted.client_message_id + '_media')
             ? {
                 ...message,
                 id: accepted.message_id,
@@ -593,6 +601,7 @@ export default function App() {
         ...prev,
         [tidStr]: (prev[tidStr] || []).map((message) => (
           message.client_message_id === statusEvent.client_message_id ||
+          message.client_message_id === statusEvent.client_message_id + '_media' ||
           (statusEvent.message_id && Number(message.id) === Number(statusEvent.message_id))
             ? statusEvent.status === 'failed' ? null : {
                 ...message,
@@ -618,7 +627,7 @@ export default function App() {
         const next = { ...prev };
         Object.keys(next).forEach((threadId) => {
           next[threadId] = next[threadId].map((message) => (
-            message.client_message_id === client_message_id
+            (message.client_message_id === client_message_id || message.client_message_id === client_message_id + '_media')
               ? null
               : message
           )).filter(Boolean);
@@ -664,6 +673,11 @@ export default function App() {
 
         const mergedArray = Array.from(mergedMap.values());
         mergedArray.sort((a, b) => {
+          const timeA = (a.timestamp_ms && Number(a.timestamp_ms) > 0) ? Number(a.timestamp_ms) : 0;
+          const timeB = (b.timestamp_ms && Number(b.timestamp_ms) > 0) ? Number(b.timestamp_ms) : 0;
+          if (timeA > 0 && timeB > 0 && Math.abs(timeA - timeB) >= 1000) {
+            return timeA - timeB;
+          }
           const sequenceA = Number(a.sequence_order ?? a.id);
           const sequenceB = Number(b.sequence_order ?? b.id);
           if (!Number.isFinite(sequenceA) || !Number.isFinite(sequenceB)) return 0;
@@ -760,6 +774,18 @@ export default function App() {
       loadAccounts();
     });
 
+    socket.on('ACCOUNT_DISPLAY_CHANGED', ({ account_id, is_chrome_running, chrome_display_mode }) => {
+      setAccounts((currentAccounts) => currentAccounts.map((account) => (
+        String(account.id) === String(account_id)
+          ? {
+              ...account,
+              is_chrome_running,
+              chrome_display_mode: chrome_display_mode || (is_chrome_running ? 'VISIBLE' : 'STOPPED')
+            }
+          : account
+      )));
+    });
+
     socket.on('FACEBOOK_SYNC_STARTED', ({ account_id, tab_count }) => {
       if (String(requestedFacebookSyncRef.current || '') !== String(account_id || '')) return;
       setAccountSyncing({ accountId: String(account_id), tabCount: Math.max(0, Number(tab_count) || 0) });
@@ -842,6 +868,7 @@ export default function App() {
       socket.off('EXTENSION_CONNECTION_CHANGED');
       socket.off('MESSAGE_UNSENT');
       socket.off('ACCOUNT_STATUS_CHANGED');
+      socket.off('ACCOUNT_DISPLAY_CHANGED');
       socket.off('FACEBOOK_SYNC_STARTED');
       socket.off('AI_PAUSED');
       socket.off('THREAD_ASSIGNED');
@@ -919,26 +946,68 @@ export default function App() {
         };
     if (!payload.client_message_id) throw new Error('Thiếu mã tin nhắn phía CRM.');
 
-    const newMsg = {
-      client_message_id: payload.client_message_id,
-      content: payload.content,
-      attachment_id: payload.attachment_id,
-      attachment: payload.attachment,
-      media_type: payload.attachment?.media_type || 'text',
-      media_url: payload.attachment?.preview_url || null,
-      media_name: payload.attachment?.safe_name || payload.attachment?.original_name || null,
-      media_mime_type: payload.attachment?.mime_type || null,
-      media_size: payload.attachment?.byte_size || null,
-      is_outgoing: true,
-      direction_status: 'confirmed',
-      created_at: new Date().toISOString(),
-      status: 'sending',
-      delivery_status: 'pending'
-    };
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+    const isRichWithText = Boolean((payload.attachment_id || payload.attachment) && String(payload.content || '').trim());
+
+    let optimisticMessages = [];
+    if (isRichWithText) {
+      const mediaMsg = {
+        client_message_id: payload.client_message_id + '_media',
+        content: '',
+        attachment_id: payload.attachment_id,
+        attachment: payload.attachment,
+        media_type: payload.attachment?.media_type || 'image',
+        media_url: payload.attachment?.preview_url || null,
+        media_name: payload.attachment?.safe_name || payload.attachment?.original_name || null,
+        media_mime_type: payload.attachment?.mime_type || null,
+        media_size: payload.attachment?.byte_size || null,
+        is_outgoing: true,
+        direction_status: 'confirmed',
+        created_at: nowIso,
+        timestamp_ms: now,
+        status: 'sending',
+        delivery_status: 'pending'
+      };
+      const textMsg = {
+        client_message_id: payload.client_message_id,
+        content: payload.content,
+        attachment_id: null,
+        attachment: null,
+        media_type: 'text',
+        media_url: null,
+        is_outgoing: true,
+        direction_status: 'confirmed',
+        created_at: new Date(now + 10).toISOString(),
+        timestamp_ms: now + 10,
+        status: 'sending',
+        delivery_status: 'pending'
+      };
+      optimisticMessages = [mediaMsg, textMsg];
+    } else {
+      const newMsg = {
+        client_message_id: payload.client_message_id,
+        content: payload.content,
+        attachment_id: payload.attachment_id,
+        attachment: payload.attachment,
+        media_type: payload.attachment?.media_type || 'text',
+        media_url: payload.attachment?.preview_url || null,
+        media_name: payload.attachment?.safe_name || payload.attachment?.original_name || null,
+        media_mime_type: payload.attachment?.mime_type || null,
+        media_size: payload.attachment?.byte_size || null,
+        is_outgoing: true,
+        direction_status: 'confirmed',
+        created_at: nowIso,
+        timestamp_ms: now,
+        status: 'sending',
+        delivery_status: 'pending'
+      };
+      optimisticMessages = [newMsg];
+    }
 
     setMessages((prev) => ({
       ...prev,
-      [threadIdStr]: [...(prev[threadIdStr] || []), newMsg]
+      [threadIdStr]: [...(prev[threadIdStr] || []), ...optimisticMessages]
     }));
 
     if (socket && isConnected) {
@@ -957,7 +1026,7 @@ export default function App() {
     setMessages((prev) => ({
       ...prev,
       [threadIdStr]: (prev[threadIdStr] || []).map((message) => (
-        message.client_message_id === payload.client_message_id
+        (message.client_message_id === payload.client_message_id || message.client_message_id === payload.client_message_id + '_media')
           ? {
               ...message,
               status: 'failed',
@@ -1261,8 +1330,8 @@ export default function App() {
               onRetryMessage={handleRetryMessage}
               historySyncing={String(historySyncingThreadId || '') === String(activeThreadId)}
               onViewportScroll={(scrollDelta) => {
-                if (selectedThread.source_type === 'page_messenger') return;
-                requestThreadMessageSync(activeThreadId, 'viewport', scrollDelta);
+                const direction = Number(scrollDelta) < 0 ? 'older' : 'viewport';
+                requestThreadMessageSync(activeThreadId, direction, scrollDelta);
               }}
             />
             {['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(selectedThread.inbox_folder) ? (

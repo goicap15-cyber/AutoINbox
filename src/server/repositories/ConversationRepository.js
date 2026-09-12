@@ -1,5 +1,6 @@
 const crypto = require('crypto');
-const { isInvalidContactName } = require('../utils/textFilter');
+const { isInvalidContactName, cleanContactName } = require('../utils/textFilter');
+const { isBlacklistedThreadId } = require('../utils/threadGuard');
 let defaultDb;
 function getDefaultDb() {
   if (!defaultDb) defaultDb = require('../database/db');
@@ -19,6 +20,18 @@ function getDefaultDb() {
 // happen, so it should never carry a "one disagreement already logged"
 // state across restarts.
 let directionFlipCandidates = new Map(); // fb_message_id -> proposed isOutgoing (0/1)
+const scanIdCache = new Map(); // scan_id -> timestamp
+const threadGenerations = new Map(); // thread_id -> { session_epoch, generation }
+const SCAN_ID_TTL_MS = 10 * 60 * 1000; // 10 minutes TTL
+
+function cleanExpiredScanIds() {
+  const now = Date.now();
+  for (const [id, ts] of scanIdCache.entries()) {
+    if (now - ts > SCAN_ID_TTL_MS) {
+      scanIdCache.delete(id);
+    }
+  }
+}
 
 function shouldCommitDirectionFlip(stableMessageId, existingIsOutgoing, proposedIsOutgoing) {
   if (Number(!!existingIsOutgoing) === Number(!!proposedIsOutgoing)) {
@@ -39,7 +52,10 @@ class ConversationRepository {
     const { id, account_id, thread_url, contact_name, last_message, is_unread, source_id, inbox_folder } = threadData;
     const external_thread_id = String(threadData.external_thread_id || threadData.thread_id || id);
     const preferredId = String(id || external_thread_id);
-    const cleanIncomingName = isInvalidContactName(contact_name) ? null : contact_name.trim();
+    if (isBlacklistedThreadId(preferredId) || isBlacklistedThreadId(external_thread_id)) {
+      return null;
+    }
+    const cleanIncomingName = isInvalidContactName(contact_name) ? null : cleanContactName(contact_name);
     const normalizedInboxFolder = ['INBOX', 'MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(String(inbox_folder || '').trim())
       ? String(inbox_folder).trim()
       : null;
@@ -183,6 +199,7 @@ class ConversationRepository {
   }
 
   static saveMessagesTransaction(threadId, messages = [], database = getDefaultDb()) {
+    if (isBlacklistedThreadId(threadId)) return { insertedIds: [], updatedIds: [], skippedCount: 0 };
     const insertMsg = database.prepare(`
       INSERT INTO messages (thread_id, fb_message_id, sender_id, content, media_type, media_url, timestamp_ms, timestamp_source, is_outgoing, sender_role, sequence_order, direction_status, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -398,6 +415,308 @@ class ConversationRepository {
       previousTimestampSource: existingMsg.timestamp_source,
       previousIsOutgoing: existingMsg.is_outgoing,
       previousDirectionStatus: existingMsg.direction_status
+    };
+  }
+
+  static getTimestampRank(source) {
+    if (!source) return 1;
+    const s = String(source).trim().toLowerCase();
+    if (s === 'facebook_payload' || s === 'facebook_timestamp') return 6;
+    if (s === 'facebook_label' || s === 'facebook_dom') return 5;
+    if (s === 'separator_date_clock' || s === 'dom_clock_order') return 4;
+    if (s === 'realtime_delta' || s === 'client_submit' || s === 'composer_confirmation' || s === 'realtime_fallback' || s === 'sync') return 3;
+    if (s === 'dom_order') return 2;
+    return 1;
+  }
+
+  static shouldUpgradeTimestamp(oldSource, newSource, oldTs = 0, newTs = 0) {
+    const oldRank = ConversationRepository.getTimestampRank(oldSource);
+    const newRank = ConversationRepository.getTimestampRank(newSource);
+    if (newRank > oldRank) return true;
+    if (newRank < oldRank) return false;
+    // When ranks are identical (e.g. separator_date_clock or realtime_fallback):
+    // allow upgrade if the new timestamp is valid (>0) and significantly different (>= 30s or across days)
+    if (newTs > 0 && oldTs > 0 && Math.abs(Number(newTs) - Number(oldTs)) >= 30000) {
+      return true;
+    }
+    return false;
+  }
+
+  static upgradeMessageTimestamp(threadId, fbMessageId, timestampMs, timestampSource, database = getDefaultDb()) {
+    if (!threadId || !fbMessageId || !timestampMs || timestampMs <= 0) return null;
+    const existing = database.prepare('SELECT id, timestamp_ms, timestamp_source FROM messages WHERE fb_message_id = ?').get(fbMessageId);
+    if (!existing) return null;
+    if (!ConversationRepository.shouldUpgradeTimestamp(existing.timestamp_source, timestampSource, existing.timestamp_ms, timestampMs)) {
+      return null;
+    }
+    database.prepare(`
+      UPDATE messages 
+      SET timestamp_ms = ?, timestamp_source = ?
+      WHERE fb_message_id = ?
+    `).run(timestampMs, timestampSource, fbMessageId);
+    ConversationRepository.normalizeMessageSequence(threadId, database);
+    return database.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(fbMessageId);
+  }
+
+  static reconcileBatchWithAnchors(existingRows = [], incomingBatch = [], options = {}) {
+    const mode = options.mode || 'page_initial';
+    const boundaryEvidence = options.boundary_evidence || null;
+
+    const existingMap = new Map();
+    for (const row of existingRows) {
+      if (row.fb_message_id) {
+        existingMap.set(row.fb_message_id, row);
+      }
+    }
+
+    if (!existingRows.length) {
+      const mergedList = incomingBatch.map((msg, index) => ({
+        ...msg,
+        sequence_order: index + 1
+      }));
+      return { status: 'committed', mergedList };
+    }
+
+    const existingIndexMap = new Map();
+    existingRows.forEach((r, idx) => {
+      if (r.fb_message_id) existingIndexMap.set(r.fb_message_id, idx);
+    });
+
+    let firstIncomingMatch = -1;
+    let firstExistingMatch = -1;
+    let lastIncomingMatch = -1;
+    let lastExistingMatch = -1;
+
+    for (let i = 0; i < incomingBatch.length; i++) {
+      const id = incomingBatch[i].fb_message_id;
+      if (id && existingIndexMap.has(id)) {
+        if (firstIncomingMatch === -1) {
+          firstIncomingMatch = i;
+          firstExistingMatch = existingIndexMap.get(id);
+        }
+        lastIncomingMatch = i;
+        lastExistingMatch = existingIndexMap.get(id);
+      }
+    }
+
+    if (firstIncomingMatch !== -1) {
+      // Overlap exists between incoming batch and existing database rows!
+      const olderIncoming = incomingBatch.slice(0, firstIncomingMatch);
+      const newerIncoming = incomingBatch.slice(lastIncomingMatch + 1);
+
+      const mergedList = [];
+      const seenIds = new Set();
+
+      const pushMsg = (m) => {
+        if (!m || !m.fb_message_id || seenIds.has(m.fb_message_id)) return;
+        seenIds.add(m.fb_message_id);
+        mergedList.push(m);
+      };
+
+      // Existing rows that are strictly older than the first existing match
+      for (let i = 0; i < firstExistingMatch; i++) {
+        pushMsg(existingRows[i]);
+      }
+
+      // Older incoming items that appeared before the first anchor
+      for (const m of olderIncoming) {
+        pushMsg(m);
+      }
+
+      // Items in the overlapping window (merge incoming updates into existing)
+      const incomingOverlapMap = new Map();
+      for (let i = firstIncomingMatch; i <= lastIncomingMatch; i++) {
+        if (incomingBatch[i].fb_message_id) {
+          incomingOverlapMap.set(incomingBatch[i].fb_message_id, incomingBatch[i]);
+        }
+      }
+
+      for (let i = firstExistingMatch; i <= lastExistingMatch; i++) {
+        const ex = existingRows[i];
+        const inc = incomingOverlapMap.get(ex.fb_message_id);
+        pushMsg(inc ? { ...ex, ...inc } : ex);
+      }
+
+      // Also include any incoming items in the overlap span that were not in existing
+      for (let i = firstIncomingMatch; i <= lastIncomingMatch; i++) {
+        pushMsg(incomingBatch[i]);
+      }
+
+      // Newer incoming items that appeared after the last anchor
+      for (const m of newerIncoming) {
+        pushMsg(m);
+      }
+
+      // Any remaining existing rows after the last match
+      for (let i = lastExistingMatch + 1; i < existingRows.length; i++) {
+        pushMsg(existingRows[i]);
+      }
+
+      mergedList.forEach((msg, idx) => {
+        msg.sequence_order = idx + 1;
+      });
+
+      return { status: 'committed', mergedList };
+    }
+
+    if (mode === 'page_scroll_older') {
+      if (!boundaryEvidence || !boundaryEvidence.previous_oldest_message_id) {
+        return { status: 'retry_required', reason: 'missing_anchor_and_invalid_boundary' };
+      }
+
+      const prevOldestId = boundaryEvidence.previous_oldest_message_id;
+      const isKnownOldest = existingRows.length > 0 && existingRows[0].fb_message_id === prevOldestId;
+      if (!isKnownOldest && !existingMap.has(prevOldestId)) {
+        return { status: 'retry_required', reason: 'missing_anchor_and_invalid_boundary' };
+      }
+
+      const mergedList = [...incomingBatch, ...existingRows];
+      mergedList.forEach((msg, idx) => {
+        msg.sequence_order = idx + 1;
+      });
+
+      return { status: 'committed', mergedList };
+    }
+
+    const mergedMap = new Map();
+    for (const row of existingRows) {
+      mergedMap.set(row.fb_message_id, { ...row });
+    }
+    for (const msg of incomingBatch) {
+      if (mergedMap.has(msg.fb_message_id)) {
+        const prev = mergedMap.get(msg.fb_message_id);
+        mergedMap.set(msg.fb_message_id, { ...prev, ...msg });
+      } else {
+        mergedMap.set(msg.fb_message_id, { ...msg });
+      }
+    }
+
+    const mergedList = Array.from(mergedMap.values());
+    mergedList.forEach((msg, idx) => {
+      msg.sequence_order = idx + 1;
+    });
+
+    return { status: 'committed', mergedList };
+  }
+
+  static processPageBatchEnvelope(envelope, database = getDefaultDb()) {
+    cleanExpiredScanIds();
+    const { thread_id, session_epoch, generation, scan_id, mode, messages = [] } = envelope;
+
+    if (isBlacklistedThreadId(thread_id)) {
+      return {
+        status: 'rejected',
+        reason: 'blacklisted_thread_id',
+        thread_id,
+        session_epoch,
+        generation,
+        scan_id
+      };
+    }
+
+    const currentGen = threadGenerations.get(thread_id);
+    if (currentGen && currentGen.session_epoch === session_epoch && generation < currentGen.generation) {
+      return {
+        status: 'rejected',
+        reason: 'stale_generation',
+        thread_id,
+        session_epoch,
+        generation,
+        scan_id
+      };
+    }
+
+    if (scanIdCache.has(scan_id)) {
+      return {
+        status: 'duplicate',
+        thread_id,
+        session_epoch,
+        generation,
+        scan_id
+      };
+    }
+
+    threadGenerations.set(thread_id, { session_epoch, generation });
+
+    const existingRows = database.prepare(`
+      SELECT * FROM messages WHERE thread_id = ? ORDER BY sequence_order ASC, id ASC
+    `).all(thread_id);
+
+    const reconcileRes = ConversationRepository.reconcileBatchWithAnchors(existingRows, messages, envelope);
+    if (reconcileRes.status !== 'committed') {
+      return {
+        status: reconcileRes.status,
+        reason: reconcileRes.reason,
+        thread_id,
+        session_epoch,
+        generation,
+        scan_id
+      };
+    }
+
+    const insertOrUpdate = database.prepare(`
+      INSERT INTO messages (
+        thread_id, fb_message_id, client_message_id, sender_id, content,
+        media_type, media_url, timestamp_ms, timestamp_source, is_outgoing,
+        sender_role, sequence_order, direction_status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(fb_message_id) DO UPDATE SET
+        content = CASE WHEN excluded.content IS NOT NULL AND excluded.content <> '' THEN excluded.content ELSE messages.content END,
+        media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
+        media_url = COALESCE(excluded.media_url, messages.media_url),
+        timestamp_ms = CASE WHEN ? = 1 THEN excluded.timestamp_ms ELSE messages.timestamp_ms END,
+        timestamp_source = CASE WHEN ? = 1 THEN excluded.timestamp_source ELSE messages.timestamp_source END,
+        is_outgoing = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.is_outgoing ELSE messages.is_outgoing END,
+        sender_role = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.sender_role ELSE messages.sender_role END,
+        sequence_order = excluded.sequence_order,
+        direction_status = CASE WHEN excluded.direction_status = 'confirmed' THEN 'confirmed' ELSE messages.direction_status END
+    `);
+
+    const updateTx = database.transaction((mergedList) => {
+      for (const msg of mergedList) {
+        const isOutgoing = msg.is_outgoing === true || msg.is_outgoing === 1 ? 1 : 0;
+        const directionStatus = (msg.is_outgoing === null || msg.direction_status === 'pending') ? 'pending' : 'confirmed';
+        const senderRole = isOutgoing ? 'operator' : 'customer';
+        const senderId = msg.sender_id || (isOutgoing ? (msg.account_id || 'SYSTEM') : 'CONTACT');
+        const tsMs = Number(msg.timestamp_ms || 0);
+        const tsSource = msg.timestamp_source || 'unknown';
+        const createdAt = msg.created_at || (tsMs > 0 ? new Date(tsMs).toISOString() : new Date().toISOString());
+
+        const existing = database.prepare('SELECT timestamp_source, timestamp_ms FROM messages WHERE fb_message_id = ?').get(msg.fb_message_id);
+        const canUpgrade = !existing || ConversationRepository.shouldUpgradeTimestamp(existing.timestamp_source, tsSource, existing.timestamp_ms, tsMs);
+
+        insertOrUpdate.run(
+          thread_id,
+          msg.fb_message_id,
+          msg.client_message_id || null,
+          senderId,
+          msg.content || null,
+          msg.media_type || 'text',
+          msg.media_url || null,
+          tsMs,
+          tsSource,
+          isOutgoing,
+          senderRole,
+          msg.sequence_order,
+          directionStatus,
+          createdAt,
+          canUpgrade ? 1 : 0,
+          canUpgrade ? 1 : 0
+        );
+      }
+    });
+
+    updateTx(reconcileRes.mergedList);
+    ConversationRepository.normalizeMessageSequence(thread_id, database);
+    scanIdCache.set(scan_id, Date.now());
+
+    return {
+      status: 'committed',
+      thread_id,
+      session_epoch,
+      generation,
+      scan_id,
+      persisted_count: messages.length
     };
   }
 

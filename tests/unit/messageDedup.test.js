@@ -33,3 +33,15 @@ test('collapses an optimistic and durable copy of the same outbound attachment',
   assert.equal(rows[0].id, 99);
   assert.equal(rows[0].fb_message_id, 'mid.$REAL');
 });
+
+test('collapses a temporary outbound image with a confirmed mid.* image within 120s window', async () => {
+  const { collapseMessengerMediaCompanions } = await import('../../src/client/utils/messageDedup.js');
+  const rows = collapseMessengerMediaCompanions([
+    { id: 14049, client_message_id: 'client_123', fb_message_id: '7504119442649168613', media_type: 'image', is_outgoing: 1, timestamp_ms: 1789121492783, status: 'sent' },
+    { id: 14233, fb_message_id: 'mid.$cAAQXQILUZ2SmwTiBrWgj_N_gJaU2', media_type: 'image', is_outgoing: 1, timestamp_ms: 1789121400270, status: 'sent' }
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].id, 14233);
+  assert.equal(rows[0].fb_message_id, 'mid.$cAAQXQILUZ2SmwTiBrWgj_N_gJaU2');
+});
+

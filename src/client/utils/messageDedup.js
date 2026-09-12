@@ -1,33 +1,66 @@
 export function collapseMessengerMediaCompanions(messages = []) {
-  // Reconcile a local optimistic image with the persisted Facebook-confirmed
-  // image. They can carry different client ids, but share the attachment/path.
-  const mediaSlots = new Map();
+  // Reconcile a local optimistic/temporary image with the persisted Facebook-confirmed
+  // image. They can carry different client ids or attachment vs local path.
   const withoutOptimisticDuplicates = [];
   for (const message of messages) {
     const isOutgoingMedia = Boolean(message?.is_outgoing) && Boolean(
       message?.attachment_id || message?.local_media_path || message?.media_url ||
       (message?.media_type && message.media_type !== 'text')
     );
-    const mediaKey = message?.attachment_id
-      ? `attachment:${message.attachment_id}`
-      : message?.local_media_path
-        ? `local:${message.local_media_path}`
-        : null;
-    if (!isOutgoingMedia || !mediaKey) {
+    if (!isOutgoingMedia) {
       withoutOptimisticDuplicates.push(message);
       continue;
     }
-    const existingIndex = mediaSlots.get(mediaKey);
-    if (existingIndex == null) {
-      mediaSlots.set(mediaKey, withoutOptimisticDuplicates.length);
+
+    const isDurable = message?.id != null && String(message?.fb_message_id || '').startsWith('mid.');
+    const messageTime = Number(message?.timestamp_ms) || Date.parse(message?.created_at || '') || 0;
+
+    const existingIndex = withoutOptimisticDuplicates.findIndex((existing) => {
+      if (!existing?.is_outgoing) return false;
+      const existingIsMedia = Boolean(
+        existing?.attachment_id || existing?.local_media_path || existing?.media_url ||
+        (existing?.media_type && existing?.media_type !== 'text')
+      );
+      if (!existingIsMedia) return false;
+
+      // Match 1: same attachment_id
+      if (message.attachment_id && existing.attachment_id && message.attachment_id === existing.attachment_id) {
+        return true;
+      }
+
+      // Match 2: same client_message_id
+      if (message.client_message_id && existing.client_message_id) {
+        if (message.client_message_id === existing.client_message_id) return true;
+        if (message.client_message_id.replace(/_media$/, '') === existing.client_message_id.replace(/_media$/, '')) return true;
+      }
+
+      // Match 3: One is durable (mid.*) and one is temporary (non-mid, pending_*, numeric temp ID), within 120s
+      const existingDurable = existing?.id != null && String(existing?.fb_message_id || '').startsWith('mid.');
+      if ((isDurable && !existingDurable) || (!isDurable && existingDurable)) {
+        const existingTime = Number(existing?.timestamp_ms) || Date.parse(existing?.created_at || '') || 0;
+        if (messageTime > 0 && existingTime > 0 && Math.abs(messageTime - existingTime) <= 120000) {
+          return true;
+        }
+      }
+
+      return false;
+    });
+
+    if (existingIndex === -1) {
       withoutOptimisticDuplicates.push(message);
-      continue;
-    }
-    const existing = withoutOptimisticDuplicates[existingIndex];
-    const existingDurable = existing?.id != null || String(existing?.fb_message_id || '').startsWith('mid.');
-    const incomingDurable = message?.id != null || String(message?.fb_message_id || '').startsWith('mid.');
-    if (!existingDurable || incomingDurable) {
-      withoutOptimisticDuplicates[existingIndex] = { ...existing, ...message };
+    } else {
+      const existing = withoutOptimisticDuplicates[existingIndex];
+      const existingDurable = existing?.id != null && String(existing?.fb_message_id || '').startsWith('mid.');
+      if (!existingDurable || isDurable) {
+        withoutOptimisticDuplicates[existingIndex] = {
+          ...existing,
+          ...message,
+          attachment_id: message.attachment_id || existing.attachment_id,
+          client_message_id: message.client_message_id || existing.client_message_id,
+          media_url: message.media_url || existing.media_url,
+          local_media_path: message.local_media_path || existing.local_media_path
+        };
+      }
     }
   }
   messages = withoutOptimisticDuplicates;

@@ -88,16 +88,18 @@ if (isBusiness) {
     let currentAvatarUrl = null;
 
 
+    // Active Crawler state (Feature 055)
+    let crawlInProgress = false;
+    const crawlMutex = (typeof FbPageActiveScroller !== 'undefined' && FbPageActiveScroller.createCrawlMutex)
+        ? FbPageActiveScroller.createCrawlMutex()
+        : { acquire: (id) => ({ token: 'mock_' + id, threadId: id }), isTokenValid: () => true, release: () => {}, isBusy: () => false };
+
     // Use polling to be completely immune to React DOM shuffling
     setInterval(scanForMessages, 1000);
 
-    // Slower, separate cadence: nudge the message list to scroll toward older
-    // history so virtualization mounts messages that scanForMessages can then see.
-    const SCROLL_INTERVAL_MS = 4000;
-    const MAX_SCROLL_ATTEMPTS_PER_THREAD = 15;
-    let lastScrollThreadId = null;
-    let scrollAttemptsForThread = 0;
-    setInterval(scrollBackForHistory, SCROLL_INTERVAL_MS);
+    // Feature 055: Old passive scrollBackForHistory interval is deprecated and replaced
+    // by the active on-demand crawler triggered by REQUEST_PAGE_BATCH_SYNC.
+    // setInterval(scrollBackForHistory, SCROLL_INTERVAL_MS);
 
     let isScanning = false;
 
@@ -140,7 +142,7 @@ if (isBusiness) {
             }
         }
 
-        return 'UNKNOWN_THREAD';
+        return null;
     }
 
     window.addEventListener('popstate', () => setTimeout(scanForMessages, 300));
@@ -150,6 +152,48 @@ if (isBusiness) {
             setTimeout(scanForMessages, 500);
         }
     }, true);
+
+    // Lắng nghe hover tooltip để bóc tách giờ thật chi tiết từ Facebook Page
+    let hoverTooltipTimer = null;
+    document.addEventListener('mouseover', (e) => {
+        const msgEl = e.target?.closest?.('[data-message-id]');
+        if (!msgEl) return;
+        const fbMessageId = msgEl.getAttribute('data-message-id');
+        if (!fbMessageId) return;
+
+        clearTimeout(hoverTooltipTimer);
+        hoverTooltipTimer = setTimeout(() => {
+            const describedBy = msgEl.getAttribute('aria-describedby');
+            let tooltipEl = describedBy ? document.getElementById(describedBy) : null;
+            if (!tooltipEl) {
+                const tooltips = document.querySelectorAll('[role="tooltip"], [data-testid*="tooltip"]');
+                if (tooltips.length > 0) tooltipEl = tooltips[tooltips.length - 1];
+            }
+            if (tooltipEl) {
+                const tooltipText = (tooltipEl.textContent || '').trim();
+                const parser = (typeof FbPageTimestampParser !== 'undefined' ? FbPageTimestampParser.parseTimeFromLabel : null)
+                    || (typeof window !== 'undefined' && window.FbPageTimestampParser ? window.FbPageTimestampParser.parseTimeFromLabel : null);
+                if (typeof parser === 'function') {
+                    const preciseTs = parser(tooltipText);
+                    if (preciseTs && preciseTs > 0) {
+                        knownMessageTimestamps.set(fbMessageId, preciseTs);
+                        const threadId = resolveCurrentThreadId();
+                        if (threadId) {
+                            chrome.runtime.sendMessage({
+                                type: 'UPGRADE_MESSAGE_TIMESTAMP',
+                                data: {
+                                    thread_id: threadId,
+                                    fb_message_id: fbMessageId,
+                                    timestamp_ms: preciseTs,
+                                    timestamp_source: 'facebook_label'
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }, 350);
+    }, { passive: true });
 
     function isLikelyBacklog(threadId) {
         if (threadId !== lastKnownThreadId) {
@@ -171,7 +215,7 @@ if (isBusiness) {
     // never awaited, never blocks the 1s scan cadence, degrades to today's
     // existing in-memory-only behavior if the backend is unreachable.
     function seedTimestampAnchorsForThread(threadId) {
-        if (!threadId || threadId === 'UNKNOWN_THREAD') return;
+        if (!threadId) return;
         chrome.runtime.sendMessage({ type: 'GET_THREAD_TIMESTAMPS', data: { threadId } }, (response) => {
             if (chrome.runtime.lastError) return; // background unreachable - degrade silently
             const timestamps = response && response.timestamps;
@@ -188,20 +232,31 @@ if (isBusiness) {
     }
 
     function findScrollableMessageContainer() {
+        const scrollerHelper = typeof FbPageActiveScroller !== 'undefined' ? FbPageActiveScroller : null;
+        if (scrollerHelper && typeof scrollerHelper.findPageHistoryScroller === 'function') {
+            const scoredScroller = scrollerHelper.findPageHistoryScroller(document.body);
+            if (scoredScroller) return scoredScroller;
+        }
+
         const anyMessage = document.querySelector('[data-message-id]');
         if (!anyMessage) return null;
         let curr = anyMessage.parentElement;
         let overflowCapableFallback = null;
+
         while (curr && curr !== document.body) {
             const style = window.getComputedStyle(curr);
             const isOverflowCapable = style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowY === 'overlay';
             if (isOverflowCapable) {
-                if (curr.scrollHeight > curr.clientHeight + 20) {
-                    return curr; // genuinely scrollable right now - best case, also needed for scroll-back
+                if (scrollerHelper && typeof scrollerHelper.isMessageLogContainer === 'function') {
+                    if (scrollerHelper.isMessageLogContainer(curr)) {
+                        return curr;
+                    }
+                } else {
+                    const isNav = curr.closest && curr.closest('[role="navigation"], [data-surface*="thread_list"], .sidebar');
+                    if (!isNav && curr.scrollHeight > curr.clientHeight + 10) {
+                        return curr;
+                    }
                 }
-                // Short conversation that fits without scrolling yet: remember the first
-                // overflow-capable ancestor as the real chat pane even though it isn't
-                // overflowing today, so direction detection still has correct bounds.
                 if (!overflowCapableFallback) overflowCapableFallback = curr;
             }
             curr = curr.parentElement;
@@ -328,8 +383,146 @@ if (isBusiness) {
         if (knownMessageTimestamps.size > MAX_KNOWN_TIMESTAMPS) knownMessageTimestamps.clear();
     }
 
+    let threadSM = null;
+    let lastSyncedOldestMessageId = null;
+
+    function getOrInitStateMachine(threadId) {
+        if (!threadId) return null;
+        if (!threadSM || threadSM.threadId !== threadId) {
+            const SMClass = (typeof ThreadScanStateMachine !== 'undefined' ? ThreadScanStateMachine : null)
+                || (typeof window !== 'undefined' ? window.ThreadScanStateMachine : null);
+            if (SMClass) {
+                threadSM = new SMClass(threadId);
+                lastSyncedOldestMessageId = null;
+            }
+        }
+        return threadSM;
+    }
+
+    function findDateSeparatorsInContainer(container) {
+        if (!container) return [];
+        const sepParser = (typeof FbPageTimestampParser !== 'undefined' ? FbPageTimestampParser.parseDateSeparator : null)
+            || (typeof window !== 'undefined' && window.FbPageTimestampParser ? window.FbPageTimestampParser.parseDateSeparator : null);
+        if (typeof sepParser !== 'function') return [];
+
+        const candidates = container.querySelectorAll('div, span, p');
+        const separators = [];
+
+        for (let i = 0; i < candidates.length; i++) {
+            const el = candidates[i];
+            if (el.matches('[data-message-id]') || el.querySelector('[data-message-id]')) continue;
+            if (el.children.length > 2) continue;
+
+            const text = (el.textContent || '').trim();
+            if (!text || text.length > 50) continue;
+
+            const isSepFormat = /^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i.test(text) ||
+                                /^\d{1,2}:\d{2}\s+\d{1,2}\s+Tháng\s+\d{1,2},?\s+\d{4}$/i.test(text) ||
+                                /^\d{1,2}\s+Tháng\s+\d{1,2}(?:,?\s*\d{4})?$/i.test(text) ||
+                                /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i.test(text) ||
+                                /^(?:T[2-7]|CN)$/i.test(text);
+
+            if (isSepFormat) {
+                const isParentAlreadyAdded = separators.some(s => s.element.contains(el) || el.contains(s.element));
+                if (isParentAlreadyAdded) continue;
+
+                const parsed = sepParser(text, null);
+                if (parsed && parsed.timestamp_ms > 0) {
+                    separators.push({
+                        element: el,
+                        text: text,
+                        timestamp_ms: parsed.timestamp_ms
+                    });
+                }
+            }
+        }
+        return separators;
+    }
+
+    function collectMountedBatchMessages(container) {
+        if (!container) return [];
+        const messageEls = Array.from(container.querySelectorAll('[data-message-id]'));
+        const parser = (typeof FbPageTimestampParser !== 'undefined' ? FbPageTimestampParser.parsePageTimestamp : null)
+            || (typeof window !== 'undefined' && window.FbPageTimestampParser ? window.FbPageTimestampParser.parsePageTimestamp : null);
+
+        const separators = findDateSeparatorsInContainer(container);
+
+        const list = [];
+        for (let i = 0; i < messageEls.length; i++) {
+            const el = messageEls[i];
+            const fbMessageId = el.getAttribute('data-message-id');
+            if (!fbMessageId) continue;
+
+            const resolved = resolveMessageContent(el);
+            if (resolved.kind === 'none') continue;
+
+            const dirEvidence = getDirectionEvidence(el, container);
+            const rawDir = dirEvidence.direction;
+            const isOutgoing = (rawDir === true || rawDir === 1)
+                ? true
+                : ((rawDir === false || rawDir === 0) ? false : null);
+
+            let parsedTs = 0;
+            let tsSource = 'unknown';
+
+            // 1. Kiểm tra timestamp trên bubble
+            if (typeof parser === 'function') {
+                const p = parser(el);
+                if (p && p.timestamp_ms > 0) {
+                    parsedTs = p.timestamp_ms;
+                    tsSource = p.timestamp_source;
+                }
+            }
+
+            // 2. Nếu chưa có, tìm Date Separator gần nhất xuất hiện trước bubble này
+            if (parsedTs === 0 && separators.length > 0) {
+                let matchingSep = null;
+                for (let sIdx = 0; sIdx < separators.length; sIdx++) {
+                    const sep = separators[sIdx];
+                    if (sep.element.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) {
+                        matchingSep = sep;
+                    } else {
+                        break;
+                    }
+                }
+                if (matchingSep) {
+                    parsedTs = matchingSep.timestamp_ms + (i * 10);
+                    tsSource = 'separator_date_clock';
+                }
+            }
+
+            // 3. Fallback theo knownMessageTimestamps nếu đã biết từ trước
+            if (parsedTs === 0 && knownMessageTimestamps.has(fbMessageId)) {
+                parsedTs = knownMessageTimestamps.get(fbMessageId);
+                tsSource = 'dom_order';
+            }
+
+            if (parsedTs > 0 && !knownMessageTimestamps.has(fbMessageId)) {
+                knownMessageTimestamps.set(fbMessageId, parsedTs);
+            }
+
+            const isMedia = resolved.kind === 'media';
+            const text = isMedia ? (resolved.caption || '') : resolved.text;
+
+            list.push({
+                fb_message_id: fbMessageId,
+                content: text,
+                media_type: isMedia ? 'image' : 'text',
+                media_url: isMedia ? resolved.mediaUrl : null,
+                is_outgoing: isOutgoing,
+                direction_status: isOutgoing === null ? 'pending' : 'confirmed',
+                direction_confidence: isOutgoing === null ? 'unknown' : dirEvidence.confidence,
+                dom_order: i,
+                timestamp_ms: parsedTs,
+                timestamp_source: tsSource
+            });
+        }
+        return list;
+    }
+
     function scrollBackForHistory() {
         const threadId = resolveCurrentThreadId();
+        if (!threadId) return;
         if (threadId !== lastScrollThreadId) {
             lastScrollThreadId = threadId;
             scrollAttemptsForThread = 0;
@@ -358,6 +551,8 @@ if (isBusiness) {
         try {
             // Early thread resolution to reset cache if needed, and try to find contact info
             const currentThreadId = resolveCurrentThreadId();
+            if (!currentThreadId) return; // Ngắt quét an toàn khi không xác định được thread ID
+
             const threadJustChanged = currentThreadId !== lastKnownThreadId;
             isLikelyBacklog(currentThreadId); // this updates lastKnownThreadId and resets cache if thread changed
             if (threadJustChanged) seedTimestampAnchorsForThread(currentThreadId);
@@ -368,15 +563,23 @@ if (isBusiness) {
             const messageListContainer = findMessageListContainer();
 
             const isInvalidName = (n) => {
+                if (globalThis.FbCrmTextFilter?.isInvalidContactName) {
+                    return globalThis.FbCrmTextFilter.isInvalidContactName(n);
+                }
                 if (!n || typeof n !== 'string') return true;
                 const str = n.trim();
-                if (str.length < 2) return true;
-                const pat = /^(?:Tất cả tin nhắn|Tất cả|All messages|All|Tin nhắn trực tiếp|Direct messages|Hộp thư đến|Hộp thư|Inbox|Chưa đọc|Unread|Đã xong|Done|Gắn dấu sao|Đã gắn dấu sao|Starred|Spam|Thư rác|Bình luận.*|Comments.*|Thông báo|Notifications|Đang hoạt động.*|Hoạt động.*|Active now|Active recently|Online|Offline|Đang|Facebook|Messenger|Meta)$/i;
-                return pat.test(str) || str.toLowerCase().includes('đã xem');
+                return str.length < 2 || str.toLowerCase().includes('đã xem');
+            };
+
+            const cleanName = (n) => {
+                if (globalThis.FbCrmTextFilter?.cleanContactName) {
+                    return globalThis.FbCrmTextFilter.cleanContactName(n);
+                }
+                return isInvalidName(n) ? 'Khách hàng' : n.trim();
             };
 
             const urlParams = new URLSearchParams(window.location.search);
-            const assetId = urlParams.get('asset_id') || null;
+            const assetId = urlParams.get('asset_id') || urlParams.get('mailbox_id') || null;
 
             // 1. Trích xuất Tên khách hàng (currentContactName)
             if (!currentContactName || isInvalidName(currentContactName)) {
@@ -384,7 +587,7 @@ if (isBusiness) {
                 const titleEl = document.querySelector('[data-surface*="thread_and_detail"] [data-surface*="thread_title"], [data-surface*="thread_title"]');
                 const titleTxt = (titleEl?.textContent || '').trim().split('\n')[0].trim();
                 if (titleTxt && !isInvalidName(titleTxt) && titleTxt.length >= 2 && titleTxt.length <= 80) {
-                    currentContactName = titleTxt;
+                    currentContactName = cleanName(titleTxt);
                 }
 
                 // Header chính giữa hoặc thông tin chi tiết bên phải
@@ -393,10 +596,36 @@ if (isBusiness) {
                     for (const el of headerEls) {
                         const txt = (el.textContent || '').trim().split('\n')[0].trim();
                         if (txt && !isInvalidName(txt) && txt.length >= 2 && txt.length <= 80) {
-                            currentContactName = txt;
+                            currentContactName = cleanName(txt);
                             break;
                         }
                     }
+                }
+            }
+
+            // Kích hoạt Baselining theo State Machine khi thread mới mở và DOM đã mount tin nhắn
+            const sm = getOrInitStateMachine(currentThreadId);
+            if (sm && sm.getState() === 'UNINITIALIZED' && messageListContainer) {
+                const batchMessages = collectMountedBatchMessages(messageListContainer);
+                // Chỉ kích hoạt baselining khi DOM đã thực sự render ít nhất 1 tin nhắn (tránh gửi batch rỗng count=0)
+                if (batchMessages.length > 0) {
+                    const meta = sm.startBaselining();
+                    lastSyncedOldestMessageId = batchMessages[0].fb_message_id;
+                    chrome.runtime.sendMessage({
+                        type: 'PAGE_THREAD_MESSAGES_SYNCED_V1',
+                        data: {
+                            thread_id: currentThreadId,
+                            account_id: null,
+                            page_id: assetId,
+                            session_epoch: meta.session_epoch,
+                            generation: meta.generation,
+                            scan_id: meta.scan_id,
+                            batch_sequence: 1,
+                            mode: 'page_initial',
+                            contact_name: currentContactName || null,
+                            messages: batchMessages
+                        }
+                    });
                 }
             }
 
@@ -432,6 +661,30 @@ if (isBusiness) {
             }
 
             const messageEls = Array.from(document.querySelectorAll('[data-message-id]'));
+
+            // Trích xuất Date Separators để seed anchor thật cho knownMessageTimestamps
+            if (messageListContainer) {
+                const separators = findDateSeparatorsInContainer(messageListContainer);
+                if (separators.length > 0) {
+                    for (let i = 0; i < messageEls.length; i++) {
+                        const mEl = messageEls[i];
+                        const mId = mEl.getAttribute('data-message-id');
+                        if (!mId) continue;
+                        let matchingSep = null;
+                        for (let sIdx = 0; sIdx < separators.length; sIdx++) {
+                            const sep = separators[sIdx];
+                            if (sep.element.compareDocumentPosition(mEl) & Node.DOCUMENT_POSITION_FOLLOWING) {
+                                matchingSep = sep;
+                            } else {
+                                break;
+                            }
+                        }
+                        if (matchingSep) {
+                            knownMessageTimestamps.set(mId, matchingSep.timestamp_ms + (i * 10));
+                        }
+                    }
+                }
+            }
 
             const orderedIds = messageEls.map(n => n.getAttribute('data-message-id'));
             assignOrderedTimestamps(orderedIds);
@@ -601,22 +854,31 @@ if (isBusiness) {
         // already reads resolvedContent.caption for kind:'media'.
         const imgs = messageIdNode.querySelectorAll('img[src]');
         for (const img of imgs) {
-            const alt = (img.getAttribute('alt') || '').trim();
-            if (!alt) {
-                return { kind: 'media', mediaUrl: img.getAttribute('src'), caption: fullText || null };
-            }
+            const src = img.getAttribute('src') || '';
+            if (!src || src.includes('/emoji.php') || src.includes('/rsrc.php')) continue;
+
+            const alt = (img.getAttribute('alt') || '').toLowerCase();
+            if (alt.includes('ảnh đại diện') || alt.includes('profile picture') || alt.includes('biểu tượng cảm xúc')) continue;
+
+            const isAvatar = img.closest && img.closest('[aria-label*="Ảnh đại diện"], [aria-label*="profile"], [data-surface*="profile"]');
+            if (isAvatar) continue;
+            if ((img.width > 0 && img.width <= 36) || (img.height > 0 && img.height <= 36)) continue;
+
+            return { kind: 'media', mediaUrl: src, caption: fullText || null };
         }
 
-        // Moved before the fullText early-return for the same reason as the
-        // <img> check above - a file-transport image could plausibly render
-        // as a CSS background-image div (this app's own sticker-detection
-        // pattern) instead of a real <img> tag when captioned.
         const bgEls = messageIdNode.querySelectorAll('[role="img"]');
         for (const bgEl of bgEls) {
             const style = bgEl.getAttribute('style') || '';
             const match = style.match(/background-image\s*:\s*url\((['"]?)([^'")]+)\1\)/);
             if (match) {
-                return { kind: 'media', mediaUrl: match[2], caption: fullText || bgEl.getAttribute('aria-label') || null };
+                const url = match[2];
+                if (url && !url.includes('/emoji.php') && !url.includes('/rsrc.php')) {
+                    const aria = (bgEl.getAttribute('aria-label') || '').toLowerCase();
+                    if (!aria.includes('ảnh đại diện') && !aria.includes('profile picture') && !aria.includes('biểu tượng cảm xúc')) {
+                        return { kind: 'media', mediaUrl: url, caption: fullText || bgEl.getAttribute('aria-label') || null };
+                    }
+                }
             }
         }
 
@@ -687,24 +949,54 @@ if (isBusiness) {
         if (resolvedContent.kind === 'none') return;
 
         const directionEvidence = getDirectionEvidence(messageIdNode || anchorElement, messageListContainer);
-        const isOutgoing = directionEvidence.direction === true || directionEvidence.direction === false
-            ? directionEvidence.direction
-            : null;
-        const threadId = resolveCurrentThreadId();
-        const urlParams = new URLSearchParams(window.location.search);
-        const assetId = urlParams.get('asset_id'); // Page ID
+        const rawDir = directionEvidence.direction;
+        const isOutgoing = (rawDir === true || rawDir === 1)
+            ? true
+            : ((rawDir === false || rawDir === 0)
+                ? false
+                : null);
 
-        // Timestamp: DOM-order-derived for identified messages (see
-        // assignOrderedTimestamps); backlog-aware capture-time fallback otherwise.
-        let parsedTs;
-        let tsSource;
-        if (fbMessageId && knownMessageTimestamps.has(fbMessageId)) {
+        const threadId = resolveCurrentThreadId();
+        if (!threadId) return;
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const assetId = urlParams.get('asset_id') || urlParams.get('mailbox_id');
+
+        let parsedTs = 0;
+        let tsSource = 'unknown';
+        const parser = (typeof FbPageTimestampParser !== 'undefined' ? FbPageTimestampParser.parsePageTimestamp : null)
+            || (typeof window !== 'undefined' && window.FbPageTimestampParser ? window.FbPageTimestampParser.parsePageTimestamp : null);
+
+        if (typeof parser === 'function') {
+            const p = parser(messageIdNode || anchorElement);
+            if (p && p.timestamp_ms > 0) {
+                parsedTs = p.timestamp_ms;
+                tsSource = p.timestamp_source;
+            }
+        }
+        if (parsedTs === 0 && messageListContainer) {
+            const separators = findDateSeparatorsInContainer(messageListContainer);
+            if (separators.length > 0) {
+                const targetNode = messageIdNode || anchorElement;
+                let matchingSep = null;
+                for (let sIdx = 0; sIdx < separators.length; sIdx++) {
+                    const sep = separators[sIdx];
+                    if (sep.element.compareDocumentPosition(targetNode) & Node.DOCUMENT_POSITION_FOLLOWING) {
+                        matchingSep = sep;
+                    } else {
+                        break;
+                    }
+                }
+                if (matchingSep) {
+                    parsedTs = matchingSep.timestamp_ms;
+                    tsSource = 'separator_date_clock';
+                }
+            }
+        }
+        if (parsedTs === 0 && fbMessageId && knownMessageTimestamps.has(fbMessageId)) {
             parsedTs = knownMessageTimestamps.get(fbMessageId);
             tsSource = 'dom_order';
-        } else if (isLikelyBacklog(threadId)) {
-            parsedTs = 0;
-            tsSource = 'unknown';
-        } else {
+        } else if (parsedTs === 0 && !isLikelyBacklog(threadId)) {
             parsedTs = Date.now();
             tsSource = 'realtime_fallback';
         }
@@ -719,25 +1011,14 @@ if (isBusiness) {
             text.includes('bỏ lỡ')
         ));
 
-        // Keep identity stable across pending -> confirmed direction updates.
         const dedupKey = fbMessageId || text + '_' + (isOutgoing === null ? 'unknown' : isOutgoing);
         const hash = threadId + '_' + dedupKey;
         if (processedHashes.has(hash)) return;
 
-        // ==========================================
-        // ROBUST DOM STRUCTURAL FILTERING (V2)
-        // ==========================================
-        // Strict enforcement: MUST be inside the chat container
         if (!inChatContainer) {
             return;
         }
 
-        // Also ignore simple UI elements inside the chat container (like date
-        // headers, "Seen" receipts). Actual text messages are usually wrapped
-        // in dir="auto" - but a media wrapper's dir="auto" node may be a
-        // descendant we can't see from an upward-only ancestor walk starting
-        // at the wrapper, so this text-shaped heuristic is skipped for media
-        // (its identity/container check above already gates it).
         if (!isMedia) {
             const lowerText = text.toLowerCase();
             if (!isInsideMessageBubble && !isCallLog) {
@@ -745,55 +1026,17 @@ if (isBusiness) {
                 if (sysTexts.some(t => lowerText.includes(t))) return;
             }
 
-            // Feature 023: known Business Suite account/page-switcher panel
-            // strings, observed leaking in as fake messages. Checked
-            // regardless of isInsideMessageBubble (unlike sysTexts above) -
-            // live inspection confirmed the switcher panel's text is itself
-            // wrapped in dir="auto", the same signal real message bubbles
-            // use, so gating this on !isInsideMessageBubble would never catch
-            // it. Independent of the inChatContainer containment check above:
-            // the real message-list container's own aria-label admits it can
-            // hold non-message content too, so containment alone is not
-            // guaranteed to exclude this panel.
             const switcherPanelTexts = ['tài sản doanh nghiệp', 'tài khoản của bạn', 'trang quản lý tài sản doanh nghiệp'];
             if (switcherPanelTexts.some(t => lowerText.includes(t))) return;
 
-            // "Thêm tin nhắn được cá nhân hóa." ("Add a personalized message.")
-            // is Facebook's own suggested-reply CTA rendered under a shared
-            // post/marketplace-listing attachment card, not a message - live
-            // report (2026-08-20) showed it repeating as its own fake row with
-            // a real timestamp each scan tick. Checked unconditionally, same
-            // reasoning as switcherPanelTexts above: it's wrapped in the same
-            // dir="auto" structure real bubbles use, so isInsideMessageBubble
-            // does not reliably exclude it. Matches both the standard "hóa"
-            // spelling (confirmed live) and the "hoá" variant defensively.
             if (/thêm tin nhắn được cá nhân h(?:óa|oá)/i.test(text)) return;
 
-            // Date-separator header Business Suite renders between message
-            // groups - either a short "20 Tháng 4" (day + month, no time/year)
-            // or the full "13:52 6 Tháng 8, 2026" form. Live report
-            // (2026-08-20) confirmed the short form leaking in as its own fake
-            // row, appearing once per group boundary it's re-detected at.
-            // page_content.js has never called the shared FbCrmTextFilter (it
-            // isn't even loaded alongside this content script in manifest.json
-            // - a separate gap from the one that let this leak through), so
-            // this needs its own check here rather than relying on that filter.
-            // Checked unconditionally for the same reason as the CTA text
-            // above: the separator is wrapped in the same dir="auto" structure
-            // real bubbles use.
             if (/^\d{1,2}:\d{2}\s+\d{1,2}\s+Tháng\s+\d{1,2},?\s+\d{4}$/i.test(text) ||
                 /^\d{1,2}\s+Tháng\s+\d{1,2}(?:,?\s*\d{4})?$/i.test(text)) return;
 
-            // Short day-of-week / relative-day separator, same family as the
-            // date separator above (e.g. "Thứ Ba", "Hôm nay") - live evidence
-            // (2026-08-20) found these leaking in as fake messages with a
-            // stale synthetic timestamp (spec 047), same mechanism as "20
-            // Tháng 4".
             if (/^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i.test(text)) return;
         }
 
-        // Unknown direction remains eligible for later scans. Once geometry is
-        // high-confidence, the stable fb_message_id is marked processed.
         if (isOutgoing !== null) {
             processedHashes.add(hash);
             unresolvedHashFirstSeenTick.delete(hash);
@@ -802,7 +1045,6 @@ if (isBusiness) {
             if (firstSeen === undefined) {
                 unresolvedHashFirstSeenTick.set(hash, currentTick);
             } else if (currentTick - firstSeen >= MAX_UNRESOLVED_DIRECTION_TICKS) {
-                // Direction never resolved within the window - stop re-forwarding.
                 processedHashes.add(hash);
                 unresolvedHashFirstSeenTick.delete(hash);
             }
@@ -814,12 +1056,10 @@ if (isBusiness) {
             thread_id: threadId,
             fb_message_id: fbMessageId,
             content: text,
-            // null is a transport-level unknown. The backend stores 0 only as
-            // a compatibility placeholder and uses direction_status as truth.
             is_outgoing: isOutgoing,
             direction_status: isOutgoing === null ? 'pending' : 'confirmed',
             direction_source: directionEvidence.source,
-            direction_confidence: directionEvidence.confidence,
+            direction_confidence: isOutgoing === null ? 'unknown' : directionEvidence.confidence,
             page_id: assetId,
             source: 'page_dom_observer',
             timestamp_ms: parsedTs,
@@ -832,200 +1072,17 @@ if (isBusiness) {
         if (currentContactName) payloadData.contact_name = currentContactName;
         if (currentAvatarUrl) payloadData.avatar_url = currentAvatarUrl;
 
-        chrome.runtime.sendMessage({
-            type: 'NEW_PAGE_MESSAGE_FROM_DOM',
-            data: payloadData
-        });
-    }
-
-    function processPotentialMessage(element, text, processedWrappersThisTick, messageListContainer) {
-        // 1. Identity
-        let messageIdNode = element.closest('[data-message-id]');
-        let fbMessageId = messageIdNode ? messageIdNode.getAttribute('data-message-id') : null;
-
-        if (messageIdNode) {
-            if (processedWrappersThisTick.has(messageIdNode)) return; // already handled this wrapper this tick
-            processedWrappersThisTick.add(messageIdNode);
-        }
-
-        const { bubbleAncestor, isInsideMessageBubble, inChatContainer } = walkBubbleAncestors(element, messageListContainer);
-
-        // Pending-id handling (feature 017): a bubble with no data-message-id
-        // yet might just be caught mid-render - give it up to MAX_PENDING_TICKS
-        // scan ticks to get its real id attached before forwarding, so it
-        // never lands on the backend twice under two different identities.
-        if (!fbMessageId) {
-            if (bubbleAncestor) {
-                const pending = pendingNoIdBubbles.get(bubbleAncestor);
-                if (!pending) {
-                    pendingNoIdBubbles.set(bubbleAncestor, { firstSeenTick: currentTick });
-                    return; // first sighting without an id - wait for it to attach
-                }
-                if (currentTick - pending.firstSeenTick < MAX_PENDING_TICKS) {
-                    return; // still within the wait window
-                }
-                pendingNoIdBubbles.delete(bubbleAncestor); // wait expired - fall through, forward with null id as before
-            }
-            // no bubbleAncestor at all: fall through unchanged (today's behavior)
-        } else if (bubbleAncestor && pendingNoIdBubbles.has(bubbleAncestor)) {
-            pendingNoIdBubbles.delete(bubbleAncestor); // resolved - the real id showed up
-        }
-    }
-
-    // Shared identity/dedup/forward tail for both entry points: the
-    // text-node TreeWalker pass (via processPotentialMessage) and the
-    // per-wrapper media pass (in scanForMessages, for wrappers with no text
-    // node at all). isInsideMessageBubble/inChatContainer are passed in
-    // rather than recomputed here so each entry point only walks the
-    // ancestor chain once (see walkBubbleAncestors).
-    function forwardResolvedMessage(messageIdNode, anchorElement, fbMessageId, isInsideMessageBubble, inChatContainer, resolvedContent, messageListContainer) {
-        if (resolvedContent.kind === 'none') return;
-
-        const directionEvidence = getDirectionEvidence(messageIdNode || anchorElement, messageListContainer);
-        const isOutgoing = directionEvidence.direction === true || directionEvidence.direction === false
-            ? directionEvidence.direction
-            : null;
-        const threadId = resolveCurrentThreadId();
-        const urlParams = new URLSearchParams(window.location.search);
-        const assetId = urlParams.get('asset_id'); // Page ID
-
-        // Timestamp: DOM-order-derived for identified messages (see
-        // assignOrderedTimestamps); backlog-aware capture-time fallback otherwise.
-        let parsedTs;
-        let tsSource;
-        if (fbMessageId && knownMessageTimestamps.has(fbMessageId)) {
-            parsedTs = knownMessageTimestamps.get(fbMessageId);
-            tsSource = 'dom_order';
-        } else if (isLikelyBacklog(threadId)) {
-            parsedTs = 0;
-            tsSource = 'unknown';
-        } else {
-            parsedTs = Date.now();
-            tsSource = 'realtime_fallback';
-        }
-
-        const isMedia = resolvedContent.kind === 'media';
-        const text = isMedia ? (resolvedContent.caption || '') : resolvedContent.text;
-
-        const isCallLog = Boolean(text && (
-            text.includes('Cuộc gọi thoại') ||
-            text.includes('Cuộc gọi video') ||
-            text.includes('cuộc gọi') ||
-            text.includes('bỏ lỡ')
-        ));
-
-        // Keep identity stable across pending -> confirmed direction updates.
-        const dedupKey = fbMessageId || text + '_' + (isOutgoing === null ? 'unknown' : isOutgoing);
-        const hash = threadId + '_' + dedupKey;
-        if (processedHashes.has(hash)) return;
-
-        // ==========================================
-        // ROBUST DOM STRUCTURAL FILTERING (V2)
-        // ==========================================
-        // Strict enforcement: MUST be inside the chat container
-        if (!inChatContainer) {
+        const sm = getOrInitStateMachine(threadId);
+        if (sm && sm.getState() === 'BASELINING') {
+            sm.bufferRealtimeMessage(payloadData);
             return;
         }
 
-        // Also ignore simple UI elements inside the chat container (like date
-        // headers, "Seen" receipts). Actual text messages are usually wrapped
-        // in dir="auto" - but a media wrapper's dir="auto" node may be a
-        // descendant we can't see from an upward-only ancestor walk starting
-        // at the wrapper, so this text-shaped heuristic is skipped for media
-        // (its identity/container check above already gates it).
-        if (!isMedia) {
-            const lowerText = text.toLowerCase();
-            if (!isInsideMessageBubble && !isCallLog) {
-                const sysTexts = ['xem thêm', 'đang tải...', 'chưa đọc'];
-                if (sysTexts.some(t => lowerText.includes(t))) return;
-            }
-
-            // Feature 023: known Business Suite account/page-switcher panel
-            // strings, observed leaking in as fake messages. Checked
-            // regardless of isInsideMessageBubble (unlike sysTexts above) -
-            // live inspection confirmed the switcher panel's text is itself
-            // wrapped in dir="auto", the same signal real message bubbles
-            // use, so gating this on !isInsideMessageBubble would never catch
-            // it. Independent of the inChatContainer containment check above:
-            // the real message-list container's own aria-label admits it can
-            // hold non-message content too, so containment alone is not
-            // guaranteed to exclude this panel.
-            const switcherPanelTexts = ['tài sản doanh nghiệp', 'tài khoản của bạn', 'trang quản lý tài sản doanh nghiệp'];
-            if (switcherPanelTexts.some(t => lowerText.includes(t))) return;
-
-            // "Thêm tin nhắn được cá nhân hóa." ("Add a personalized message.")
-            // is Facebook's own suggested-reply CTA rendered under a shared
-            // post/marketplace-listing attachment card, not a message - live
-            // report (2026-08-20) showed it repeating as its own fake row with
-            // a real timestamp each scan tick. Checked unconditionally, same
-            // reasoning as switcherPanelTexts above: it's wrapped in the same
-            // dir="auto" structure real bubbles use, so isInsideMessageBubble
-            // does not reliably exclude it. Matches both the standard "hóa"
-            // spelling (confirmed live) and the "hoá" variant defensively.
-            if (/thêm tin nhắn được cá nhân h(?:óa|oá)/i.test(text)) return;
-
-            // Date-separator header Business Suite renders between message
-            // groups - either a short "20 Tháng 4" (day + month, no time/year)
-            // or the full "13:52 6 Tháng 8, 2026" form. Live report
-            // (2026-08-20) confirmed the short form leaking in as its own fake
-            // row, appearing once per group boundary it's re-detected at.
-            // page_content.js has never called the shared FbCrmTextFilter (it
-            // isn't even loaded alongside this content script in manifest.json
-            // - a separate gap from the one that let this leak through), so
-            // this needs its own check here rather than relying on that filter.
-            // Checked unconditionally for the same reason as the CTA text
-            // above: the separator is wrapped in the same dir="auto" structure
-            // real bubbles use.
-            if (/^\d{1,2}:\d{2}\s+\d{1,2}\s+Tháng\s+\d{1,2},?\s+\d{4}$/i.test(text) ||
-                /^\d{1,2}\s+Tháng\s+\d{1,2}(?:,?\s*\d{4})?$/i.test(text)) return;
-
-            // Short day-of-week / relative-day separator, same family as the
-            // date separator above (e.g. "Thứ Ba", "Hôm nay") - live evidence
-            // (2026-08-20) found these leaking in as fake messages with a
-            // stale synthetic timestamp (spec 047), same mechanism as "20
-            // Tháng 4".
-            if (/^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i.test(text)) return;
+        // Feature 055: Realtime Leak Guard - khóa luồng phát NEW_PAGE_MESSAGE_FROM_DOM
+        // khi Active Crawler đang cuộn kéo lịch sử tin nhắn cũ.
+        if (crawlInProgress) {
+            return;
         }
-
-        // Unknown direction remains eligible for later scans. Once geometry is
-        // high-confidence, the stable fb_message_id is marked processed.
-        if (isOutgoing !== null) {
-            processedHashes.add(hash);
-            unresolvedHashFirstSeenTick.delete(hash);
-        } else {
-            const firstSeen = unresolvedHashFirstSeenTick.get(hash);
-            if (firstSeen === undefined) {
-                unresolvedHashFirstSeenTick.set(hash, currentTick);
-            } else if (currentTick - firstSeen >= MAX_UNRESOLVED_DIRECTION_TICKS) {
-                // Direction never resolved within the window - stop re-forwarding.
-                processedHashes.add(hash);
-                unresolvedHashFirstSeenTick.delete(hash);
-            }
-        }
-
-        console.log('[PageContent] Detected new message in thread ' + threadId + ': ' + (text || '').substring(0, 30) + ' (Outgoing: ' + (isOutgoing === null ? 'unknown' : isOutgoing) + ', ts=' + tsSource + ', kind=' + resolvedContent.kind + ')');
-
-        const payloadData = {
-            thread_id: threadId,
-            fb_message_id: fbMessageId,
-            content: text,
-            // null is a transport-level unknown. The backend stores 0 only as
-            // a compatibility placeholder and uses direction_status as truth.
-            is_outgoing: isOutgoing,
-            direction_status: isOutgoing === null ? 'pending' : 'confirmed',
-            direction_source: directionEvidence.source,
-            direction_confidence: directionEvidence.confidence,
-            page_id: assetId,
-            source: 'page_dom_observer',
-            timestamp_ms: parsedTs,
-            timestamp_source: tsSource
-        };
-        if (isMedia) {
-            payloadData.media_type = 'image';
-            payloadData.media_url = resolvedContent.mediaUrl;
-        }
-        if (currentContactName) payloadData.contact_name = currentContactName;
-        if (currentAvatarUrl) payloadData.avatar_url = currentAvatarUrl;
 
         chrome.runtime.sendMessage({
             type: 'NEW_PAGE_MESSAGE_FROM_DOM',
@@ -1034,44 +1091,243 @@ if (isBusiness) {
     }
 
     function processPotentialMessage(element, text, processedWrappersThisTick, messageListContainer) {
-        // 1. Identity
         let messageIdNode = element.closest('[data-message-id]');
         let fbMessageId = messageIdNode ? messageIdNode.getAttribute('data-message-id') : null;
 
         if (messageIdNode) {
-            if (processedWrappersThisTick.has(messageIdNode)) return; // already handled this wrapper this tick
+            if (processedWrappersThisTick.has(messageIdNode)) return;
             processedWrappersThisTick.add(messageIdNode);
         }
 
         const { bubbleAncestor, isInsideMessageBubble, inChatContainer } = walkBubbleAncestors(element, messageListContainer);
 
-        // Pending-id handling (feature 017): a bubble with no data-message-id
-        // yet might just be caught mid-render - give it up to MAX_PENDING_TICKS
-        // scan ticks to get its real id attached before forwarding, so it
-        // never lands on the backend twice under two different identities.
         if (!fbMessageId) {
             if (bubbleAncestor) {
                 const pending = pendingNoIdBubbles.get(bubbleAncestor);
                 if (!pending) {
                     pendingNoIdBubbles.set(bubbleAncestor, { firstSeenTick: currentTick });
-                    return; // first sighting without an id - wait for it to attach
+                    return;
                 }
                 if (currentTick - pending.firstSeenTick < MAX_PENDING_TICKS) {
-                    return; // still within the wait window
+                    return;
                 }
-                pendingNoIdBubbles.delete(bubbleAncestor); // wait expired - fall through, forward with null id as before
+                pendingNoIdBubbles.delete(bubbleAncestor);
             }
-            // no bubbleAncestor at all: fall through unchanged (today's behavior)
         } else if (bubbleAncestor && pendingNoIdBubbles.has(bubbleAncestor)) {
-            pendingNoIdBubbles.delete(bubbleAncestor); // resolved - the real id showed up
+            pendingNoIdBubbles.delete(bubbleAncestor);
         }
 
-        // 2. Content: the full wrapper's text/emoji/media (feature 018), or
-        // the raw text node value when there's no wrapper at all (rare).
         const resolvedContent = messageIdNode ? resolveMessageContent(messageIdNode) : { kind: 'text', text };
-
         forwardResolvedMessage(messageIdNode, element, fbMessageId, isInsideMessageBubble, inChatContainer, resolvedContent, messageListContainer);
     }
+
+    // Message listener for ACK and on-demand batch synchronization requests from background
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        if (request.type === 'PAGE_BATCH_ACK') {
+            const ack = request.data;
+            if (threadSM && ack && ack.thread_id === threadSM.threadId) {
+                const flushed = threadSM.handleAck(ack);
+                if (Array.isArray(flushed)) {
+                    for (const msg of flushed) {
+                        chrome.runtime.sendMessage({
+                            type: 'NEW_PAGE_MESSAGE_FROM_DOM',
+                            data: msg
+                        });
+                    }
+                }
+            }
+        } else if (request.type === 'REQUEST_PAGE_BATCH_SYNC') {
+            const req = request.data || {};
+            const threadId = req.thread_id || resolveCurrentThreadId();
+            if (!threadId) return;
+
+            // Feature 055: Mutex coalescing - ngăn nhiều request crawl chạy song song cho cùng 1 thread
+            const crawlToken = crawlMutex.acquire(threadId);
+            if (!crawlToken) {
+                console.log(`[PageContent] Bỏ qua REQUEST_PAGE_BATCH_SYNC: thread ${threadId} đang có crawler hoạt động.`);
+                return;
+            }
+
+            crawlInProgress = true;
+
+            (async () => {
+                try {
+                    const scrollerHelper = typeof FbPageActiveScroller !== 'undefined' ? FbPageActiveScroller : null;
+                    const accumulator = scrollerHelper && typeof scrollerHelper.createMessageAccumulator === 'function'
+                        ? scrollerHelper.createMessageAccumulator()
+                        : {
+                            _list: [],
+                            accumulate: function(arr) { this._list = [...this._list, ...arr]; return this._list.length; },
+                            getAll: function() { return this._list; }
+                        };
+
+                    const container = findMessageListContainer();
+                    const initialBatch = collectMountedBatchMessages(container);
+                    accumulator.accumulate(initialBatch);
+
+                    const isOlderMode = req.mode === 'page_scroll_older' || req.mode === 'ondemand_older';
+                    const targetOldestId = (req.cursor && req.cursor.oldest_message_id) ? req.cursor.oldest_message_id : null;
+
+                    if (isOlderMode && scrollerHelper) {
+                        const scroller = findScrollableMessageContainer();
+                        if (scroller) {
+                            const beforeTop = scroller.scrollTop;
+                            const beforeHeight = scroller.scrollHeight;
+                            const className = scroller.className ? String(scroller.className).slice(0, 80) : '';
+
+                            try {
+                                chrome.runtime.sendMessage({
+                                    type: 'PAGE_SCROLLER_DEBUG',
+                                    data: {
+                                        thread_id: threadId,
+                                        stage: 'SCROLLER_FOUND',
+                                        class_name: className,
+                                        client_height: scroller.clientHeight,
+                                        scroll_height: beforeHeight,
+                                        scroll_top: beforeTop
+                                    }
+                                });
+                            } catch (e) {}
+
+                            const maxRounds = 3;
+                            for (let round = 0; round < maxRounds; round++) {
+                                // Kiểm tra khẩn cấp: nếu người dùng đã đổi thread hoặc iframe reload -> hủy crawler ngay
+                                if (!crawlMutex.isTokenValid(crawlToken, resolveCurrentThreadId())) {
+                                    console.warn(`[PageContent] Hủy crawler: thread đã đổi từ ${threadId} sang ${resolveCurrentThreadId()} tại vòng ${round + 1}`);
+                                    return;
+                                }
+
+                                const stepDistance = scrollerHelper.calculateStepDistance(scroller.clientHeight);
+                                scrollerHelper.dispatchScrollGestures(scroller, stepDistance, { forceToTop: true });
+
+                                try {
+                                    chrome.runtime.sendMessage({
+                                        type: 'PAGE_SCROLLER_DEBUG',
+                                        data: {
+                                            thread_id: threadId,
+                                            stage: 'SCROLLED_TO_TOP',
+                                            round: round + 1,
+                                            before_top: beforeTop,
+                                            after_top: scroller.scrollTop,
+                                            scroll_height: scroller.scrollHeight
+                                        }
+                                    });
+                                } catch (e) {}
+
+                                const settleRes = await scrollerHelper.waitForDomSettle(scroller, {
+                                    maxWaitMs: 3500,
+                                    pollIntervalMs: 60,
+                                    getFirstMessageId: () => {
+                                        const firstEl = container ? container.querySelector('[data-message-id]') : null;
+                                        return firstEl ? firstEl.getAttribute('data-message-id') : null;
+                                    }
+                                });
+
+                                // Chụp snapshot ngay khi vòng này settle -> đưa vào accumulator trước khi React unmount!
+                                const countBefore = accumulator.getCount();
+                                const roundBatch = collectMountedBatchMessages(container);
+                                accumulator.accumulate(roundBatch);
+                                const countAfter = accumulator.getCount();
+                                const newlyAdded = countAfter - countBefore;
+
+                                try {
+                                    chrome.runtime.sendMessage({
+                                        type: 'PAGE_SCROLLER_DEBUG',
+                                        data: {
+                                            thread_id: threadId,
+                                            stage: 'DOM_SETTLED',
+                                            round: round + 1,
+                                            has_growth: settleRes.hasGrowth,
+                                            new_messages_count: newlyAdded,
+                                            total_accumulated: countAfter,
+                                            scroll_height: scroller.scrollHeight
+                                        }
+                                    });
+                                } catch (e) {}
+
+                                // Kiểm tra điều kiện dừng:
+                                // 1. Chạm mốc tin cũ đã biết (targetOldestId)
+                                const allSoFar = accumulator.getAll();
+                                if (targetOldestId && allSoFar.some(m => m.fb_message_id === targetOldestId)) {
+                                    console.log(`[PageContent] Đã chạm mốc tin cũ ${targetOldestId} tại vòng ${round + 1}. Dừng crawler.`);
+                                    break;
+                                }
+
+                                // 2. Nếu đã qua vòng 2 và không phát hiện tăng trưởng -> dừng
+                                if (round >= 1 && !settleRes.hasGrowth && newlyAdded === 0) {
+                                    console.log(`[PageContent] Không phát hiện tăng trưởng DOM tại vòng ${round + 1}. Dừng crawler.`);
+                                    break;
+                                }
+                            }
+                        } else {
+                            try {
+                                chrome.runtime.sendMessage({
+                                    type: 'PAGE_SCROLLER_DEBUG',
+                                    data: {
+                                        thread_id: threadId,
+                                        stage: 'SCROLLER_NOT_FOUND'
+                                    }
+                                });
+                            } catch (e) {}
+                        }
+                    }
+
+                    // Kiểm tra thread lần cuối trước khi đóng gói gửi backend
+                    const currentThreadNow = resolveCurrentThreadId();
+                    if (!crawlMutex.isTokenValid(crawlToken, currentThreadNow)) {
+                        console.warn(`[PageContent] Hủy phát batch: thread hiện tại (${currentThreadNow}) không khớp token (${threadId}).`);
+                        return;
+                    }
+
+                    const batchMessages = accumulator.getAll();
+
+                    // Khởi động State Machine và bắt đầu đếm timeout 10s TẠI ĐÂY (chỉ sau khi crawl xong)
+                    const sm = getOrInitStateMachine(threadId);
+                    const meta = sm ? sm.startBaselining() : { session_epoch: 'epoch_1', generation: 1, scan_id: 'scan_1' };
+
+                    let boundaryEvidence = null;
+                    const prevOldest = targetOldestId || lastSyncedOldestMessageId;
+                    if (prevOldest) {
+                        const overlapItem = batchMessages.find(m => m.fb_message_id === prevOldest);
+                        boundaryEvidence = {
+                            previous_oldest_message_id: prevOldest,
+                            crawler_confirmed_scroll: true,
+                            overlap_id: overlapItem ? overlapItem.fb_message_id : null
+                        };
+                    }
+
+                    if (batchMessages.length > 0) {
+                        lastSyncedOldestMessageId = batchMessages[0].fb_message_id;
+                    }
+
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const assetId = req.page_id || urlParams.get('asset_id') || urlParams.get('mailbox_id') || null;
+
+                    chrome.runtime.sendMessage({
+                        type: 'PAGE_THREAD_MESSAGES_SYNCED_V1',
+                        data: {
+                            thread_id: threadId,
+                            account_id: req.account_id || null,
+                            page_id: assetId,
+                            session_epoch: meta.session_epoch,
+                            generation: meta.generation,
+                            scan_id: meta.scan_id,
+                            batch_sequence: 1,
+                            mode: req.mode || (isOlderMode ? 'page_scroll_older' : 'page_initial'),
+                            contact_name: currentContactName || null,
+                            boundary_evidence: boundaryEvidence,
+                            messages: batchMessages
+                        }
+                    });
+                } catch (err) {
+                    console.error('[PageContent] Lỗi trong quá trình Active Crawl:', err);
+                } finally {
+                    crawlMutex.release(crawlToken);
+                    crawlInProgress = false;
+                }
+            })();
+        }
+    });
 
     // Incoming calls are handled exclusively by content.js.
 } // End isBusiness block

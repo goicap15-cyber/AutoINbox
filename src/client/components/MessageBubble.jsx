@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { AlertTriangle, Check, CheckCheck, RefreshCw, Loader2, Phone, Video, PhoneMissed, PhoneCall, PhoneIncoming } from 'lucide-react';
 import MediaViewer from './MediaViewer.jsx';
 
+import { getMessageDisplayTime, isConfirmedOutgoing } from '../utils/messageTimestampPresentation.js';
+
 const AVATAR_COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#ec4899', '#f97316', '#14b8a6', '#6366f1', '#ef4444'];
 
 function pickAvatarColor(value) {
@@ -10,22 +12,15 @@ function pickAvatarColor(value) {
   return AVATAR_COLORS[total % AVATAR_COLORS.length];
 }
 
-function formatDisplayTime(value) {
-  if (!value) return '';
-  const numericValue = Number(value);
-  const date = new Date(Number.isFinite(numericValue) && numericValue > 0 ? numericValue : value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
-}
-
 export default function MessageBubble({ msg, activeThread, onRetry }) {
   const [isTimePinned, setIsTimePinned] = useState(false);
-  const isOutgoing = Boolean(msg.is_outgoing || msg.from === 'me' || msg.sender_type === 'staff' || msg.sender_type === 'ai');
+  const isPendingDirection = msg.direction_status === 'pending';
+  const isOutgoing = isConfirmedOutgoing(msg) || (!isPendingDirection && Boolean(msg.from === 'me' || msg.sender_type === 'staff' || msg.sender_type === 'ai'));
   const isUnsent = Boolean(msg.is_unsent || msg.unsent);
   const content = msg.content || msg.text || msg.message || '';
   const senderName = msg.sender_name || (isOutgoing ? (msg.is_ai || msg.sender_type === 'ai' ? 'AI' : 'Bạn') : activeThread?.contact_name || 'Khách hàng');
   const status = msg.status || msg.delivery_status || (msg.is_failed ? 'failed' : msg.is_sending ? 'sending' : 'sent');
-  const displayTime = formatDisplayTime(msg.timestamp_ms || msg.created_at || msg.time);
+  const displayTime = getMessageDisplayTime(msg);
   const avatarUrl = msg.sender_avatar || activeThread?.avatar_url;
   const avatarInitial = (senderName || activeThread?.contact_name || 'K').charAt(0).toUpperCase();
   const avatarColor = pickAvatarColor(activeThread?.id || senderName);
@@ -50,9 +45,7 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   const isVideoCall = lowerContent.includes('video');
 
   const hasMedia = Boolean(msg.local_media_path || msg.media_url);
-  // Messenger can echo stale composer text as an image caption even though
-  // CRM sent the image separately. Hide that transport artefact.
-  const visibleContent = isOutgoing && hasMedia && msg.media_type === 'image' ? '' : content;
+  const visibleContent = content;
   if (!content && !hasMedia && !isUnsent) return null;
 
   return (
@@ -120,14 +113,15 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
           } ${isOutgoing ? 'justify-end' : 'justify-start'}`}
         >
           {isOutgoing && <span className="font-medium">{senderName}</span>}
-          {displayTime && (
+          {displayTime ? (
             <time
               className="font-mono"
-              title={new Date(Number(msg.timestamp_ms) || msg.created_at || 0).toLocaleString('vi-VN')}
-              dateTime={msg.created_at || undefined}
+              title={new Date(Number(msg.timestamp_ms) || 0).toLocaleString('vi-VN')}
             >
               {displayTime}
             </time>
+          ) : (
+            isTimePinned && <span className="font-mono text-[10px] text-[var(--color-text-muted)] italic">Không rõ thời gian</span>
           )}
           {isOutgoing && (status === 'sending' || status === 'pending') && (
             <span className="inline-flex items-center gap-1">

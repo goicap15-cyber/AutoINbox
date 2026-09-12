@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, AlertTriangle, UserCheck, Bot, CheckCircle2, PauseCircle, PlayCircle } from 'lucide-react';
 import MediaViewer from './MediaViewer.jsx';
+import { getMessageDisplayTime, getMessageDateKey, formatDateSeparatorLabel } from '../utils/messageTimestampPresentation.js';
 
 export default function ChatArea({
   activeThread,
@@ -54,15 +55,13 @@ export default function ChatArea({
 
   // Group messages by date
   const groupedMessages = [];
-  let currentDate = '';
+  let currentDateKey = '';
   
   messages.forEach((msg) => {
-    const displayTime = msg.timestamp_ms || msg.created_at;
-    const msgDate = displayTime ? new Date(displayTime).toLocaleDateString('vi-VN') : 'Hôm nay';
-    
-    if (msgDate !== currentDate) {
-      currentDate = msgDate;
-      groupedMessages.push({ type: 'date', date: msgDate });
+    const dateKey = getMessageDateKey(msg);
+    if (dateKey && dateKey !== currentDateKey) {
+      currentDateKey = dateKey;
+      groupedMessages.push({ type: 'date', date: formatDateSeparatorLabel(msg) });
     }
     groupedMessages.push({ type: 'message', msg });
   });
@@ -212,9 +211,9 @@ export default function ChatArea({
 
                 {/* Timestamp */}
                 <div className="flex items-center gap-1.5 ml-1">
-                  {msg.created_at && (
+                  {getMessageDisplayTime(msg) && (
                     <span className="text-[9px] text-[#626C7C] font-medium tabular-nums">
-                      {new Date(msg.timestamp_ms || msg.created_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}
+                      {getMessageDisplayTime(msg)}
                     </span>
                   )}
                   {msg.source === 'dom_observer' && (

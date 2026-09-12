@@ -518,12 +518,19 @@ function enterBackgroundAfterSyncWindow(accountId, requestedAt, reason = 'sync_f
   const existing = backgroundAfterConnectTimers.get(key);
   if (existing) clearTimeout(existing);
   const remaining = Math.max(0, 120000 - (Date.now() - requestedAt));
-  const timer = setTimeout(() => {
+  const timer = setTimeout(async () => {
     backgroundAfterConnectTimers.delete(key);
     if (backgroundAfterConnectRequests.get(key) !== requestedAt) return;
     backgroundAfterConnectRequests.delete(key);
-    processManager.hideAccountProcess(key);
-    console.log(`[BACKGROUND_AFTER_SYNC] account=${key} hidden=true reason=${reason}`);
+    const hideRes = await processManager.hideAccountProcess(key);
+    if (hideRes?.success) {
+      io.emit('ACCOUNT_DISPLAY_CHANGED', {
+        account_id: key,
+        chrome_display_mode: 'BACKGROUND',
+        is_chrome_running: true
+      });
+    }
+    console.log(`[BACKGROUND_AFTER_SYNC] account=${key} hidden=true reason=${reason} success=${!!hideRes?.success}`);
   }, remaining);
   backgroundAfterConnectTimers.set(key, timer);
   if (typeof timer.unref === 'function') timer.unref();
@@ -679,6 +686,42 @@ function deleteOutboundMessageRows({ messageId = null, threadId = null, clientMe
     }
     return db.prepare(`DELETE FROM messages WHERE id IN (${messageIds.map(() => '?').join(',')})`).run(...messageIds).changes;
   })(rows.map((row) => row.id));
+}
+
+function cleanupStalePendingOutbound(threadId) {
+  if (!threadId) return 0;
+  const confirmedOutgoing = db.prepare(`
+    SELECT content, media_type, timestamp_ms FROM messages
+    WHERE thread_id = ? AND is_outgoing = 1 AND fb_message_id LIKE 'mid.%'
+  `).all(String(threadId));
+  if (!confirmedOutgoing.length) return 0;
+
+  const confirmedContents = new Set(confirmedOutgoing.map(c => (c.content || '').trim()).filter(Boolean));
+  const stalePending = db.prepare(`
+    SELECT id, content, media_type, attachment_id, timestamp_ms FROM messages
+    WHERE thread_id = ? AND is_outgoing = 1 AND (fb_message_id LIKE 'pending_%' OR fb_message_id NOT LIKE 'mid.%')
+  `).all(String(threadId));
+
+  let deletedCount = 0;
+  for (const pending of stalePending) {
+    const pContent = (pending.content || '').trim();
+    if (pContent && confirmedContents.has(pContent)) {
+      deleteOutboundMessageRows({ messageId: pending.id });
+      deletedCount++;
+      continue;
+    }
+    if (pending.attachment_id || (pending.media_type && pending.media_type !== 'text')) {
+      const pTime = Number(pending.timestamp_ms) || 0;
+      const matchingMidMedia = confirmedOutgoing.find(c =>
+        c.media_type !== 'text' && pTime > 0 && Number(c.timestamp_ms) > 0 && Math.abs(pTime - Number(c.timestamp_ms)) <= 120000
+      );
+      if (matchingMidMedia) {
+        deleteOutboundMessageRows({ messageId: pending.id });
+        deletedCount++;
+      }
+    }
+  }
+  return deletedCount;
 }
 
 async function sendViaExtension(thread_id, text, client_message_id = null) {
@@ -966,8 +1009,19 @@ wss.on('connection', (ws, req) => {
             && Date.now() - backgroundRequestedAt < 120000;
           if (!pending_key && backgroundRequestIsFresh && !KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) {
             backgroundAfterConnectRequests.delete(String(account_id));
-            processManager.hideAccountProcess(account_id);
-            console.log(`[BACKGROUND_SYNC] account=${account_id} hidden_immediately=true`);
+            if (backgroundAfterConnectTimers.has(String(account_id))) {
+              clearTimeout(backgroundAfterConnectTimers.get(String(account_id)));
+              backgroundAfterConnectTimers.delete(String(account_id));
+            }
+            const hideResult = await processManager.hideAccountProcess(account_id);
+            if (hideResult?.success) {
+              io.emit('ACCOUNT_DISPLAY_CHANGED', {
+                account_id: String(account_id),
+                chrome_display_mode: 'BACKGROUND',
+                is_chrome_running: true
+              });
+            }
+            console.log(`[BACKGROUND_SYNC] account=${account_id} hidden_immediately=true success=${!!hideResult?.success}`);
           }
 
           // Gửi ACK về Extension xác nhận đăng ký thành công
@@ -1109,6 +1163,22 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'PAGE_SCROLLER_DEBUG': {
+          const d = msg.data || {};
+          if (d.stage === 'SCROLLER_FOUND') {
+            console.log(`[PageScroller] 🎯 Đã tìm thấy khung chat Page: thread=${d.thread_id} | class="${d.class_name}" | height=${d.client_height}px / scrollHeight=${d.scroll_height}px | scrollTop ban đầu=${d.scroll_top}px`);
+          } else if (d.stage === 'SCROLLED_TO_TOP') {
+            console.log(`[PageScroller] 📜 Vòng ${d.round}: Đã cuộn dứt khoát lên đỉnh (0px) | scrollTop từ ${d.before_top}px -> ${d.after_top}px | scrollHeight=${d.scroll_height}px`);
+          } else if (d.stage === 'DOM_SETTLED') {
+            console.log(`[PageScroller] 🔄 Vòng ${d.round}: Facebook DOM settled | has_growth=${d.has_growth} | nạp thêm ${d.new_messages_count} tin mới | tổng tích lũy: ${d.total_accumulated} tin`);
+          } else if (d.stage === 'SCROLLER_NOT_FOUND') {
+            console.warn(`[PageScroller] ⚠️ Không tìm thấy khung cuộn tin nhắn hợp lệ trên trang Facebook cho thread=${d.thread_id}`);
+          } else if (d.stage === 'TAB_DISCONNECTED') {
+            console.warn(`[PageScroller] ⚠️ Tab Facebook bị mất kết nối (cần F5 lại tab Facebook): ${d.error}`);
+          }
+          break;
+        }
+
         case 'COMPOSER_DEBUG': {
           // Temporary diagnostic sink for spec 040 T020 - the extension's
           // service worker console isn't reachable during live debugging, so
@@ -1129,7 +1199,14 @@ wss.on('connection', (ws, req) => {
         case 'CHECKPOINT_DETECTED': {
           const { account_id } = msg.data;
           db.prepare("UPDATE accounts SET status='CHECKPOINT' WHERE id=?").run(account_id);
-          processManager.unhideWindow(account_id);
+          const unhideRes = await processManager.unhideWindow(account_id);
+          if (unhideRes?.success) {
+            io.emit('ACCOUNT_DISPLAY_CHANGED', {
+              account_id: String(account_id),
+              chrome_display_mode: 'VISIBLE',
+              is_chrome_running: true
+            });
+          }
           io.emit('ACCOUNT_STATUS_CHANGED', { account_id, status: 'CHECKPOINT' });
           break;
         }
@@ -1181,8 +1258,9 @@ wss.on('connection', (ws, req) => {
           const m = msg.data;
           const threadId = String(m.thread_id || '');
           console.log(`[WS] 📩 Nhận NEW_MESSAGE_RECEIVED | Source: ${m.source || 'unknown'} | Thread: ${threadId} | FB Message ID: ${m.fb_message_id} | Content: "${sanitizeLog(m.content, 80)}"`);
-          if (!threadId || threadId === 'unknown_dom' || threadId.trim() === '') {
-            console.warn(`[WS] ⚠️ Bỏ qua tin nhắn từ Thread ID không hợp lệ: "${threadId}"`);
+          const { isBlacklistedThreadId } = require('./utils/threadGuard');
+          if (isBlacklistedThreadId(threadId)) {
+            console.warn(`[WS] ⚠️ Bỏ qua tin nhắn từ Thread ID không hợp lệ hoặc blacklist: "${threadId}"`);
             break;
           }
           const _rawContentLower = (m.content || '').toLowerCase();
@@ -1917,7 +1995,8 @@ wss.on('connection', (ws, req) => {
             const txn = db.transaction((account_id, threads) => {
               for (const t of threads) {
                 const threadId = String(t.id || t.thread_id || '');
-                if (!threadId) continue;
+                const { isBlacklistedThreadId } = require('./utils/threadGuard');
+                if (!threadId || isBlacklistedThreadId(threadId)) continue;
                 const previousThread = db.prepare(`
                   SELECT last_message, is_unread, thread_url, contact_name
                   FROM threads WHERE id = ?
@@ -2349,6 +2428,135 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'PAGE_THREAD_MESSAGES_SYNCED_V1': {
+          const envelope = msg.data;
+          console.log(`[WS] PAGE_THREAD_MESSAGES_SYNCED_V1: thread=${envelope?.thread_id} gen=${envelope?.generation} scan=${envelope?.scan_id} count=${envelope?.messages?.length}`);
+
+          const { isBlacklistedThreadId } = require('./utils/threadGuard');
+          const { verifyPageOwnership } = require('./utils/pageContextResolver');
+
+          if (!envelope || isBlacklistedThreadId(envelope.thread_id)) {
+            console.warn(`[WS] PAGE_THREAD_MESSAGES_SYNCED_V1 rejected: invalid or blacklisted thread_id ${envelope?.thread_id}`);
+            InboxSyncScheduler.markThreadSyncResult(envelope?.account_id || ws.accountId, envelope?.thread_id, 'blacklisted_thread_id');
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'PAGE_BATCH_ACK',
+                data: {
+                  thread_id: envelope?.thread_id,
+                  session_epoch: envelope?.session_epoch,
+                  generation: envelope?.generation,
+                  scan_id: envelope?.scan_id,
+                  status: 'rejected',
+                  reason: 'blacklisted_thread_id'
+                }
+              }));
+            }
+            break;
+          }
+
+          if (envelope.account_id && envelope.page_id) {
+            const isOwner = verifyPageOwnership(envelope.account_id, envelope.page_id, db);
+            if (!isOwner) {
+              console.warn(`[WS] PAGE_THREAD_MESSAGES_SYNCED_V1 rejected: page_id ${envelope.page_id} not owned by account ${envelope.account_id}`);
+              InboxSyncScheduler.markThreadSyncResult(envelope.account_id || ws.accountId, envelope.thread_id, 'unauthorized_page_ownership');
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                  type: 'PAGE_BATCH_ACK',
+                  data: {
+                    thread_id: envelope.thread_id,
+                    session_epoch: envelope.session_epoch,
+                    generation: envelope.generation,
+                    scan_id: envelope.scan_id,
+                    status: 'rejected',
+                    reason: 'unauthorized_page_ownership'
+                  }
+                }));
+              }
+              break;
+            }
+          }
+
+          const ack = ConversationRepository.processPageBatchEnvelope(envelope, db);
+
+          // Giải phóng InboxSyncScheduler ngay khi batch hoàn tất (tránh timeout 20s)
+          InboxSyncScheduler.markThreadSyncResult(
+            envelope.account_id || ws.accountId,
+            envelope.thread_id,
+            ack.status === 'committed' ? null : (ack.reason || 'rejected')
+          );
+
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'PAGE_BATCH_ACK',
+              data: ack
+            }));
+          }
+
+          if (ack.status === 'committed') {
+            if (envelope.contact_name) {
+              const { cleanContactName } = require('./utils/textFilter');
+              const cleaned = cleanContactName(envelope.contact_name);
+              db.prepare(`
+                UPDATE threads SET contact_name = ?
+                WHERE id = ? AND (contact_name IS NULL OR contact_name = 'Khách hàng' OR contact_name = '')
+              `).run(cleaned, envelope.thread_id);
+            }
+            cleanupStalePendingOutbound(envelope.thread_id);
+            ConversationRepository.normalizeMessageSequence(envelope.thread_id, db);
+
+            const persistedRows = db.prepare(`
+              SELECT * FROM messages WHERE thread_id = ?
+              ORDER BY COALESCE(sequence_order, id) ASC, id ASC
+            `).all(envelope.thread_id);
+
+            io.emit('THREAD_MESSAGES_UPDATED', {
+              thread_id: envelope.thread_id,
+              account_id: envelope.account_id,
+              messages: persistedRows.map(withAttachmentAccessUrl),
+              authoritative: true,
+              sync_status: 'SYNCED'
+            });
+          } else {
+            // Trường hợp retry_required hoặc rejected, emit lại persisted rows để CRM tắt spinner xoay
+            const persistedRows = db.prepare(`
+              SELECT * FROM messages WHERE thread_id = ?
+              ORDER BY COALESCE(sequence_order, id) ASC, id ASC
+            `).all(envelope.thread_id);
+
+            io.emit('THREAD_MESSAGES_UPDATED', {
+              thread_id: envelope.thread_id,
+              account_id: envelope.account_id,
+              messages: persistedRows.map(withAttachmentAccessUrl),
+              authoritative: true,
+              sync_status: ack.status === 'retry_required' ? 'PARTIAL' : 'FAILED',
+              sync_error: ack.reason || null
+            });
+          }
+          break;
+        }
+
+        case 'UPGRADE_MESSAGE_TIMESTAMP': {
+          const { thread_id, fb_message_id, timestamp_ms, timestamp_source } = msg.data || {};
+          if (thread_id && fb_message_id && timestamp_ms > 0) {
+            const updatedMsg = ConversationRepository.upgradeMessageTimestamp(
+              thread_id,
+              fb_message_id,
+              timestamp_ms,
+              timestamp_source || 'facebook_label',
+              db
+            );
+            if (updatedMsg) {
+              console.log(`[WS] ⏱️ Đã nâng cấp timestamp cho message ${fb_message_id} -> ${new Date(timestamp_ms).toLocaleTimeString('vi-VN')} (${timestamp_source})`);
+              io.emit('MESSAGE_UPDATED', {
+                thread_id,
+                fb_message_id,
+                message: withAttachmentAccessUrl(updatedMsg)
+              });
+            }
+          }
+          break;
+        }
+
         case 'BULK_HISTORY_SYNC_PROGRESS': {
           const progress = msg.data || {};
           const job = bulkHistoryJobs.get(String(progress.job_id || ''));
@@ -2728,12 +2936,12 @@ io.on('connection', (socket) => {
       thread_url: thread.thread_url,
       page_id: thread.source_type === 'page_messenger' ? thread.page_id : null,
       contact_name: thread.contact_name,
-      reason: direction === 'viewport' ? 'crm_scroll_viewport' : (direction === 'older' ? 'crm_scroll_older' : 'crm_navigation'),
+      reason: (direction === 'older' || (direction === 'viewport' && Number(scroll_delta) < 0)) ? 'crm_scroll_older' : (direction === 'viewport' ? 'crm_scroll_viewport' : 'crm_navigation'),
       allow_navigation: true,
       priority: 'high',
       // Opening/switching user must never scroll Messenger. A saved PARTIAL
       // checkpoint is consumed only after an explicit CRM scroll-to-top event.
-      sync_mode: direction === 'viewport' ? 'ondemand_viewport' : (direction === 'older' ? 'ondemand_older' : 'ondemand_initial'),
+      sync_mode: (direction === 'older' || (direction === 'viewport' && Number(scroll_delta) < 0)) ? 'ondemand_older' : (direction === 'viewport' ? 'ondemand_viewport' : 'ondemand_initial'),
       scroll_delta: direction === 'viewport' ? Number(scroll_delta) || 0 : 0
     });
   });
@@ -2967,24 +3175,56 @@ app.post('/api/accounts/:id/start', async (req, res) => {
     return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
   }
   const accountId = String(req.params.id);
-  backgroundAfterConnectRequests.set(accountId, Date.now());
+  const startInBackground = req.body?.background === true;
+  if (startInBackground) {
+    backgroundAfterConnectRequests.set(accountId, Date.now());
+  } else {
+    backgroundAfterConnectRequests.delete(accountId);
+    if (backgroundAfterConnectTimers.has(accountId)) {
+      clearTimeout(backgroundAfterConnectTimers.get(accountId));
+      backgroundAfterConnectTimers.delete(accountId);
+    }
+  }
+
   const success = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: true });
   if (!success) {
     backgroundAfterConnectRequests.delete(accountId);
     return res.json({ success: false });
   }
 
-  // Chrome remains visible until the initial combined sidebar result arrives.
-  // The final SYNC_THREADS_RESULT frame moves it to background; keeping the
-  // request marker here also covers an already-connected extension.
+  // If extension is already connected and background requested, hide immediately
+  if (startInBackground && extensionConnections.has(accountId)) {
+    processManager.hideAccountProcess(accountId).then((result) => {
+      if (result?.success) {
+        io.emit('ACCOUNT_DISPLAY_CHANGED', {
+          account_id: accountId,
+          chrome_display_mode: 'BACKGROUND',
+          is_chrome_running: true
+        });
+      }
+    });
+  }
+
   res.json({ success: true });
 });
 app.post('/api/accounts/:id/stop', (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
     return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
   }
-  backgroundAfterConnectRequests.delete(String(req.params.id));
-  const stopped = processManager.stopAccountProcess(req.params.id);
+  const accountId = String(req.params.id);
+  backgroundAfterConnectRequests.delete(accountId);
+  if (backgroundAfterConnectTimers.has(accountId)) {
+    clearTimeout(backgroundAfterConnectTimers.get(accountId));
+    backgroundAfterConnectTimers.delete(accountId);
+  }
+  const stopped = processManager.stopAccountProcess(accountId);
+  if (stopped) {
+    io.emit('ACCOUNT_DISPLAY_CHANGED', {
+      account_id: accountId,
+      chrome_display_mode: 'STOPPED',
+      is_chrome_running: false
+    });
+  }
   res.json({ success: true, stopped });
 });
 app.post('/api/extension/reload', (req, res) => {
@@ -3000,25 +3240,48 @@ app.post('/api/extension/reload', (req, res) => {
   console.log(`[WS] 🔄 Đã gửi tín hiệu RELOAD_EXTENSION tới ${count} kết nối Extension WebSocket.`);
   res.json({ success: true, reloaded: count });
 });
-app.post('/api/accounts/:id/open', (req, res) => {
+app.post('/api/accounts/:id/open', async (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
     return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
   }
-  if (processManager.getStatus(req.params.id) !== 'RUNNING') {
+  const accountId = String(req.params.id);
+  if (processManager.getStatus(accountId) !== 'RUNNING') {
     return res.status(409).json({ success: false, error: 'Hãy kết nối tài khoản Facebook trước khi bật hiển thị Chrome.' });
   }
-  const visible = processManager.unhideWindow(req.params.id);
-  res.json({ success: visible });
+  // Cancel any pending auto-hide requests/timers so Chrome doesn't get hidden again
+  backgroundAfterConnectRequests.delete(accountId);
+  if (backgroundAfterConnectTimers.has(accountId)) {
+    clearTimeout(backgroundAfterConnectTimers.get(accountId));
+    backgroundAfterConnectTimers.delete(accountId);
+  }
+
+  const result = await processManager.unhideWindow(accountId);
+  if (result?.success) {
+    io.emit('ACCOUNT_DISPLAY_CHANGED', {
+      account_id: accountId,
+      chrome_display_mode: 'VISIBLE',
+      is_chrome_running: true
+    });
+  }
+  res.json({ success: !!result?.success, error: result?.error });
 });
-app.post('/api/accounts/:id/background', (req, res) => {
+app.post('/api/accounts/:id/background', async (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
     return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
   }
-  if (processManager.getStatus(req.params.id) !== 'RUNNING') {
+  const accountId = String(req.params.id);
+  if (processManager.getStatus(accountId) !== 'RUNNING') {
     return res.status(409).json({ success: false, error: 'Tài khoản Facebook chưa được kết nối.' });
   }
-  const hidden = processManager.hideAccountProcess(req.params.id);
-  res.json({ success: hidden });
+  const result = await processManager.hideAccountProcess(accountId);
+  if (result?.success) {
+    io.emit('ACCOUNT_DISPLAY_CHANGED', {
+      account_id: accountId,
+      chrome_display_mode: 'BACKGROUND',
+      is_chrome_running: true
+    });
+  }
+  res.json({ success: !!result?.success, error: result?.error });
 });
 app.post('/api/accounts/new-session', async (req, res) => {
   if (!enterpriseAccess.isCompanyAdmin(req.user) && !(req.user.role === 'ADMIN' && req.user.username === 'admin')) {
@@ -3900,9 +4163,13 @@ app.get('/api/threads/:id/messages', (req, res) => {
   if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
   OutboundDomCorrelationService.collapseStoredMediaCompanions(db, req.params.id);
   OutboundDomCorrelationService.collapseStoredTemporaryIdUpgrades(db, req.params.id);
-  // A failed outbound attempt is terminal. Remove it before reading so an old
-  // pending row can never reappear as a retry bubble after app startup.
   deleteOutboundMessageRows({ threadId: req.params.id, failedOnly: true });
+
+  // Cleanup stale pending/temporary rows that were already confirmed via DOM / FB mid
+  cleanupStalePendingOutbound(req.params.id);
+  // Chuẩn hóa thứ tự sequence_order theo dòng thời gian trước khi trả về
+  ConversationRepository.normalizeMessageSequence(req.params.id, db);
+
   // `id` is the durable per-database receive sequence. is_outgoing identifies
   // the side (0 = customer, 1 = operator); timestamps are display-only.
   const msgs = db.prepare(`
@@ -3986,8 +4253,19 @@ function startServer() {
          OR name LIKE 'Hoạt động%'
     `).run(...dirtySystemNames);
 
+    // Dọn dẹp tin nhắn rác từ các nút menu Meta Business Suite & chuẩn hóa lại thứ tự tin nhắn
+    db.prepare(`
+      DELETE FROM messages 
+      WHERE (content IN ('Meta Business Suite', 'Liên kết', 'Chỉnh sửa', 'Trợ giúp', 'Tùy chọn khác', 'Cài đặt') OR content LIKE '%Meta Business Suite%')
+        AND (timestamp_ms IS NULL OR timestamp_ms <= 0)
+    `).run();
+
+    const activeThreads = db.prepare('SELECT DISTINCT thread_id FROM messages').all();
+    for (const { thread_id } of activeThreads) {
+      if (thread_id) ConversationRepository.normalizeMessageSequence(thread_id, db);
+    }
   } catch (cleanErr) {
-    console.warn('[DB] Lỗi dọn dẹp tên hệ thống:', cleanErr.message);
+    console.warn('[DB] Lỗi dọn dẹp tên hệ thống / chuẩn hóa sequence:', cleanErr.message);
   }
 
   // Drains message_queue (Page-thread sends routed there by sendViaExtension,

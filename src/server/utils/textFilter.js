@@ -75,7 +75,10 @@ const SYSTEM_PATTERNS = [
   // report (2026-08-20) found this leaking in as its own fake message row.
   /^\d{1,2}\s+Tháng\s+\d{1,2}(?:,?\s*\d{4})?$/i,
   // Short day-of-week / relative-day separator, same family (spec 047).
-  /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i
+  /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i,
+
+  // Meta Business Suite navigation / menu actions
+  /^(?:Meta Business Suite|Liên kết|Chỉnh sửa|Trợ giúp|Tùy chọn khác|Cài đặt)$/i
 ];
 
 function isSystemOrMetadataText(text) {
@@ -124,6 +127,10 @@ function cleanMessageText(rawText) {
 
 const INVALID_CONTACT_NAME_PATTERNS = [
   /^(?:Tất cả tin nhắn|Tất cả|All messages|All)$/i,
+  /(?:Tất cả tin nhắn\s*){2,}/i,
+  /(?:All messages\s*){2,}/i,
+  /(?:Hộp thư đến\s*){2,}/i,
+  /Meta Business Suite/i,
   /^(?:Tin nhắn trực tiếp|Direct messages)$/i,
   /^(?:Hộp thư đến|Hộp thư|Inbox)$/i,
   /^(?:Chưa đọc|Unread)$/i,

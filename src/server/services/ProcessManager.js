@@ -56,7 +56,7 @@ function getPuppeteer() {
 
 // Ẩn cửa sổ Chrome khỏi màn hình và taskbar Windows bằng Win32 API
 function hideFromTaskbar(pid, profileDir = '', delayMs = 2500, keepWindowOnScreen = false) {
-  if (process.platform !== 'win32') return;
+  if (process.platform !== 'win32') return Promise.resolve({ success: true, platform: process.platform });
   const psScript = `
 Add-Type -TypeDefinition @'
 using System;
@@ -85,6 +85,7 @@ if ($profile) {
 }
 
 $allChrome = Get-Process -Name 'chrome' -ErrorAction SilentlyContinue
+$processedCount = 0
 foreach ($p in $allChrome) {
   if ($targetPids.Count -eq 0 -or $targetPids -contains $p.Id) {
     if ($p.MainWindowHandle -ne 0) {
@@ -97,13 +98,26 @@ foreach ($p in $allChrome) {
       # hidden and caused request/history scrapes to return partial results.
       [WinHelper]::ShowWindow($hwnd, 4) | Out-Null
       ${keepWindowOnScreen ? '' : '[WinHelper]::SetWindowPos($hwnd, [IntPtr]::Zero, -32000, -32000, 0, 0, 0x0015) | Out-Null'}
+      $processedCount++
     }
   }
 }
+if ($processedCount -eq 0) {
+  [Console]::Error.WriteLine("NO_WINDOW_FOUND")
+  exit 1
+}
 `;
   const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
-  exec(`powershell -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`, (err) => {
-    if (err) console.error('[ProcessManager] Lỗi ẩn Chrome khỏi màn hình/taskbar:', err.message);
+  return new Promise((resolve) => {
+    exec(`powershell -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`, (err, stdout, stderr) => {
+      if (err) {
+        const errorMsg = String(stderr || err.message || 'NO_WINDOW_FOUND').trim();
+        console.error('[ProcessManager] Lỗi ẩn Chrome khỏi màn hình/taskbar:', errorMsg);
+        resolve({ success: false, error: errorMsg });
+      } else {
+        resolve({ success: true });
+      }
+    });
   });
 }
 
@@ -231,6 +245,8 @@ class ProcessManager {
   constructor() {
     this.processes = new Map(); // Key: account_id -> { process, profileDir }
     this.hideTimers = new Map();
+    this.displayOpTokens = new Map();
+    this.displayOpQueues = new Map();
     this.extensionPath = resolveExtensionPath();
     this.binChromePath = path.join(resolveBinRoot(), 'bin', 'chrome-win', 'chrome.exe');
   }
@@ -520,33 +536,98 @@ class ProcessManager {
     }
   }
 
+  _enqueueDisplayOp(accountId, opFn) {
+    if (!this.displayOpTokens) this.displayOpTokens = new Map();
+    if (!this.displayOpQueues) this.displayOpQueues = new Map();
+    const accId = String(accountId);
+    const token = (this.displayOpTokens.get(accId) || 0) + 1;
+    this.displayOpTokens.set(accId, token);
+
+    const prevPromise = this.displayOpQueues.get(accId) || Promise.resolve();
+    const runOp = async () => {
+      try {
+        await prevPromise;
+      } catch (_) {}
+
+      // If a newer operation was scheduled while waiting in queue, abort early
+      if (this.displayOpTokens.get(accId) !== token) {
+        return { success: false, error: 'OPERATION_SUPERSEDED' };
+      }
+
+      const result = await opFn(token);
+
+      // If a newer operation arrived during execution, discard result
+      if (this.displayOpTokens.get(accId) !== token) {
+        return { success: false, error: 'OPERATION_SUPERSEDED' };
+      }
+
+      return result;
+    };
+
+    const currentPromise = runOp();
+    this.displayOpQueues.set(
+      accId,
+      currentPromise.catch(() => {}).finally(() => {
+        if (this.displayOpQueues.get(accId) === currentPromise) {
+          this.displayOpQueues.delete(accId);
+        }
+      })
+    );
+
+    return currentPromise;
+  }
+
   // Tự động ẩn cửa sổ Chrome ngầm khỏi Taskbar khi vừa hoàn tất đăng ký
-  hideAccountProcess(accountId) {
-    const procInfo = this.processes.get(accountId);
-    if (procInfo && procInfo.pid) {
-      this.cancelScheduledHides(accountId);
-      procInfo.displayMode = 'BACKGROUND';
-      this.scheduleHide(accountId, procInfo.pid, 0);
-      this.scheduleHide(accountId, procInfo.pid, 1200);
-      console.log(`[ProcessManager] Tự động ẩn Chrome của account ${accountId} khỏi Taskbar.`);
-      return true;
+  async hideAccountProcess(accountId) {
+    const accId = String(accountId);
+    const procInfo = this.processes.get(accId);
+    if (!procInfo?.pid) return { success: false, error: 'CHROME_NOT_RUNNING' };
+    if (!this.isProcessAlive(procInfo.pid)) {
+      this.processes.delete(accId);
+      return { success: false, error: 'CHROME_PROCESS_DEAD' };
     }
-    return false;
+    this.cancelScheduledHides(accId);
+
+    return this._enqueueDisplayOp(accId, async (opToken) => {
+      const currentProc = this.processes.get(accId);
+      if (!currentProc?.pid || !this.isProcessAlive(currentProc.pid)) {
+        this.processes.delete(accId);
+        return { success: false, error: 'CHROME_PROCESS_DEAD' };
+      }
+      const result = await hideFromTaskbar(currentProc.pid, currentProc.profileDir, 0, false);
+      if (result?.success && this.displayOpTokens.get(accId) === opToken) {
+        currentProc.displayMode = 'BACKGROUND';
+        console.log(`[ProcessManager] Tự động ẩn Chrome của account ${accId} khỏi Taskbar.`);
+      }
+      return result;
+    });
   }
 
   // Bật sáng cửa sổ Chrome GUI khi gặp Checkpoint / OTP 2FA / Session Expired / Cuộc gọi
-  unhideWindow(accountId) {
-    console.log(`[ProcessManager] Bật sáng cửa sổ Chrome cho account ${accountId}!`);
-    const procInfo = this.processes.get(accountId);
-    this.cancelScheduledHides(accountId);
-    const pid = procInfo?.pid;
-    const escapedProfileDir = String(procInfo?.profileDir || '').replace(/'/g, "''").replace(/\\/g, '/');
-    const chromeExecutable = this.getInteractiveSetupChromeExecutable();
-    const escapedChromeExecutable = String(chromeExecutable).replace(/'/g, "''");
-    if (procInfo) procInfo.displayMode = 'VISIBLE';
+  async unhideWindow(accountId) {
+    const accId = String(accountId);
+    console.log(`[ProcessManager] Bật sáng cửa sổ Chrome cho account ${accId}!`);
+    const procInfo = this.processes.get(accId);
+    if (!procInfo?.pid) return { success: false, error: 'CHROME_NOT_RUNNING' };
+    if (!this.isProcessAlive(procInfo.pid)) {
+      this.processes.delete(accId);
+      return { success: false, error: 'CHROME_PROCESS_DEAD' };
+    }
+    this.cancelScheduledHides(accId);
 
-    if (process.platform === 'win32') {
-      const psScript = `
+    return this._enqueueDisplayOp(accId, async (opToken) => {
+      const currentProc = this.processes.get(accId);
+      if (!currentProc?.pid || !this.isProcessAlive(currentProc.pid)) {
+        this.processes.delete(accId);
+        return { success: false, error: 'CHROME_PROCESS_DEAD' };
+      }
+      const pid = currentProc.pid;
+      const escapedProfileDir = String(currentProc.profileDir || '').replace(/'/g, "''").replace(/\\/g, '/');
+      const chromeExecutable = this.getInteractiveSetupChromeExecutable();
+      const escapedChromeExecutable = String(chromeExecutable).replace(/'/g, "''");
+
+      if (process.platform === 'win32') {
+        const psScript = `
 try { Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32Helper { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int m); [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n); [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags); }' } catch {}
 $targetPids = @(${pid || 0})
 $profile = '${escapedProfileDir}'
@@ -555,6 +636,7 @@ if ($profile) {
   foreach ($processInfo in $profileProcesses) { $targetPids += $processInfo.ProcessId }
 }
 $apps = Get-Process -Name 'chrome' -ErrorAction SilentlyContinue | Where-Object { $targetPids -contains $_.Id -and $_.MainWindowHandle -ne 0 }
+$processedCount = 0
 foreach ($app in $apps) {
   $handle = $app.MainWindowHandle
   $style = [Win32Helper]::GetWindowLong($handle, -20)
@@ -563,25 +645,55 @@ foreach ($app in $apps) {
   [Win32Helper]::SetWindowPos($handle, [IntPtr]::Zero, 80, 80, 0, 0, 0x0015) | Out-Null
   [Win32Helper]::ShowWindowAsync($handle, 9) | Out-Null
   [Win32Helper]::SetForegroundWindow($handle) | Out-Null
+  $processedCount++
 }
 if (-not $apps -and $profile) {
   Start-Process -FilePath '${escapedChromeExecutable}' -ArgumentList @("--user-data-dir=$profile", '--new-window', 'https://www.facebook.com/messages')
+  $processedCount++
+}
+if ($processedCount -eq 0) {
+  [Console]::Error.WriteLine("NO_WINDOW_FOUND")
+  exit 1
 }`;
 
-      const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
-      exec(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, (err) => {
-        if (err) console.error('[ProcessManager] Lỗi đưa cửa sổ Chrome lên foreground:', err.message);
-      });
-    } else {
-      console.log(`[ProcessManager] (Linux/macOS) Vui lòng kiểm tra cửa sổ Chrome PID ${pid || 'unknown'}`);
-    }
-    return true;
+        const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+        const result = await new Promise((resolve) => {
+          exec(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, (err, stdout, stderr) => {
+            if (err) {
+              const errorMsg = String(stderr || err.message || 'NO_WINDOW_FOUND').trim();
+              console.error('[ProcessManager] Lỗi đưa cửa sổ Chrome lên foreground:', errorMsg);
+              resolve({ success: false, error: errorMsg });
+            } else {
+              resolve({ success: true });
+            }
+          });
+        });
+        if (result?.success && this.displayOpTokens.get(accId) === opToken) {
+          currentProc.displayMode = 'VISIBLE';
+        }
+        return result;
+      } else {
+        console.log(`[ProcessManager] (Linux/macOS) Vui lòng kiểm tra cửa sổ Chrome PID ${pid || 'unknown'}`);
+        if (this.displayOpTokens.get(accId) === opToken) {
+          currentProc.displayMode = 'VISIBLE';
+        }
+        return { success: true };
+      }
+    });
   }
 
   // Dừng tiến trình Chrome Portable
   stopAccountProcess(accountId) {
-    this.cancelScheduledHides(accountId);
-    const procInfo = this.processes.get(accountId);
+    const accId = String(accountId);
+    this.cancelScheduledHides(accId);
+    if (this.displayOpTokens) {
+      const nextToken = (this.displayOpTokens.get(accId) || 0) + 1;
+      this.displayOpTokens.set(accId, nextToken);
+    }
+    if (this.displayOpQueues) {
+      this.displayOpQueues.delete(accId);
+    }
+    const procInfo = this.processes.get(accId);
     if (!procInfo?.pid) return false;
 
     for (const [key, entry] of this.processes) {
@@ -601,17 +713,32 @@ if (-not $apps -and $profile) {
         try { process.kill(-procInfo.pid, 'SIGTERM'); }
         catch (_) { procInfo.process?.kill('SIGTERM'); }
       }
-      console.log(`[ProcessManager] Đã dừng toàn bộ Chrome process tree account ${accountId} (PID ${procInfo.pid}).`);
+      console.log(`[ProcessManager] Đã dừng toàn bộ Chrome process tree account ${accId} (PID ${procInfo.pid}).`);
       return true;
     } catch (err) {
-      console.error(`[ProcessManager] Lỗi dừng process tree ${accountId}:`, err.message);
+      console.error(`[ProcessManager] Lỗi dừng process tree ${accId}:`, err.message);
+      return false;
+    }
+  }
+
+  isProcessAlive(pid) {
+    if (!pid) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (_) {
       return false;
     }
   }
 
   getStatus(accountId) {
     const procInfo = this.processes.get(accountId);
-    return procInfo ? procInfo.status : 'STOPPED';
+    if (!procInfo) return 'STOPPED';
+    if (procInfo.pid && !this.isProcessAlive(procInfo.pid)) {
+      this.processes.delete(accountId);
+      return 'STOPPED';
+    }
+    return procInfo.status || 'STOPPED';
   }
 
   hideAccountFromTaskbarForSync(accountId) {
@@ -627,6 +754,13 @@ if (-not $apps -and $profile) {
   minimizeAccountForSync(accountId) {
     const procInfo = this.processes.get(accountId);
     if (!procInfo?.pid) return false;
+    if (!this.isProcessAlive(procInfo.pid)) {
+      this.processes.delete(accountId);
+      return false;
+    }
+    if (procInfo.displayMode === 'BACKGROUND') {
+      return true;
+    }
     this.cancelScheduledHides(accountId);
     procInfo.displayMode = 'SYNC_MINIMIZED';
     minimizeToTaskbar(procInfo.pid, procInfo.profileDir);
@@ -635,7 +769,13 @@ if (-not $apps -and $profile) {
   }
 
   getDisplayMode(accountId) {
-    return this.processes.get(accountId)?.displayMode || 'STOPPED';
+    const procInfo = this.processes.get(accountId);
+    if (!procInfo) return 'STOPPED';
+    if (procInfo.pid && !this.isProcessAlive(procInfo.pid)) {
+      this.processes.delete(accountId);
+      return 'STOPPED';
+    }
+    return procInfo.displayMode || 'STOPPED';
   }
 
   stopAllAccountProcesses() {
@@ -707,3 +847,4 @@ foreach ($proc in $roots) {
 
 module.exports = new ProcessManager();
 module.exports.ProcessManager = ProcessManager;
+module.exports.hideFromTaskbar = hideFromTaskbar;
