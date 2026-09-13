@@ -628,26 +628,119 @@ class ProcessManager {
 
       if (process.platform === 'win32') {
         const psScript = `
-try { Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32Helper { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int m); [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n); [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags); }' } catch {}
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public class Win32UnhideHelper {
+  public delegate bool EnumDesktopProc(string lpszDesktop, IntPtr lParam);
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+  [DllImport("user32.dll")] public static extern IntPtr GetProcessWindowStation();
+  [DllImport("user32.dll")] public static extern bool EnumDesktops(IntPtr hwinsta, EnumDesktopProc lpEnumFunc, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern IntPtr OpenDesktop(string lpszDesktop, uint dwFlags, bool fInherit, uint dwDesiredAccess);
+  [DllImport("user32.dll")] public static extern IntPtr OpenInputDesktop(uint dwFlags, bool fInherit, uint dwDesiredAccess);
+  [DllImport("user32.dll")] public static extern bool EnumDesktopWindows(IntPtr hDesktop, EnumWindowsProc lpfn, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpfn, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool CloseDesktop(IntPtr hDesktop);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int m);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+
+  public static List<IntPtr> FindWindows(int[] pids) {
+    var found = new List<IntPtr>();
+    var pidSet = new HashSet<uint>();
+    if (pids != null) {
+      foreach (var p in pids) { if (p > 0) pidSet.Add((uint)p); }
+    }
+    var seen = new HashSet<IntPtr>();
+
+    Action<IntPtr> inspectHwnd = (hWnd) => {
+      if (seen.Contains(hWnd)) return;
+      seen.Add(hWnd);
+      uint pid;
+      GetWindowThreadProcessId(hWnd, out pid);
+      if (pidSet.Contains(pid)) {
+        var cls = new System.Text.StringBuilder(128);
+        GetClassName(hWnd, cls, 128);
+        string className = cls.ToString();
+        int style = GetWindowLong(hWnd, -16);
+        if ((style & 0x40000000) == 0 && (className == "Chrome_WidgetWin_1" || className.StartsWith("Chrome_WidgetWin"))) {
+          found.Add(hWnd);
+        }
+      }
+    };
+
+    try {
+      EnumWindows((hWnd, lp) => { inspectHwnd(hWnd); return true; }, IntPtr.Zero);
+    } catch {}
+
+    try {
+      IntPtr hInput = OpenInputDesktop(0, false, 0x01FF);
+      if (hInput != IntPtr.Zero) {
+        EnumDesktopWindows(hInput, (hWnd, lp) => { inspectHwnd(hWnd); return true; }, IntPtr.Zero);
+        CloseDesktop(hInput);
+      }
+    } catch {}
+
+    try {
+      IntPtr hwinsta = GetProcessWindowStation();
+      if (hwinsta != IntPtr.Zero) {
+        EnumDesktops(hwinsta, (deskName, lp) => {
+          IntPtr hD = OpenDesktop(deskName, 0, false, 0x01FF);
+          if (hD != IntPtr.Zero) {
+            EnumDesktopWindows(hD, (hWnd, lpp) => { inspectHwnd(hWnd); return true; }, IntPtr.Zero);
+            CloseDesktop(hD);
+          }
+          return true;
+        }, IntPtr.Zero);
+      }
+    } catch {}
+
+    return found;
+  }
+}
+'@ -ErrorAction SilentlyContinue
+
 $targetPids = @(${pid || 0})
 $profile = '${escapedProfileDir}'
 if ($profile) {
   $profileProcesses = Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue | Where-Object { ($_.CommandLine -replace '\\','/') -like "*$profile*" }
   foreach ($processInfo in $profileProcesses) { $targetPids += $processInfo.ProcessId }
 }
-$apps = Get-Process -Name 'chrome' -ErrorAction SilentlyContinue | Where-Object { $targetPids -contains $_.Id -and $_.MainWindowHandle -ne 0 }
+
+$handles = [Win32UnhideHelper]::FindWindows([int[]]$targetPids)
 $processedCount = 0
-foreach ($app in $apps) {
-  $handle = $app.MainWindowHandle
-  $style = [Win32Helper]::GetWindowLong($handle, -20)
+foreach ($handle in $handles) {
+  $style = [Win32UnhideHelper]::GetWindowLong($handle, -20)
   $style = ($style -band -bnot 0x00000080) -bor 0x00040000
-  [Win32Helper]::SetWindowLong($handle, -20, $style) | Out-Null
-  [Win32Helper]::SetWindowPos($handle, [IntPtr]::Zero, 80, 80, 0, 0, 0x0015) | Out-Null
-  [Win32Helper]::ShowWindowAsync($handle, 9) | Out-Null
-  [Win32Helper]::SetForegroundWindow($handle) | Out-Null
+  [Win32UnhideHelper]::SetWindowLong($handle, -20, $style) | Out-Null
+  [Win32UnhideHelper]::SetWindowPos($handle, [IntPtr]::Zero, 80, 80, 1200, 800, 0x0040) | Out-Null
+  [Win32UnhideHelper]::ShowWindowAsync($handle, 9) | Out-Null
+  [Win32UnhideHelper]::SetForegroundWindow($handle) | Out-Null
   $processedCount++
 }
-if (-not $apps -and $profile) {
+
+if ($processedCount -eq 0) {
+  $apps = Get-Process -Name 'chrome' -ErrorAction SilentlyContinue | Where-Object { $targetPids -contains $_.Id -and $_.MainWindowHandle -ne 0 }
+  foreach ($app in $apps) {
+    $handle = $app.MainWindowHandle
+    $style = [Win32UnhideHelper]::GetWindowLong($handle, -20)
+    $style = ($style -band -bnot 0x00000080) -bor 0x00040000
+    [Win32UnhideHelper]::SetWindowLong($handle, -20, $style) | Out-Null
+    [Win32UnhideHelper]::SetWindowPos($handle, [IntPtr]::Zero, 80, 80, 1200, 800, 0x0040) | Out-Null
+    [Win32UnhideHelper]::ShowWindowAsync($handle, 9) | Out-Null
+    [Win32UnhideHelper]::SetForegroundWindow($handle) | Out-Null
+    $processedCount++
+  }
+}
+
+if ($processedCount -eq 0 -and $profile) {
   Start-Process -FilePath '${escapedChromeExecutable}' -ArgumentList @("--user-data-dir=$profile", '--new-window', 'https://www.facebook.com/messages')
   $processedCount++
 }

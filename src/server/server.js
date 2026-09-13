@@ -301,7 +301,8 @@ app.use('/api', (req, res, next) => {
     '/payment/sepay-webhook',
     '/orders/create',
     '/orders/status',
-    '/extension/reload'
+    '/extension/reload',
+    '/avatars/'
   ];
   if (unauthenticatedPaymentPaths.some((pathPrefix) => req.path.startsWith(pathPrefix))) return next();
   return requireAuthenticatedApi(req, res, next);
@@ -731,7 +732,14 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
   ).get(thread_id);
   if (!thread) throw new Error(`Thread ${thread_id} không tồn tại`);
 
-  const extWs = extensionConnections.get(thread.account_id);
+  let extWs = extensionConnections.get(thread.account_id);
+  if (!extWs || extWs.readyState !== WebSocket.OPEN) {
+    const startWait = Date.now();
+    while ((!extWs || extWs.readyState !== WebSocket.OPEN) && Date.now() - startWait < 8000) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      extWs = extensionConnections.get(thread.account_id);
+    }
+  }
   if (!extWs || extWs.readyState !== WebSocket.OPEN) {
     throw new Error(`Extension cho tài khoản ${thread.account_id} không kết nối`);
   }
@@ -895,6 +903,46 @@ function updateQueueStatusFromClientMessage(clientMessageId, status, errorReason
   const queueId = clientMessageId.slice('queue_'.length);
   if (!queueId) return false;
   return MessageQueueRepository.updateStatus(queueId, status, errorReason);
+}
+
+function ensureThreadRecord({ threadId, accountId, contactName, pageId, initialLastMessage = 'Chưa có tin nhắn' }, database = db) {
+  if (!threadId) return null;
+  const tid = String(threadId);
+  let existing = database.prepare('SELECT id, contact_name, source_id, account_id FROM threads WHERE id = ?').get(tid);
+  if (!existing) {
+    const cleanName = (contactName && !isInvalidContactName(contactName)) ? cleanContactName(contactName) : 'Khách hàng';
+    ConversationRepository.upsertThread({
+      id: tid,
+      account_id: accountId,
+      contact_name: cleanName,
+      last_message: initialLastMessage,
+      is_unread: 0,
+      inbox_folder: 'INBOX'
+    }, database);
+    existing = database.prepare('SELECT id, contact_name, source_id, account_id FROM threads WHERE id = ?').get(tid);
+    console.log(`[ensureThreadRecord] ✅ Tự động tạo bản ghi thread: ${tid} (account=${accountId}, name="${cleanName}")`);
+
+    if (io) {
+      io.emit('THREAD_CREATED', {
+        thread_id: tid,
+        account_id: accountId,
+        source_id: pageId ? ('src_page_' + pageId) : null,
+        contact_name: cleanName
+      });
+    }
+  }
+  if (pageId) {
+    try {
+      InboxSourceService.ensurePageSource({
+        pageId: String(pageId),
+        accountId: accountId || existing?.account_id,
+        threadId: tid
+      }, database);
+    } catch (e) {
+      console.warn('[ensureThreadRecord] ensurePageSource error:', e.message);
+    }
+  }
+  return existing;
 }
 
 // ────────────────────────────────────────────────
@@ -1216,18 +1264,32 @@ wss.on('connection', (ws, req) => {
           const tidStr = String(thread_id || '');
           if (!tidStr) break;
 
+          const targetAccountId = account_id || ws.accountId;
+          ensureThreadRecord({
+            threadId: tidStr,
+            accountId: targetAccountId,
+            contactName: contact_name,
+            pageId: page_id
+          }, db);
+
           let updatedName = null;
           let localAvatarPath = null;
 
           if (contact_name && !isInvalidContactName(contact_name)) {
-            updatedName = contact_name.trim();
-            db.prepare('UPDATE threads SET contact_name = ? WHERE id = ?').run(updatedName, tidStr);
-            db.prepare(`
-              INSERT INTO contacts (thread_id, name)
-              VALUES (?, ?)
-              ON CONFLICT(thread_id) DO UPDATE SET
-                name = excluded.name
-            `).run(tidStr, updatedName);
+            const existingThread = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(tidStr);
+            const otherThreadWithSameName = db.prepare('SELECT id FROM threads WHERE account_id = ? AND id != ? AND contact_name = ?').get(targetAccountId, tidStr, contact_name.trim());
+            if (existingThread?.contact_name && !isInvalidContactName(existingThread.contact_name) && existingThread.contact_name !== 'Khách hàng' && otherThreadWithSameName) {
+              console.warn(`[WS] ⚠️ Chặn ghi đè tráo tên: thread ${tidStr} (${existingThread.contact_name}) không bị đổi thành "${contact_name}" của thread ${otherThreadWithSameName.id}`);
+            } else {
+              updatedName = contact_name.trim();
+              db.prepare('UPDATE threads SET contact_name = ? WHERE id = ?').run(updatedName, tidStr);
+              db.prepare(`
+                INSERT INTO contacts (thread_id, name)
+                VALUES (?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                  name = excluded.name
+              `).run(tidStr, updatedName);
+            }
           }
 
           if (avatar_url && avatar_url.startsWith('http')) {
@@ -1289,12 +1351,21 @@ wss.on('connection', (ws, req) => {
             const callThreadId = canonicalThreadId || m.thread_id;
             const threadAccRow = db.prepare('SELECT account_id FROM threads WHERE id = ?').get(callThreadId);
             const targetAccountIdForCall = m.account_id || ws.accountId || threadAccRow?.account_id || null;
+            const normalizedCallContent = String(m.content || '').toLocaleLowerCase('vi-VN');
+            const isExplicitMissedIncoming = /(?:nhỡ|bỏ lỡ|missed)/i.test(normalizedCallContent);
+            const hasRawAvatarEvidence = m.direction_evidence === 'call_article_avatar'
+              && (m.has_row_avatar === true || m.has_row_avatar === false);
+            const callIsOutgoing = isExplicitMissedIncoming
+              ? 0
+              : hasRawAvatarEvidence
+                ? (m.has_row_avatar ? 0 : 1)
+                : ((m.is_outgoing === true || m.is_outgoing === 1) ? 1 : 0);
             ConversationRepository.upsertThread({
               id: callThreadId,
               account_id: targetAccountIdForCall,
               contact_name: m.contact_name || 'Khách hàng',
               last_message: m.content,
-              is_unread: true
+              is_unread: !callIsOutgoing
             });
             const stableCallId = m.fb_message_id;
             const callTimestamp = Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now();
@@ -1305,15 +1376,6 @@ wss.on('connection', (ws, req) => {
                   AND ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) <= 60000
                 ORDER BY id DESC LIMIT 1
               `).get(callThreadId, m.content, callTimestamp, callTimestamp);
-            const normalizedCallContent = String(m.content || '').toLocaleLowerCase('vi-VN');
-            const isExplicitMissedIncoming = /(?:nhỡ|bỏ lỡ|missed)/i.test(normalizedCallContent);
-            const hasRawAvatarEvidence = m.direction_evidence === 'call_article_avatar'
-              && (m.has_row_avatar === true || m.has_row_avatar === false);
-            const callIsOutgoing = isExplicitMissedIncoming
-              ? 0
-              : hasRawAvatarEvidence
-                ? (m.has_row_avatar ? 0 : 1)
-                : ((m.is_outgoing === true || m.is_outgoing === 1) ? 1 : 0);
             const callSenderId = m.sender_id || (callIsOutgoing ? String(targetAccountIdForCall || 'STAFF') : 'CONTACT');
             console.log(`[CALL_DEBUG] 🧵 callThreadId=${callThreadId} | m.thread_id=${m.thread_id} | canonicalThreadId=${canonicalThreadId} | callIsOutgoing=${callIsOutgoing}`);
             if (!existingCall) {
@@ -1483,7 +1545,7 @@ wss.on('connection', (ws, req) => {
             account_id: targetAccountId,
             contact_name: m.contact_name || 'Khách hàng',
             last_message: m.content,
-            is_unread: true
+            is_unread: !isOutgoing
           });
 
           // Auto-register Page source & rebind thread khi đến từ Business Suite
@@ -2002,10 +2064,19 @@ wss.on('connection', (ws, req) => {
                   FROM threads WHERE id = ?
                 `).get(threadId);
                 let name = cleanContactName(t.name || t.contact_name, null);
+                const existing = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(threadId);
+                let existingName = existing?.contact_name;
+                if (isInvalidContactName(existingName)) existingName = null;
+
+                // Chống tráo đổi tên: nếu thread đã có tên hợp lệ và tên mới bị trùng với thread khác, giữ tên hiện tại
+                if (existingName && existingName !== 'Khách hàng') {
+                  const isDuplicated = db.prepare('SELECT id FROM threads WHERE account_id = ? AND id != ? AND contact_name = ?').get(account_id, threadId, name);
+                  if (isDuplicated) {
+                    name = existingName;
+                  }
+                }
+
                 if (!name || isInvalidContactName(name)) {
-                  const existing = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(threadId);
-                  let existingName = existing?.contact_name;
-                  if (isInvalidContactName(existingName)) existingName = null;
                   name = existingName || 'Khách hàng';
                 }
                 let cleanLastMsg = cleanMessageText(t.last_message);
@@ -2475,6 +2546,18 @@ wss.on('connection', (ws, req) => {
               break;
             }
           }
+
+          const targetAccountId = envelope.account_id || ws.accountId;
+          const initialPreview = envelope.messages && envelope.messages.length > 0
+            ? (envelope.messages[envelope.messages.length - 1].content || 'Chưa có tin nhắn')
+            : 'Chưa có tin nhắn';
+          ensureThreadRecord({
+            threadId: envelope.thread_id,
+            accountId: targetAccountId,
+            contactName: envelope.contact_name,
+            pageId: envelope.page_id,
+            initialLastMessage: initialPreview
+          }, db);
 
           const ack = ConversationRepository.processPageBatchEnvelope(envelope, db);
 

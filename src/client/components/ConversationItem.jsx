@@ -52,7 +52,9 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
         : 'bg-[var(--color-accent-subtle)] border-l-4 border-l-[var(--color-accent)] pl-2')
       : (isReminderDue
         ? 'border-l-4 border-l-[var(--color-danger)] bg-[var(--color-danger-subtle)] shadow-[inset_0_0_0_1px_rgba(239,68,68,0.18)] hover:brightness-[0.98]'
-        : 'border-l-4 border-l-transparent hover:bg-[var(--color-bg-hover)]')
+        : (unreadCount > 0
+          ? 'border-l-4 border-l-[var(--color-accent)] bg-[var(--color-accent-subtle)]/30 hover:bg-[var(--color-accent-subtle)]/60'
+          : 'border-l-4 border-l-transparent hover:bg-[var(--color-bg-hover)]'))
   ].join(' ');
 
   return (
@@ -79,6 +81,12 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
         {isReminderDue && (
           <span className="reminder-due-pulse absolute -left-1.5 -top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-full border-2 border-[var(--color-bg-panel)] bg-[var(--color-danger)] text-[var(--color-text-on-accent)] shadow-sm" title={reminderAriaLabel} aria-hidden="true"><BellRing size={12} strokeWidth={2.4} /></span>
         )}
+        {unreadCount > 0 && !isReminderDue && (
+          <span className="absolute -left-1 -top-1 flex h-4 w-4" title="Tin nhắn mới">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--color-accent)] opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-4 w-4 bg-[var(--color-accent)] border-2 border-[var(--color-bg-panel)]"></span>
+          </span>
+        )}
         <span className={'absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[var(--color-bg-panel)] ' + (isOnline ? 'bg-[var(--color-success)]' : 'bg-[var(--color-text-muted)]')} />
       </div>
 
@@ -87,7 +95,7 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
           <span className={'text-sm truncate ' + (unreadCount > 0 ? 'font-bold' : 'font-semibold') + ' text-[var(--color-text-primary)]'}>{title}</span>
           <span className="text-xs text-[var(--color-text-muted)] flex-shrink-0 font-mono">{formatTime(thread.last_activity)}</span>
         </div>
-        <p className={'text-xs truncate mb-1.5 ' + (unreadCount > 0 ? 'text-[var(--color-text-secondary)] font-medium' : 'text-[var(--color-text-muted)]')}>{preview}</p>
+        <p className={'text-xs truncate mb-1.5 ' + (unreadCount > 0 ? 'text-[var(--color-text-primary)] font-semibold' : 'text-[var(--color-text-muted)]')}>{preview}</p>
         <div className="flex items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-1.5 min-w-0">
             <span className={'text-xs px-2 py-0.5 rounded-full font-medium ' + status.className}>{status.label}</span>
@@ -100,7 +108,11 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
             {thread.status_name && (<span className="text-xs px-2 py-0.5 rounded-full font-medium truncate max-w-[100px]" style={getStatusBadgeStyle(thread.status_color)} title={thread.status_name}>{thread.status_name}</span>)}
             {(showAccountName || thread.source_id) && (<span className={'text-[11px] px-1.5 py-0.5 rounded-full truncate max-w-[145px] ' + sourceClass} title={sourceLabel}>{sourceLabel}</span>)}
           </div>
-          {unreadCount > 0 && <span className="bg-[var(--color-accent)] text-[var(--color-text-on-accent)] text-xs rounded-full min-w-5 h-5 px-1.5 flex items-center justify-center font-bold shadow-sm">{unreadCount}</span>}
+          {unreadCount > 0 && (
+            <span className="bg-[var(--color-accent)] text-[var(--color-text-on-accent)] text-xs rounded-full min-w-5 h-5 px-1.5 flex items-center justify-center font-bold shadow-sm animate-pulse">
+              {unreadCount}
+            </span>
+          )}
         </div>
       </div>
     </button>

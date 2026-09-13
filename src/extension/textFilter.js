@@ -77,7 +77,17 @@
     /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i,
 
     // Meta Business Suite navigation / menu actions
-    /^(?:Meta Business Suite|Liên kết|Chỉnh sửa|Trợ giúp|Tùy chọn khác|Cài đặt)$/i
+    /^(?:Meta Business Suite|Liên kết|Chỉnh sửa|Trợ giúp|Tùy chọn khác|Cài đặt|Settings|Help|Edit)$/i,
+    /^(?:Thông báo|Notifications)$/i,
+    /^(?:Trình quản lý quảng cáo|Ads Manager)$/i,
+    /^(?:Hộp thư|Hộp thư đến|Inbox)$/i,
+    /^(?:Nội dung|Content)$/i,
+    /^(?:Nền tảng kết nối người sáng tạo(?: nội dung)?|Creator (?:Studio|platform))$/i,
+    /^(?:Công cụ lập kế hoạch|Planner)$/i,
+    /^(?:Quảng cáo|Ads)$/i,
+    /^(?:Thông tin chi tiết|Insights)$/i,
+    /^(?:Kiếm tiền|Monetization)$/i,
+    /^(?:Tất cả(?: các)? công cụ|All tools)$/i
   ];
 
   function isSystemOrMetadataText(text) {

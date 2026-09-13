@@ -55,6 +55,7 @@ export function collapseMessengerMediaCompanions(messages = []) {
         withoutOptimisticDuplicates[existingIndex] = {
           ...existing,
           ...message,
+          content: (message.content && String(message.content).trim()) ? message.content : (existing.content || ''),
           attachment_id: message.attachment_id || existing.attachment_id,
           client_message_id: message.client_message_id || existing.client_message_id,
           media_url: message.media_url || existing.media_url,
@@ -82,6 +83,7 @@ export function collapseMessengerMediaCompanions(messages = []) {
     if (!facebookId || !companion) return [message];
     return [{
       ...message,
+      content: (message.content && String(message.content).trim()) ? message.content : (companion.content || ''),
       media_type: companion.media_type || message.media_type,
       media_url: message.attachment_id ? message.media_url : (companion.media_url || message.media_url),
       local_media_path: message.local_media_path || companion.local_media_path

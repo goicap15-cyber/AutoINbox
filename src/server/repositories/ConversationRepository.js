@@ -215,7 +215,6 @@ class ConversationRepository {
         sequence_order = CASE WHEN excluded.sequence_order IS NOT NULL THEN excluded.sequence_order ELSE messages.sequence_order END,
         direction_status = CASE WHEN excluded.direction_status = 'confirmed' THEN 'confirmed' ELSE messages.direction_status END
     `);
-    const rank = { facebook_payload: 6, facebook_timestamp: 6, facebook_label: 5, dom_clock_order: 5, dom_order: 5, facebook_dom: 4, realtime_fallback: 3, sync: 3, fallback: 2, unknown: 1 };
     const transaction = database.transaction((msgs) => {
       const result = { insertedIds: [], updatedIds: [], skippedCount: 0 };
       for (const msg of msgs) {
@@ -260,13 +259,13 @@ class ConversationRepository {
         let timestampSource = observedTimestampSource;
         let createdAt = observedCreatedAt;
         if (existing) {
-          const oldRank = rank[existing.timestamp_source] || 1;
-          const newRank = rank[observedTimestampSource] || 1;
+          const oldRank = ConversationRepository.getTimestampRank(existing.timestamp_source);
+          const newRank = ConversationRepository.getTimestampRank(observedTimestampSource);
           // History sync adds a deterministic millisecond DOM offset to
-          // Facebook's minute-only label.  Older rows may already have the
+          // Facebook's minute-only label. Older rows may already have the
           // same `facebook_label` provenance but not that offset, so requiring
           // a strictly better source would leave their incorrect order frozen
-          // forever.  Only let the canonical history pass correct an
+          // forever. Only let the canonical history pass correct an
           // equal-rank timestamp; realtime/fallback replays must not move it.
           const isCanonicalHistoryCorrection = msg.source === 'dom_history_sync'
             && observedTimestampSource === existing.timestamp_source
@@ -303,15 +302,23 @@ class ConversationRepository {
 
   static normalizeMessageSequence(threadId, database = getDefaultDb()) {
     const rows = database.prepare(`
-      SELECT id
+      SELECT id, timestamp_ms, sequence_order
       FROM messages
       WHERE thread_id = ?
-      ORDER BY
-        CASE WHEN COALESCE(timestamp_ms, 0) > 0 THEN 0 ELSE 1 END ASC,
-        COALESCE(NULLIF(timestamp_ms, 0), CAST(strftime('%s', created_at) AS INTEGER) * 1000, id) ASC,
-        COALESCE(sequence_order, id) ASC,
-        id ASC
     `).all(threadId);
+
+    // Sort using cluster-based logic:
+    // If timestamp_ms differs by > 120s (different hours / days), sort by timestamp_ms.
+    // Otherwise, within the same cluster (same date separator), sort by autoincrement id ASC.
+    rows.sort((a, b) => {
+      const timeA = Number(a.timestamp_ms) || 0;
+      const timeB = Number(b.timestamp_ms) || 0;
+      if (timeA > 0 && timeB > 0 && Math.abs(timeA - timeB) > 120000) {
+        return timeA - timeB;
+      }
+      return Number(a.id) - Number(b.id);
+    });
+
     const update = database.prepare('UPDATE messages SET sequence_order = ? WHERE id = ?');
     const normalize = database.transaction((orderedRows) => {
       orderedRows.forEach((row, index) => update.run(index + 1, row.id));
@@ -333,21 +340,17 @@ class ConversationRepository {
   // disagreement is confirmed twice (see shouldCommitDirectionFlip). Never
   // inserts a second row and never throws on repeated identical re-scans.
   static reconcileExistingMessage(stableMessageId, { source, isOutgoing, directionStatus, direction_status, directionConfidence, direction_confidence, tsMs, tsSource, createdAt, content = null } = {}, database = getDefaultDb()) {
-    const existingMsg = database.prepare('SELECT timestamp_source, is_outgoing, direction_status FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+    const existingMsg = database.prepare('SELECT timestamp_ms, timestamp_source, is_outgoing, direction_status FROM messages WHERE fb_message_id = ?').get(stableMessageId);
     if (!existingMsg) return { updated: false, reason: 'not_found' };
 
-    const ranks = {
-      facebook_payload: 6,
-      facebook_label: 5,
-      dom_order: 5,
-      facebook_dom: 4,
-      realtime_fallback: 3,
-      fallback: 2,
-      unknown: 1
-    };
-    const oldRank = ranks[existingMsg.timestamp_source] || 1;
-    const newRank = ranks[tsSource] || 1;
-    const shouldUpdateTimestamp = newRank > oldRank;
+    const shouldUpdateTimestamp = Boolean(
+      tsMs && tsMs > 0 && ConversationRepository.shouldUpgradeTimestamp(
+        existingMsg.timestamp_source,
+        tsSource,
+        existingMsg.timestamp_ms,
+        tsMs
+      )
+    );
     const explicitStatus = directionStatus || direction_status;
     const explicitConfidence = directionConfidence || direction_confidence;
     const isDirectionKnown = isOutgoing === true || isOutgoing === false || isOutgoing === 1 || isOutgoing === 0;
@@ -434,8 +437,11 @@ class ConversationRepository {
     const newRank = ConversationRepository.getTimestampRank(newSource);
     if (newRank > oldRank) return true;
     if (newRank < oldRank) return false;
-    // When ranks are identical (e.g. separator_date_clock or realtime_fallback):
-    // allow upgrade if the new timestamp is valid (>0) and significantly different (>= 30s or across days)
+    // When ranks are identical:
+    // Never allow realtime_fallback or realtime_delta (volatile Date.now()) to drift timestamps on repeated rescans
+    const s = String(newSource || '').trim().toLowerCase();
+    if (s === 'realtime_fallback' || s === 'realtime_delta') return false;
+    // Allow upgrade if the new timestamp is valid (>0) and significantly different (>= 30s or across days)
     if (newTs > 0 && oldTs > 0 && Math.abs(Number(newTs) - Number(oldTs)) >= 30000) {
       return true;
     }
@@ -652,6 +658,19 @@ class ConversationRepository {
         generation,
         scan_id
       };
+    }
+
+    // Ensure thread exists in threads table to prevent FOREIGN KEY constraint failed
+    const threadExists = database.prepare('SELECT id FROM threads WHERE id = ?').get(thread_id);
+    if (!threadExists) {
+      ConversationRepository.upsertThread({
+        id: thread_id,
+        account_id: envelope.account_id,
+        contact_name: envelope.contact_name || 'Khách hàng',
+        last_message: messages.length > 0 ? (messages[messages.length - 1].content || 'Chưa có tin nhắn') : 'Chưa có tin nhắn',
+        is_unread: 0,
+        inbox_folder: 'INBOX'
+      }, database);
     }
 
     const insertOrUpdate = database.prepare(`

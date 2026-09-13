@@ -231,6 +231,9 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
     setSavingCustomFields(false);
   }, [
     contactInfo?.thread_id,
+    contactInfo?.name,
+    contactInfo?.contact_name,
+    contactInfo?.avatar_url,
     contactInfo?.nickname,
     contactInfo?.phone,
     contactInfo?.email,

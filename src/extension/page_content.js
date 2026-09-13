@@ -96,6 +96,31 @@ if (isBusiness) {
 
     // Use polling to be completely immune to React DOM shuffling
     setInterval(scanForMessages, 1000);
+    setInterval(scanPageSidebarThreads, 3500);
+    setTimeout(scanPageSidebarThreads, 1500);
+
+    // Feature Realtime Sidebar: Lắng nghe biến động Sidebar phát hiện tin nhắn mới tức thì
+    let sidebarDebounceTimer = null;
+    function setupSidebarObserver() {
+        const sidebarContainer = document.querySelector('[data-surface*="thread_list"], [data-surface*="bizweb_inbox:thread_list"], [role="navigation"]');
+        if (!sidebarContainer) {
+            setTimeout(setupSidebarObserver, 2000);
+            return;
+        }
+        try {
+            const observer = new MutationObserver(() => {
+                if (sidebarDebounceTimer) clearTimeout(sidebarDebounceTimer);
+                sidebarDebounceTimer = setTimeout(() => {
+                    scanPageSidebarThreads();
+                }, 300);
+            });
+            observer.observe(sidebarContainer, { childList: true, subtree: true, characterData: true });
+            console.log('[PageContent] ⚡ Đã kích hoạt MutationObserver theo dõi Sidebar real-time (< 1s)');
+        } catch (e) {
+            console.warn('[PageContent] Không thể gắn observer cho sidebar:', e.message);
+        }
+    }
+    setTimeout(setupSidebarObserver, 2000);
 
     // Feature 055: Old passive scrollBackForHistory interval is deprecated and replaced
     // by the active on-demand crawler triggered by REQUEST_PAGE_BATCH_SYNC.
@@ -267,31 +292,51 @@ if (isBusiness) {
     // Same role="region"/main/grid detection strategy already used by the
     // inChatContainer walk in processPotentialMessage, but returning the actual
     // container element instead of a boolean, so other lookups (contact name /
+    function isExcludedElement(el) {
+        if (!el) return false;
+        const target = el.nodeType === 1 ? el : el.parentElement;
+        if (!target) return false;
+        if (target.closest('nav, [role="navigation"], [data-surface*="nav"], header, [role="banner"], aside, [aria-label*="Điều hướng"], [aria-label*="Navigation"], [data-surface*="thread_list"], [role="gridcell"], form, [role="textbox"], [contenteditable="true"]')) {
+            return true;
+        }
+        try {
+            const rect = target.getBoundingClientRect();
+            if (rect.width > 0 && rect.right < 200) {
+                return true;
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    // Same role="region"/main/grid detection strategy already used by the
+    // inChatContainer walk in processPotentialMessage, but returning the actual
+    // container element instead of a boolean, so other lookups (contact name /
     // avatar) can be scoped to it instead of querying the whole document - the
     // Business Suite sidebar conversation list has its own avatar thumbnails
     // that must never leak into the currently-open thread's contact info.
     function findMessageListContainer() {
         const anchor = document.querySelector('[data-message-id]')
-            || document.querySelector('[role="main"]')
-            || document.querySelector('[role="grid"]')
             || document.querySelector('[aria-label*="Đoạn chat"]')
             || document.querySelector('[aria-label*="tin nhắn"]');
-        if (!anchor) return document.body;
+        if (!anchor) return null;
         let curr = anchor.parentElement || anchor;
         while (curr && curr !== document.body) {
             if (curr.getAttribute) {
                 const label = (curr.getAttribute('aria-label') || '').toLowerCase();
                 const role = curr.getAttribute('role');
-                if (role === 'region' && (label.includes('tin nhắn') || label.includes('message') || label.includes('msg'))) {
+                if (role === 'region' && (label.includes('tin nhắn') || label.includes('message') || label.includes('msg') || label.includes('chat'))) {
                     return curr;
                 }
-                if (role === 'main' || role === 'grid') {
+                if (role === 'grid' && !label.includes('hội thoại') && !label.includes('cuộc trò chuyện') && !label.includes('thread')) {
+                    return curr;
+                }
+                if (role === 'main' && !label.includes('bảng feed') && !label.includes('sidebar')) {
                     return curr;
                 }
             }
             curr = curr.parentElement;
         }
-        return anchor.parentElement || document.body;
+        return anchor.parentElement || null;
     }
 
     // Direction is measured relative to the actual message-list container.
@@ -555,7 +600,14 @@ if (isBusiness) {
 
             const threadJustChanged = currentThreadId !== lastKnownThreadId;
             isLikelyBacklog(currentThreadId); // this updates lastKnownThreadId and resets cache if thread changed
-            if (threadJustChanged) seedTimestampAnchorsForThread(currentThreadId);
+            if (threadJustChanged) {
+                lastThreadSwitchAt = Date.now();
+                currentContactName = null;
+                currentAvatarUrl = null;
+                lastReportedContactName = null;
+                lastReportedAvatarUrl = null;
+                seedTimestampAnchorsForThread(currentThreadId);
+            }
 
             // Resolved once per tick and threaded through to both passes below
             // (and into processPotentialMessage/walkBubbleAncestors), so every
@@ -583,21 +635,37 @@ if (isBusiness) {
 
             // 1. Trích xuất Tên khách hàng (currentContactName)
             if (!currentContactName || isInvalidName(currentContactName)) {
-                // Ưu tiên thẻ title trong thread list / thread detail
-                const titleEl = document.querySelector('[data-surface*="thread_and_detail"] [data-surface*="thread_title"], [data-surface*="thread_title"]');
-                const titleTxt = (titleEl?.textContent || '').trim().split('\n')[0].trim();
-                if (titleTxt && !isInvalidName(titleTxt) && titleTxt.length >= 2 && titleTxt.length <= 80) {
-                    currentContactName = cleanName(titleTxt);
+                // A. Ưu tiên tìm chính xác dòng của threadId này trong Sidebar
+                if (currentThreadId) {
+                    const rowForThread = document.querySelector(`[role="navigation"] a[href*="${currentThreadId}"], [data-surface*="thread_list"] a[href*="${currentThreadId}"], a[href*="selected_item_id=${currentThreadId}"]`)?.closest('[role="row"], [role="listitem"], [data-surface*="thread_row"]');
+                    if (rowForThread) {
+                        const titleEl = rowForThread.querySelector('[data-surface*="thread_title"], h2, h3, h4, [role="heading"], [dir="auto"], strong, b');
+                        const rowTxt = (titleEl?.textContent || '').trim().split('\n')[0].trim();
+                        if (rowTxt && !isInvalidName(rowTxt) && rowTxt.length >= 2 && rowTxt.length <= 80 && !/^\d+$/.test(rowTxt)) {
+                            currentContactName = cleanName(rowTxt);
+                        }
+                    }
                 }
 
-                // Header chính giữa hoặc thông tin chi tiết bên phải
-                if (!currentContactName || isInvalidName(currentContactName)) {
-                    const headerEls = document.querySelectorAll('[role="main"] header [dir="auto"], [role="main"] header h2, header [role="heading"], [data-surface*="contact_name"], [data-surface*="profile_header"]');
-                    for (const el of headerEls) {
-                        const txt = (el.textContent || '').trim().split('\n')[0].trim();
-                        if (txt && !isInvalidName(txt) && txt.length >= 2 && txt.length <= 80) {
-                            currentContactName = cleanName(txt);
-                            break;
+                // B. Nếu chưa có và thời gian chuyển thread đã qua grace period (1.5s), mới lấy từ hàng active hoặc header
+                if ((!currentContactName || isInvalidName(currentContactName)) && (Date.now() - lastThreadSwitchAt >= 1500)) {
+                    const activeRow = document.querySelector('[role="navigation"] [aria-selected="true"], [role="gridcell"] [aria-selected="true"], [data-surface*="thread_list"] [aria-selected="true"], [aria-selected="true"], [aria-current="page"], [aria-current="true"]');
+                    if (activeRow) {
+                        const activeTitleEl = activeRow.querySelector('[data-surface*="thread_title"], h2, h3, h4, [role="heading"], [dir="auto"], strong, b');
+                        const activeTxt = (activeTitleEl?.textContent || activeRow.textContent || '').trim().split('\n')[0].trim();
+                        if (activeTxt && !isInvalidName(activeTxt) && activeTxt.length >= 2 && activeTxt.length <= 80 && !/^\d+$/.test(activeTxt)) {
+                            currentContactName = cleanName(activeTxt);
+                        }
+                    }
+
+                    if (!currentContactName || isInvalidName(currentContactName)) {
+                        const headerEls = document.querySelectorAll('[role="main"] header [dir="auto"], [role="main"] header h2, header [role="heading"], [data-surface*="contact_name"], [data-surface*="profile_header"]');
+                        for (const el of headerEls) {
+                            const txt = (el.textContent || '').trim().split('\n')[0].trim();
+                            if (txt && !isInvalidName(txt) && txt.length >= 2 && txt.length <= 80 && !/^\d+$/.test(txt)) {
+                                currentContactName = cleanName(txt);
+                                break;
+                            }
                         }
                     }
                 }
@@ -631,32 +699,38 @@ if (isBusiness) {
 
             // 2. Trích xuất Avatar URL (currentAvatarUrl)
             if (!currentAvatarUrl) {
-                const avatarCandidates = document.querySelectorAll(
-                    '[data-surface*="thread_list"] img[src*="fbcdn.net"], [data-surface*="thread_list"] img[src*="scontent"], [data-surface*="thread_list"] img.img, [role="main"] header img, [data-surface*="thread_detail"] img, .x1q0g3np img, img[src*="fbcdn.net"], img[src*="scontent"]'
-                );
-                for (const img of avatarCandidates) {
-                    const src = img.getAttribute('src');
-                    if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
-                        currentAvatarUrl = src;
-                        break;
+                const activeRow = document.querySelector('[role="navigation"] [aria-selected="true"], [role="gridcell"] [aria-selected="true"], [data-surface*="thread_list"] [aria-selected="true"], [aria-selected="true"], [aria-current="page"], [aria-current="true"]');
+                const headerEl = document.querySelector('[role="main"] header');
+                const priorityScopes = [activeRow, headerEl].filter(Boolean);
+                for (const scope of priorityScopes) {
+                    const img = scope.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
+                    if (img) {
+                        const src = img.getAttribute('src');
+                        if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
+                            currentAvatarUrl = src;
+                            break;
+                        }
                     }
                 }
             }
 
-            // Phát hiện metadata mới -> gửi ngay sang background (chỉ gửi khi có thay đổi)
-            if ((currentContactName && !isInvalidName(currentContactName)) || currentAvatarUrl) {
-                if (lastReportedContactName !== currentContactName || lastReportedAvatarUrl !== currentAvatarUrl) {
-                    lastReportedContactName = currentContactName;
-                    lastReportedAvatarUrl = currentAvatarUrl;
-                    chrome.runtime.sendMessage({
-                        type: 'UPDATE_THREAD_METADATA',
-                        data: {
-                            thread_id: currentThreadId,
-                            contact_name: currentContactName,
-                            avatar_url: currentAvatarUrl,
-                            page_id: assetId
-                        }
-                    });
+            // Phát hiện metadata mới -> gửi ngay sang background (chỉ gửi khi có thay đổi, khớp ID và qua grace period 1.5s)
+            if (currentThreadId && ((currentContactName && !isInvalidName(currentContactName)) || currentAvatarUrl)) {
+                const activeIdNow = resolveCurrentThreadId();
+                if (String(activeIdNow) === String(currentThreadId) && (Date.now() - lastThreadSwitchAt >= 1500)) {
+                    if (lastReportedContactName !== currentContactName || lastReportedAvatarUrl !== currentAvatarUrl) {
+                        lastReportedContactName = currentContactName;
+                        lastReportedAvatarUrl = currentAvatarUrl;
+                        chrome.runtime.sendMessage({
+                            type: 'UPDATE_THREAD_METADATA',
+                            data: {
+                                thread_id: currentThreadId,
+                                contact_name: currentContactName,
+                                avatar_url: currentAvatarUrl,
+                                page_id: assetId
+                            }
+                        });
+                    }
                 }
             }
 
@@ -700,14 +774,14 @@ if (isBusiness) {
             // whole-document text scan for this tick entirely instead of
             // falling back to unscoped scanning (which is how non-chat UI text
             // used to leak in as fake messages).
-            if (messageListContainer) {
-                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+            if (messageListContainer && messageListContainer !== document.body) {
+                const walker = document.createTreeWalker(messageListContainer, NodeFilter.SHOW_TEXT, null, false);
                 let node;
                 while (node = walker.nextNode()) {
                     const text = node.nodeValue.trim();
                     if (text.length > 0) {
                         const el = node.parentElement;
-                        if (el.tagName !== 'SCRIPT' && el.tagName !== 'STYLE' && el.tagName !== 'A' && el.tagName !== 'BUTTON' && !el.closest('a') && !el.closest('button')) {
+                        if (el && !isExcludedElement(el) && el.tagName !== 'SCRIPT' && el.tagName !== 'STYLE' && el.tagName !== 'A' && el.tagName !== 'BUTTON' && !el.closest('a') && !el.closest('button')) {
                             processPotentialMessage(el, text, processedWrappersThisTick, messageListContainer);
                         }
                     }
@@ -988,8 +1062,14 @@ if (isBusiness) {
                     }
                 }
                 if (matchingSep) {
-                    parsedTs = matchingSep.timestamp_ms;
-                    tsSource = 'separator_date_clock';
+                    const isLiveSession = !crawlInProgress && !isLikelyBacklog(threadId);
+                    if (isLiveSession && Date.now() - matchingSep.timestamp_ms > 120000) {
+                        parsedTs = Date.now();
+                        tsSource = 'realtime_fallback';
+                    } else {
+                        parsedTs = matchingSep.timestamp_ms;
+                        tsSource = 'separator_date_clock';
+                    }
                 }
             }
         }
@@ -1015,11 +1095,16 @@ if (isBusiness) {
         const hash = threadId + '_' + dedupKey;
         if (processedHashes.has(hash)) return;
 
-        if (!inChatContainer) {
+        if (!inChatContainer || isExcludedElement(messageIdNode || anchorElement)) {
             return;
         }
 
         if (!isMedia) {
+            const textFilter = globalThis.FbCrmTextFilter || (typeof window !== 'undefined' && window.FbCrmTextFilter);
+            if (textFilter && typeof textFilter.isSystemOrMetadataText === 'function') {
+                if (textFilter.isSystemOrMetadataText(text)) return;
+            }
+
             const lowerText = text.toLowerCase();
             if (!isInsideMessageBubble && !isCallLog) {
                 const sysTexts = ['xem thêm', 'đang tải...', 'chưa đọc'];
@@ -1314,7 +1399,7 @@ if (isBusiness) {
                             scan_id: meta.scan_id,
                             batch_sequence: 1,
                             mode: req.mode || (isOlderMode ? 'page_scroll_older' : 'page_initial'),
-                            contact_name: currentContactName || null,
+                            contact_name: (String(threadId) === String(resolveCurrentThreadId()) ? (currentContactName || null) : null),
                             boundary_evidence: boundaryEvidence,
                             messages: batchMessages
                         }
@@ -1328,6 +1413,180 @@ if (isBusiness) {
             })();
         }
     });
+
+    // Tự động cào danh sách hội thoại từ Sidebar của Meta Business Suite
+    let lastSidebarSyncHash = '';
+    let lastSidebarSyncTime = 0;
+
+    function scanPageSidebarThreads() {
+        try {
+            const now = Date.now();
+            if (now - lastSidebarSyncTime < 1000) return;
+
+            const urlParams = new URLSearchParams(window.location.search);
+            const pageId = urlParams.get('asset_id') || urlParams.get('mailbox_id') || null;
+            const currentSelectedId = resolveCurrentThreadId();
+
+            const isInvalidText = (txt) => {
+                if (!txt || typeof txt !== 'string') return true;
+                const s = txt.trim();
+                if (s.length < 2) return true;
+                const systemKeywordsRegex = /^(?:Tất cả tin nhắn|Tất cả|All messages|All|Tin nhắn trực tiếp|Direct messages|Hộp thư đến|Hộp thư|Inbox|Chưa đọc|Unread|Đã xong|Done|Gắn dấu sao|Đã gắn dấu sao|Starred|Spam|Thư rác|Bình luận.*|Comments.*|Thông báo|Notifications|Đang hoạt động.*|Hoạt động.*|Active now|Active recently|Online|Offline|Đang|Facebook|Messenger|Meta)$/i;
+                if (systemKeywordsRegex.test(s)) return true;
+                const singleKeywordsPattern = '(?:Tất cả tin nhắn|Tất cả|All messages|All|Tin nhắn trực tiếp|Direct messages|Hộp thư đến|Hộp thư|Inbox|Chưa đọc|Unread|Đã xong|Done|Gắn dấu sao|Đã gắn dấu sao|Starred|Spam|Thư rác|Thông báo|Notifications|Facebook|Messenger|Meta)';
+                const repeatedRegex = new RegExp(`^(?:${singleKeywordsPattern}[\\s\\n\\r]*)+$`, 'i');
+                if (repeatedRegex.test(s)) return true;
+                return false;
+            };
+
+            const sidebar = document.querySelector('[data-surface*="thread_list"], [data-surface*="bizweb_inbox:thread_list"], [role="navigation"]') || document;
+            
+            const rowCandidates = Array.from(sidebar.querySelectorAll(
+                '[data-surface*="thread_row"], [role="row"], [role="listitem"], a[href*="selected_item_id="], a[href*="thread_id="]'
+            ));
+
+            const leftAvatars = Array.from(sidebar.querySelectorAll('img[src*="fbcdn.net"], img[src*="scontent"]')).filter(img => {
+                try {
+                    const rect = img.getBoundingClientRect();
+                    return rect.width > 0 && rect.left < 500 && !img.closest('[data-message-id], [role="main"]');
+                } catch (_) { return false; }
+            });
+            for (const img of leftAvatars) {
+                const parentRow = img.closest('[role="row"], [role="listitem"], [data-surface*="thread_row"]') || img.parentElement?.parentElement;
+                if (parentRow && !rowCandidates.includes(parentRow)) {
+                    rowCandidates.push(parentRow);
+                }
+            }
+
+            const discoveredThreads = [];
+            const seenIds = new Set();
+
+            for (const row of rowCandidates) {
+                try {
+                    if (row.closest('[data-message-id], [data-surface*="message_list"], [role="main"] header, form')) continue;
+
+                    let threadId = null;
+
+                    const links = row.tagName === 'A' ? [row] : Array.from(row.querySelectorAll('a[href]'));
+                    for (const l of links) {
+                        const href = l.getAttribute('href') || l.href || '';
+                        const m = href.match(/(?:selected_item_id|thread_id)=(\d+)/) || href.match(/\/messages\/(?:e2ee\/)?t\/(\d+)/);
+                        if (m && m[1] && m[1] !== pageId) {
+                            threadId = m[1];
+                            break;
+                        }
+                    }
+
+                    if (!threadId) {
+                        try {
+                            const keys = Object.keys(row);
+                            const reactKey = keys.find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactProps$'));
+                            if (reactKey) {
+                                let curr = row[reactKey];
+                                let depth = 0;
+                                while (curr && depth < 40) {
+                                    depth++;
+                                    const props = curr.memoizedProps || curr.props;
+                                    if (props) {
+                                        const candidateProps = ['threadKey', 'thread_key', 'thread_id', 'threadId', 'recipientId', 'otherUserFbId', 'selected_item_id', 'userId'];
+                                        for (const p of candidateProps) {
+                                            const val = String(props[p] || '');
+                                            const m = val.match(/(\d{12,})/);
+                                            if (m && m[1] !== pageId) {
+                                                threadId = m[1];
+                                                break;
+                                            }
+                                        }
+                                        if (threadId) break;
+                                    }
+                                    curr = curr.return || curr.child;
+                                }
+                            }
+                        } catch (_) {}
+                    }
+
+                    if (!threadId && currentSelectedId && (Date.now() - lastThreadSwitchAt >= 1500) && (row.getAttribute('aria-selected') === 'true' || row.getAttribute('aria-current') === 'true')) {
+                        threadId = currentSelectedId;
+                    }
+
+                    if (!threadId || threadId === pageId || seenIds.has(threadId)) continue;
+                    seenIds.add(threadId);
+
+                    let name = '';
+                    const nameEl = row.querySelector('[data-surface*="thread_title"], h2, h3, [role="heading"], [dir="auto"], strong, b');
+                    if (nameEl) {
+                        const txt = (nameEl.textContent || '').trim().split('\n')[0].trim();
+                        if (txt && !isInvalidText(txt) && txt.length >= 2 && txt.length <= 80 && !/^\d+$/.test(txt)) {
+                            name = txt;
+                        }
+                    }
+                    if (!name) {
+                        const lines = String(row.innerText || '').split(/\n+/).map(s => s.trim()).filter(Boolean);
+                        for (const line of lines) {
+                            if (line && !isInvalidText(line) && line.length >= 2 && line.length <= 80 && !/^\d+$/.test(line) && !/^\d{1,2}:\d{2}$/.test(line)) {
+                                name = line;
+                                break;
+                            }
+                        }
+                    }
+                    if (!name) name = 'Khách hàng';
+
+                    let avatarUrl = null;
+                    const avatarImg = row.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
+                    if (avatarImg) {
+                        const src = avatarImg.getAttribute('src');
+                        if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
+                            avatarUrl = src;
+                        }
+                    }
+
+                    let lastMessage = '';
+                    const textNodes = Array.from(row.querySelectorAll('span, div')).filter(el => el.children.length === 0);
+                    for (let i = textNodes.length - 1; i >= 0; i--) {
+                        const t = (textNodes[i].textContent || '').trim();
+                        if (t && t !== name && !/^\d{1,2}:\d{2}$/.test(t) && !isInvalidText(t) && t.length > 1) {
+                            lastMessage = t;
+                            break;
+                        }
+                    }
+
+                    const isOutgoingPreview = /^(?:Bạn:|You:)/i.test(lastMessage.trim());
+                    const hasUnreadIndicator = Boolean(row.querySelector('[aria-label*="chưa đọc" i], [aria-label*="unread" i], [data-testid="unread-count"], [aria-label*="Đánh dấu là chưa đọc" i]'));
+                    const isUnread = !isOutgoingPreview && hasUnreadIndicator;
+
+                    discoveredThreads.push({
+                        id: threadId,
+                        thread_id: threadId,
+                        contact_name: name,
+                        avatar_url: avatarUrl,
+                        last_message: lastMessage || 'Chưa có tin nhắn',
+                        is_unread: isUnread ? 1 : 0,
+                        source_type: 'page_messenger',
+                        page_id: pageId,
+                        inbox_folder: 'INBOX'
+                    });
+                } catch (_) {}
+            }
+
+            if (discoveredThreads.length > 0) {
+                const currentHash = discoveredThreads.map(t => `${t.id}:${t.contact_name}:${t.last_message}`).join('|');
+                if (currentHash !== lastSidebarSyncHash) {
+                    lastSidebarSyncHash = currentHash;
+                    lastSidebarSyncTime = now;
+                    console.log(`[PageContent] 🚀 Tự động cào được ${discoveredThreads.length} hội thoại Page:`, discoveredThreads.map(t => `${t.contact_name} (${t.id})`));
+                    chrome.runtime.sendMessage({
+                        type: 'PAGE_SIDEBAR_THREADS_DISCOVERED',
+                        data: {
+                            page_id: pageId,
+                            threads: discoveredThreads
+                        }
+                    });
+                }
+            }
+        } catch (e) {
+            console.warn('[PageContent] Lỗi scanPageSidebarThreads:', e.message);
+        }
+    }
 
     // Incoming calls are handled exclusively by content.js.
 } // End isBusiness block

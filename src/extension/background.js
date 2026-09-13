@@ -487,6 +487,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
   }
 
+  if (message.type === 'PAGE_SIDEBAR_THREADS_DISCOVERED') {
+    const { page_id, threads } = message.data || {};
+    if (Array.isArray(threads) && threads.length > 0) {
+      console.log(`[FB Engine] 📋 Nhận ${threads.length} threads từ sidebar Page ${page_id}`);
+      sendToBackend('SYNC_THREADS_RESULT', {
+        account_id: user_id,
+        page_id: page_id,
+        source_type: 'page_messenger',
+        threads: threads.map((t) => ({
+          id: t.id || t.thread_id,
+          thread_id: t.id || t.thread_id,
+          contact_name: t.contact_name || t.name,
+          name: t.contact_name || t.name,
+          last_message: t.last_message || 'Chưa có tin nhắn',
+          is_unread: t.is_unread ? 1 : 0,
+          avatar_url: t.avatar_url || null,
+          avatar_base64: t.avatar_base64 || null,
+          thread_url: t.thread_url || null,
+          page_id: t.page_id || page_id,
+          source_type: 'page_messenger',
+          inbox_folder: t.inbox_folder || 'INBOX'
+        }))
+      });
+    }
+  }
+
   if (message.type === 'UPGRADE_MESSAGE_TIMESTAMP') {
     const msgData = message.data;
     sendToBackend('UPGRADE_MESSAGE_TIMESTAMP', {
@@ -1929,25 +1955,24 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
       }
     );
     composerReady = await pollForComposer(tab.id, 10000);
-  } else {
-    // Business Suite is an SPA - switching conversations happens via
-    // client-side routing and does not reliably update tab.url, so checking
-    // the URL first and reloading on any mismatch was forcing an unnecessary
-    // reload (and its slow loading-skeleton state, confirmed live) before
-    // nearly every send, even when already on the right conversation. Try
-    // the composer on the tab as-is first; only navigate if it's genuinely
-    // not there after polling.
-    composerReady = await pollForComposer(tab.id);
-    if (!composerReady) {
-      console.log(`[FB Engine] Composer chưa sẵn sàng trên tab hiện tại, điều hướng lại đúng thread.`);
+    const onCorrectThread = await ensureTabOnThread(tab, recipientPsid, targetUrl, page_id);
+    if (!onCorrectThread) {
+      console.log(`[FB Engine] Thread hiện tại chưa đúng recipientPsid=${recipientPsid}, điều hướng sang targetUrl.`);
       await chrome.tabs.update(tab.id, { url: targetUrl });
       await Promise.race([waitForTabComplete(tab.id, 10000), delay(4000)]);
-      composerReady = await pollForComposer(tab.id);
     }
+    composerReady = await pollForComposer(tab.id, 10000);
   }
 
   if (!composerReady) {
     throw new Error('Không tìm thấy ô soạn tin nhắn Business Suite');
+  }
+
+  // Safety guard: Đảm bảo tuyệt đối không gõ nhầm vào cuộc trò chuyện của người khác
+  const activeThreadId = await getCurrentThreadIdInTab(tab.id);
+  if (activeThreadId && String(activeThreadId) !== String(recipientPsid)) {
+    console.error(`[FB Engine] 🛑 Chặn gửi nhầm: Tab Business Suite đang mở thread ${activeThreadId}, nhưng đích là ${recipientPsid}`);
+    throw new Error(`Tab Business Suite chưa ở đúng thread mục tiêu (đang mở ${activeThreadId} thay vì ${recipientPsid})`);
   }
 
   await stageBusinessSuiteAttachment(tab.id, attachmentManifest || attachment);
@@ -2253,7 +2278,7 @@ async function handleSync100Threads({ account_id, resume = false, time_budget_ms
   if (inboxTarget) scrapeTargets.push(inboxTarget);
   for (const bizTab of bizTabs) {
     if (!bizTab?.id) continue;
-    const pageId = bizTab.url?.match(/[?&]asset_id=(\d+)/)?.[1] || null;
+    const pageId = bizTab.url?.match(/[?&](?:asset_id|mailbox_id)=(\d+)/)?.[1] || null;
     if (!pageId) continue;
     scrapeTargets.push({ tab: bizTab, isBizTab: true, pageId });
   }
@@ -2280,10 +2305,29 @@ async function handleSync100Threads({ account_id, resume = false, time_budget_ms
         // This does not foreground Chrome on the user's desktop.
         await chrome.tabs.update(target.tab.id, { active: true }).catch(() => null);
         await delay(target.requestSection ? 1200 : 500);
-        let scraped = [];
         if (target.isBizTab) {
-          const results = await chrome.scripting.executeScript({ target: { tabId: target.tab.id }, func: scrapeBusinessSuiteSidebar });
-          scraped = (results?.[0]?.result || []).map((t) => ({ ...t, inbox_folder: 'INBOX' }));
+          let results = null;
+          try {
+            results = await chrome.scripting.executeScript({
+              target: { tabId: target.tab.id, allFrames: true },
+              world: 'MAIN',
+              func: scrapeBusinessSuiteSidebar
+            });
+          } catch (e) {
+            console.warn('[FB Engine] executeScript world:MAIN failed, fallback to default:', e.message);
+            results = await chrome.scripting.executeScript({
+              target: { tabId: target.tab.id, allFrames: true },
+              func: scrapeBusinessSuiteSidebar
+            });
+          }
+          const allScraped = [];
+          for (const res of (results || [])) {
+            if (Array.isArray(res?.result)) {
+              allScraped.push(...res.result);
+            }
+          }
+          scraped = allScraped.map((t) => ({ ...t, inbox_folder: 'INBOX' }));
+          console.log(`[FB Engine] [BIZ_SIDEBAR] Scraped ${scraped.length} threads from Business Suite tab ${target.tab.id}:`, scraped.map(s => `${s.name} (${s.thread_id})`));
         } else {
           if (target.desiredUrl) {
             const current = await chrome.tabs.get(target.tab.id).catch(() => target.tab);
@@ -2583,67 +2627,181 @@ function scrapeBusinessSuiteSidebar() {
     return pat.test(str);
   };
 
+  // 1. Kiểm tra phần tử có nằm trong khung chat, bong bóng tin nhắn, hay form soạn thảo không
+  // TUYỆT ĐỐI KHÔNG dùng role="region" hoặc thread_detail (vì Meta dùng cho toàn bộ layout/trang)
+  function isInsideChatOrDetailPane(el) {
+    if (!el) return false;
+    if (el.closest('[data-message-id], [data-testid*="message"], [data-surface*="message_list"], [data-surface*="composer"], [data-scope="messages_table"], form')) {
+      return true;
+    }
+    if (el.querySelector && el.querySelector('[role="textbox"], textarea')) {
+      return true;
+    }
+    return false;
+  }
+
+  // 2. Tìm container gốc của sidebar danh sách hội thoại bên trái
+  let sidebarContainer = document.querySelector('[data-surface*="thread_list"], [data-surface*="bizweb_inbox:thread_list"]');
+  if (!sidebarContainer) {
+    const searchInput = document.querySelector('input[placeholder*="Tìm kiếm" i], input[placeholder*="Search" i], input[type="search"]');
+    if (searchInput) {
+      let curr = searchInput.parentElement;
+      while (curr && curr !== document.body) {
+        if (curr.querySelector('a[href*="selected_item_id="], [role="row"], [role="listitem"], [role="gridcell"]')) {
+          sidebarContainer = curr;
+          break;
+        }
+        curr = curr.parentElement;
+      }
+    }
+  }
+
+  function isInsideSidebar(el) {
+    if (!el || isInsideChatOrDetailPane(el)) return false;
+    if (sidebarContainer && sidebarContainer.contains(el)) return true;
+    try {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.left > 550) return false;
+    } catch (_) {}
+    return true;
+  }
+
   // Lấy page_id & selected_item_id từ URL hiện tại (asset_id)
   const urlParams = new URLSearchParams(window.location.search);
   const pageId = urlParams.get('asset_id') || null;
   const currentSelectedItemId = urlParams.get('selected_item_id') || urlParams.get('thread_id') || null;
 
-  // 1. Quét tất cả các thread container trong Business Suite Inbox
+  // Helper trích xuất ID từ React Fiber / Props của DOM element
+  function extractIdFromReact(node) {
+    if (!node) return null;
+    try {
+      const visited = new Set();
+      const candidateNodes = [node, ...Array.from(node.querySelectorAll('*')).slice(0, 20)];
+      for (const el of candidateNodes) {
+        const keys = Object.keys(el);
+        const reactKey = keys.find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$') || k.startsWith('__reactProps$'));
+        if (!reactKey) continue;
+
+        const queue = [el[reactKey]];
+        let iterations = 0;
+        while (queue.length > 0 && iterations < 80) {
+          iterations++;
+          const curr = queue.shift();
+          if (!curr || typeof curr !== 'object' || visited.has(curr)) continue;
+          visited.add(curr);
+
+          const directProps = ['threadKey', 'thread_key', 'thread_id', 'threadId', 'selected_item_id', 'selectedItemId', 'recipientId', 'recipient_id', 'contactId', 'contact_id', 'psid', 'participantId', 'participant_id', 'otherUserFbId', 'threadFbid', 'thread_fbid', 'userId', 'user_id', 'id'];
+          for (const p of directProps) {
+            const val = curr[p];
+            if (val && (typeof val === 'string' || typeof val === 'number')) {
+              const strVal = String(val);
+              const m = strVal.match(/(\d{12,})/);
+              if (m && m[1] !== pageId) {
+                return m[1];
+              }
+            }
+          }
+
+          if (curr.memoizedProps) queue.push(curr.memoizedProps);
+          if (curr.props) queue.push(curr.props);
+          if (curr.return) queue.push(curr.return);
+          if (curr.child) queue.push(curr.child);
+          if (curr.stateNode && typeof curr.stateNode === 'object') queue.push(curr.stateNode);
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  // 1. Quét tất cả các thread container NẰM TRONG SIDEBAR DANH SÁCH HỘI THOẠI
   const candidateRows = [];
+  const scope = sidebarContainer || document;
 
-  // Tìm theo surface wrappers (Meta Business Suite chuẩn)
-  document.querySelectorAll('[data-surface*="thread_row"], [data-surface*="thread_list"] > div, [data-surface*="bizweb_inbox:thread_list"] > div, [data-testid*="conversation"]').forEach(el => {
-    if (!el.closest('[role="navigation"], nav')) {
-      candidateRows.push(el);
-    }
-  });
-
-  // Tìm theo list items / rows
-  document.querySelectorAll('[role="row"], [role="listitem"]').forEach(el => {
-    if (!el.closest('[role="navigation"], nav') && !candidateRows.includes(el)) {
-      candidateRows.push(el);
-    }
-  });
-
-  // Tìm theo link hội thoại
-  document.querySelectorAll('a[href*="selected_item_id="], a[href*="thread_id="], a[href*="/messages/t/"]').forEach(link => {
-    if (!link.closest('[role="navigation"], nav')) {
-      const row = link.closest('[data-surface*="thread_row"], [role="row"], [role="listitem"]') || link;
-      if (!candidateRows.includes(row)) {
+  // A. Thẻ theo link hội thoại nằm trong sidebar
+  scope.querySelectorAll('a[href*="selected_item_id="], a[href*="thread_id="], a[href*="/messages/t/"]').forEach(link => {
+    if (isInsideSidebar(link)) {
+      const row = link.closest('[data-surface*="thread_row"], [role="row"], [role="listitem"], [role="gridcell"]') || link;
+      if (!candidateRows.includes(row) && isInsideSidebar(row)) {
         candidateRows.push(row);
       }
     }
   });
 
+  // B. Thẻ theo role hoặc data-surface nằm trong sidebar
+  scope.querySelectorAll('[data-surface*="thread_row"], [data-surface*="thread_list"] > div, [data-surface*="bizweb_inbox:thread_list"] > div, [role="row"], [role="listitem"], [role="gridcell"]').forEach(el => {
+    if (isInsideSidebar(el) && !candidateRows.includes(el)) {
+      const h = el.clientHeight || el.offsetHeight || 0;
+      const w = el.clientWidth || el.offsetWidth || 0;
+      if ((h >= 36 && h <= 180 && w >= 120) || el.getAttribute('data-surface')) {
+        candidateRows.push(el);
+      }
+    }
+  });
+
+  // C. Fallback: Quét các container cha của avatar img CHỈ NẰM TRONG SIDEBAR
+  const sidebarAvatars = scope.querySelectorAll('img[src*="fbcdn.net"], img[src*="scontent"]');
+  for (const img of sidebarAvatars) {
+    if (!isInsideSidebar(img)) continue;
+    let p = img.parentElement;
+    let depth = 0;
+    while (p && p !== document.body && depth < 8) {
+      depth++;
+      if (isInsideChatOrDetailPane(p)) break;
+      const h = p.clientHeight || p.offsetHeight || 0;
+      const w = p.clientWidth || p.offsetWidth || 0;
+      // Phải bao trọn cả avatar lẫn text tên khách
+      if (h >= 36 && h <= 180 && w >= 120 && w <= 550) {
+        if (!candidateRows.includes(p) && isInsideSidebar(p)) candidateRows.push(p);
+        break;
+      }
+      p = p.parentElement;
+    }
+  }
+
   for (const row of candidateRows) {
     try {
+      if (!isInsideSidebar(row)) continue;
       let thread_id = null;
 
-      // Tìm thread_id từ các thẻ link bên trong
+      // 1. Tìm thread_id từ các thẻ link bên trong
       const links = row.tagName === 'A' ? [row] : Array.from(row.querySelectorAll('a[href]'));
       for (const link of links) {
         const href = link.getAttribute('href') || link.href || '';
         const m1 = href.match(/selected_item_id=(\d+)/);
-        if (m1) { thread_id = m1[1]; break; }
+        if (m1 && m1[1] !== pageId) { thread_id = m1[1]; break; }
         const m2 = href.match(/[?&]thread_id=(\d+)/);
-        if (m2) { thread_id = m2[1]; break; }
+        if (m2 && m2[1] !== pageId) { thread_id = m2[1]; break; }
         const m3 = href.match(/\/messages\/(?:e2ee\/)?t\/(\d+)/);
-        if (m3) { thread_id = m3[1]; break; }
+        if (m3 && m3[1] !== pageId) { thread_id = m3[1]; break; }
       }
 
-      // Fallback: nếu row là active row và URL có selected_item_id
-      if (!thread_id && (row.getAttribute('aria-selected') === 'true' || row.getAttribute('aria-current') === 'true' || row.className.includes('selected') || (row.getAttribute('data-surface') || '').includes('thread_row0'))) {
+      // 2. Fallback: chỉ khi row thực sự là active row được chọn
+      if (!thread_id && currentSelectedItemId && (
+        row.getAttribute('aria-selected') === 'true' ||
+        row.getAttribute('aria-current') === 'true'
+      )) {
         thread_id = currentSelectedItemId;
       }
 
-      // Fallback: quét attribute ID/data-id
+      // 3. Fallback: trích xuất từ React Fiber Props
       if (!thread_id) {
-        const attrStr = (row.getAttribute('data-testid') || '') + ' ' + (row.getAttribute('id') || '') + ' ' + (row.getAttribute('data-surface') || '');
-        const m = attrStr.match(/(\d{12,})/);
-        if (m) thread_id = m[1];
+        thread_id = extractIdFromReact(row);
       }
 
-      if (!thread_id || seen.has(thread_id)) continue;
+      // 4. Fallback: quét attribute ID/data-id/data-hovercard
+      if (!thread_id) {
+        const hoverEls = row.querySelectorAll('[data-hovercard*="id="], [href*="id="], [href*="selected_item_id="]');
+        for (const el of hoverEls) {
+          const s = (el.getAttribute('data-hovercard') || '') + ' ' + (el.getAttribute('href') || '');
+          const m = s.match(/(?:id=|profile\/|selected_item_id=)(\d{12,})/);
+          if (m && m[1] !== pageId) {
+            thread_id = m[1];
+            break;
+          }
+        }
+      }
+
+      if (!thread_id || thread_id === pageId || seen.has(thread_id)) continue;
       seen.add(thread_id);
 
       // Trích xuất Tên (Name)
@@ -2654,11 +2812,22 @@ function scrapeBusinessSuiteSidebar() {
         if (txt && !isSystemText(txt)) name = txt;
       }
       if (!name) {
-        const candidateNameEls = Array.from(row.querySelectorAll('h2, h3, h4, [dir="auto"], div[tabindex="-1"], .xeuugli, span[style*="font-weight"]'));
+        const candidateNameEls = Array.from(row.querySelectorAll('h2, h3, h4, [role="heading"], [dir="auto"], span[style*="font-weight"], .xeuugli, strong, b'));
         for (const el of candidateNameEls) {
-          const txt = (el.textContent || '').trim().split('\n')[0].trim();
-          if (txt && !isSystemText(txt) && txt.length >= 2 && txt.length <= 80) {
+          let txt = (el.textContent || '').trim().split('\n')[0].trim();
+          txt = txt.replace(/\s*\d+\s*(?:ngày|giờ|phút|năm|tháng|s|m|h|d|y)\s*$/i, '').trim();
+          txt = txt.replace(/^(?:Bạn|You):\s*/i, '').trim();
+          if (txt && !isSystemText(txt) && txt.length >= 2 && txt.length <= 80 && !/^\d+$/.test(txt)) {
             name = txt;
+            break;
+          }
+        }
+      }
+      if (!name) {
+        const lines = String(row.innerText || '').split(/\n+/).map(l => l.trim()).filter(Boolean);
+        for (const line of lines) {
+          if (!isSystemText(line) && line.length >= 2 && line.length <= 80 && !/^\d+$/.test(line) && !/^\d{1,2}:\d{2}$/.test(line)) {
+            name = line;
             break;
           }
         }
@@ -2669,16 +2838,27 @@ function scrapeBusinessSuiteSidebar() {
 
       // Trích xuất avatar URL
       let avatar_url = null;
+      let avatar_base64 = null;
       const imgEl = row.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img, img');
       if (imgEl && imgEl.src && !/^data:/.test(imgEl.src) && !imgEl.src.includes('static.xx.fbcdn.net/rsrc.php')) {
         avatar_url = imgEl.src;
+        if (imgEl.complete && imgEl.naturalWidth > 10) {
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = imgEl.naturalWidth || 56;
+            canvas.height = imgEl.naturalHeight || 56;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(imgEl, 0, 0);
+            avatar_base64 = canvas.toDataURL('image/jpeg', 0.85);
+          } catch (e) {}
+        }
       }
 
-      // Trích xuất last_message
+      // Trích xuất last_message (tin nhắn xem trước)
       let last_message = '';
-      row.querySelectorAll('span, div').forEach(el => {
+      row.querySelectorAll('span, div, p').forEach(el => {
         const txt = el.textContent.trim();
-        if (txt && txt !== name && !txt.includes(name) && !isSystemText(txt) && txt.length > 2 && txt.length < 200 && !/^\d+\s*(?:ngày|giờ|phút|năm|s|m|h|d|y)$/i.test(txt)) {
+        if (txt && txt !== name && !txt.includes(name) && !isSystemText(txt) && txt.length > 2 && txt.length < 200 && !/^\d+\s*(?:ngày|giờ|phút|năm|s|m|h|d|y)$/i.test(txt) && !/^\d{1,2}:\d{2}$/.test(txt)) {
           if (!last_message || txt.length < last_message.length) last_message = txt;
         }
       });
@@ -2689,6 +2869,7 @@ function scrapeBusinessSuiteSidebar() {
         last_message: (last_message || '').substring(0, 200),
         is_unread: false,
         avatar_url,
+        avatar_base64,
         thread_url: window.location.href,
         page_id: pageId,
         source_type: 'page_messenger'

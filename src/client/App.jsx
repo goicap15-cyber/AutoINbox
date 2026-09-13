@@ -20,6 +20,8 @@ import LicenseManagerModal from './components/LicenseManagerModal.jsx';
 import LicenseLockScreen from './components/LicenseLockScreen.jsx';
 import AuthScreen from './components/AuthScreen.jsx';
 import EmployeeManagementModal from './components/EmployeeManagementModal.jsx';
+import { NotificationToastContainer } from './components/NotificationToast.jsx';
+import { playMessageSound } from './utils/notificationSound.js';
 import { useSocket } from './hooks/useSocket.js';
 import { MessageSquare } from 'lucide-react';
 
@@ -111,6 +113,101 @@ export default function App() {
   const accountsRef = useRef([]);
   const [authLoading, setAuthLoading] = useState(true);
   const { socket, isConnected } = useSocket(Boolean(sessionUser));
+
+  const [toasts, setToasts] = useState([]);
+  const activeThreadIdRef = useRef(activeThreadId);
+  useEffect(() => { activeThreadIdRef.current = activeThreadId; }, [activeThreadId]);
+  const recentAlertsRef = useRef(new Map());
+  const unreadAlertCountRef = useRef(0);
+  const originalTitleRef = useRef(typeof document !== 'undefined' ? document.title || 'MISSPRICE CRM' : 'MISSPRICE CRM');
+  const lastSyncRequestRef = useRef(new Map());
+
+  // Reset document title counter on window focus
+  useEffect(() => {
+    const handleFocus = () => {
+      unreadAlertCountRef.current = 0;
+      if (typeof document !== 'undefined') {
+        document.title = originalTitleRef.current || 'MISSPRICE CRM';
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, []);
+
+  // Request browser desktop notification permission on first user interaction
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      if (Notification.permission === 'default') {
+        const askPerm = () => {
+          Notification.requestPermission().catch(() => {});
+          window.removeEventListener('click', askPerm);
+        };
+        window.addEventListener('click', askPerm, { once: true });
+      }
+    }
+  }, []);
+
+  const triggerIncomingNotification = useCallback(({ thread_id, name, content, avatar_url }) => {
+    const threadIdStr = String(thread_id || '');
+    const cleanContent = String(content || '').trim();
+    const alertKey = `${threadIdStr}:${cleanContent}`;
+    const now = Date.now();
+    const lastAlert = recentAlertsRef.current.get(alertKey) || 0;
+    if (now - lastAlert < 4000) return; // Deduplicate within 4s window
+    recentAlertsRef.current.set(alertKey, now);
+
+    // 1. Play chime audio alert
+    playMessageSound();
+
+    // 2. Update document title
+    unreadAlertCountRef.current += 1;
+    if (typeof document !== 'undefined') {
+      const prefix = unreadAlertCountRef.current > 1 ? `(${unreadAlertCountRef.current}) ` : '(1) ';
+      document.title = `${prefix}💬 ${name || 'Khách hàng'}: ${cleanContent.slice(0, 28)}...`;
+    }
+
+    // 3. Dispatch Web Desktop Notification if window is in background
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted' && document.hidden) {
+      try {
+        const notif = new Notification(name || 'Khách hàng mới', {
+          body: cleanContent || 'Bạn có một tin nhắn mới từ khách hàng',
+          icon: avatar_url || '/favicon.ico',
+          tag: `thread_${threadIdStr}`
+        });
+        notif.onclick = () => {
+          window.focus();
+          if (threadIdStr) setActiveThreadId(threadIdStr);
+          notif.close();
+        };
+      } catch (err) {
+        console.warn('[Notification] Desktop notification failed:', err);
+      }
+    }
+
+    // 4. In-App Notification Toast
+    const toastId = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    setToasts((prev) => [
+      ...prev.slice(-3), // Show at most 4 simultaneous toasts
+      {
+        id: toastId,
+        thread_id: threadIdStr,
+        name: name || 'Khách hàng',
+        content: cleanContent || 'Đã gửi một tin nhắn',
+        avatar_url: avatar_url || null,
+        duration: 7000
+      }
+    ]);
+  }, []);
+
+  const handleDismissToast = useCallback((toastId) => {
+    setToasts((prev) => prev.filter((t) => t.id !== toastId));
+  }, []);
+
+  const handleSelectThreadFromToast = useCallback((threadId) => {
+    if (!threadId) return;
+    setActiveThreadId(threadId);
+    if (typeof window !== 'undefined') window.focus();
+  }, []);
 
   const checkSession = useCallback(async () => {
     try {
@@ -288,14 +385,22 @@ export default function App() {
 
   const requestThreadMessageSync = useCallback((threadId, direction = 'initial', scrollDelta = 0) => {
     if (!socket || !isConnected || !threadId) return;
-    setHistorySyncingThreadId(String(threadId));
+    const threadIdStr = String(threadId);
+    const now = Date.now();
+    const lastTime = lastSyncRequestRef.current.get(threadIdStr) || 0;
+    if (direction !== 'initial' && now - lastTime < 2500) {
+      return; // prevent rapid re-triggering while a crawl pass is in flight
+    }
+    lastSyncRequestRef.current.set(threadIdStr, now);
+
+    setHistorySyncingThreadId(threadIdStr);
     if (historySyncTimeoutRef.current) clearTimeout(historySyncTimeoutRef.current);
     historySyncTimeoutRef.current = setTimeout(() => {
-      setHistorySyncingThreadId((current) => String(current || '') === String(threadId) ? null : current);
+      setHistorySyncingThreadId((current) => String(current || '') === threadIdStr ? null : current);
       historySyncTimeoutRef.current = null;
     }, 15000);
     socket.emit('REQUEST_SYNC_THREAD_MESSAGES', {
-      thread_id: String(threadId),
+      thread_id: threadIdStr,
       direction,
       scroll_delta: direction === 'viewport' ? Number(scrollDelta) || 0 : 0
     });
@@ -375,6 +480,13 @@ export default function App() {
   }, [activeThreadId]);
 
   useEffect(() => {
+    if (!activeThreadId) return;
+    const threadIdStr = String(activeThreadId);
+    setThreads(prev => prev.map(t => String(t.id) === threadIdStr ? { ...t, is_unread: false, unread_count: 0 } : t));
+    setToasts(prev => prev.filter(t => String(t.thread_id) !== threadIdStr));
+  }, [activeThreadId]);
+
+  useEffect(() => {
     if (!socket) return;
     socket.on('NEW_MESSAGE', (newMsg) => {
       if (newMsg.account_id && accountsRef.current.length > 0) {
@@ -394,6 +506,23 @@ export default function App() {
       );
       if (matchedThread) {
         tidStr = String(matchedThread.id);
+      }
+
+      // Real-time notification trigger for incoming messages
+      const isOutgoing = Boolean(newMsg.is_outgoing);
+      if (!isOutgoing) {
+        const isCurrentlyViewing = String(activeThreadIdRef.current || '') === tidStr && !document.hidden;
+        if (!isCurrentlyViewing) {
+          const contactName = matchedThread?.contact_name || matchedThread?.name || newMsg.sender_name || 'Khách hàng';
+          const previewText = newMsg.content || (newMsg.media_url ? '[Hình ảnh/Tệp tin]' : 'Đã gửi một tin nhắn');
+          const avatarUrl = matchedThread?.avatar_url || null;
+          triggerIncomingNotification({
+            thread_id: tidStr,
+            name: contactName,
+            content: previewText,
+            avatar_url: avatarUrl
+          });
+        }
       }
       setMessages(prev => {
         const currentMsgs = prev[tidStr] || [];
@@ -494,7 +623,16 @@ export default function App() {
         });
         if (idx >= 0) {
           const updated = [...prev];
-          updated[idx] = { ...updated[idx], ...(['source_id','source_type','source_name','source_status'].reduce((acc, key) => (newMsg[key] ? { ...acc, [key]: newMsg[key] } : acc), {})), thread_key: msgThreadKey || updated[idx].thread_key, last_message: newMsg.content, last_activity: newMsg.created_at || new Date().toISOString(), is_unread: true };
+          const isOutgoingMsg = Boolean(newMsg.is_outgoing);
+          updated[idx] = {
+            ...updated[idx],
+            ...(['source_id','source_type','source_name','source_status'].reduce((acc, key) => (newMsg[key] ? { ...acc, [key]: newMsg[key] } : acc), {})),
+            thread_key: msgThreadKey || updated[idx].thread_key,
+            last_message: newMsg.content,
+            last_activity: newMsg.created_at || new Date().toISOString(),
+            is_unread: !isOutgoingMsg,
+            unread_count: isOutgoingMsg ? 0 : (updated[idx].unread_count || 1)
+          };
           return updated.sort((a, b) => {
             const timeA = new Date(a.last_activity || a.updated_at || a.created_at || 0).getTime();
             const timeB = new Date(b.last_activity || b.updated_at || b.created_at || 0).getTime();
@@ -664,7 +802,35 @@ export default function App() {
         existing.forEach(m => {
           const key = messageKey(m);
           const keepOptimistic = m.status === 'sending' || m.status === 'failed' || m.delivery_status === 'pending';
-          if (!mergedMap.has(key) && (!authoritative || keepOptimistic)) {
+          const isMediaM = Boolean(m.attachment_id || m.attachment || m.media_url || (m.media_type && m.media_type !== 'text'));
+
+          // Tránh nhân đôi tin nhắn: đối soát thông minh giữa tin tạm và tin đã sync
+          const alreadyInSync = keepOptimistic && (syncedMsgs || []).some(s => {
+            const isOutM = m.is_outgoing === true || m.is_outgoing === 1;
+            const isOutS = s.is_outgoing === true || s.is_outgoing === 1;
+            if (isOutM !== isOutS) return false;
+
+            // Khớp theo client_message_id
+            if (m.client_message_id && s.client_message_id) {
+              if (s.client_message_id === m.client_message_id) return true;
+              if (m.client_message_id.replace(/_media$/, '') === s.client_message_id.replace(/_media$/, '')) return true;
+            }
+
+            const isMediaS = Boolean(s.attachment_id || s.attachment || s.media_url || (s.media_type && s.media_type !== 'text'));
+            // Khớp tin ảnh/video outgoing
+            if (isMediaM && isMediaS) return true;
+
+            // Khớp tin text outgoing cùng nội dung
+            if (!isMediaM && !isMediaS) {
+              const contentM = String(m.content || '').trim();
+              const contentS = String(s.content || '').trim();
+              if (contentM && contentS && contentM === contentS) return true;
+            }
+
+            return false;
+          });
+
+          if (!alreadyInSync && !mergedMap.has(key) && (!authoritative || (keepOptimistic && m.status === 'sending'))) {
             mergedMap.set(key, m);
           } else if (m.status === 'sending' || m.status === 'failed') {
             mergedMap.set(key, { ...mergedMap.get(key), status: m.status, error: m.error });
@@ -675,13 +841,18 @@ export default function App() {
         mergedArray.sort((a, b) => {
           const timeA = (a.timestamp_ms && Number(a.timestamp_ms) > 0) ? Number(a.timestamp_ms) : 0;
           const timeB = (b.timestamp_ms && Number(b.timestamp_ms) > 0) ? Number(b.timestamp_ms) : 0;
-          if (timeA > 0 && timeB > 0 && Math.abs(timeA - timeB) >= 1000) {
+          if (timeA > 0 && timeB > 0 && Math.abs(timeA - timeB) > 120000) {
             return timeA - timeB;
           }
           const sequenceA = Number(a.sequence_order ?? a.id);
           const sequenceB = Number(b.sequence_order ?? b.id);
-          if (!Number.isFinite(sequenceA) || !Number.isFinite(sequenceB)) return 0;
-          return sequenceA - sequenceB || Number(a.id || 0) - Number(b.id || 0);
+          if (Number.isFinite(sequenceA) && Number.isFinite(sequenceB) && sequenceA !== sequenceB) {
+            return sequenceA - sequenceB;
+          }
+          if (timeA > 0 && timeB > 0 && timeA !== timeB) {
+            return timeA - timeB;
+          }
+          return Number(a.id || 0) - Number(b.id || 0);
         });
 
         return {
@@ -709,6 +880,18 @@ export default function App() {
 
     socket.on('EXTENSION_CONNECTION_CHANGED', ({ account_id, is_connected }) => {
       setAccounts(prev => prev.map(a => String(a.id) === String(account_id) ? { ...a, is_extension_connected: is_connected } : a));
+      if (is_connected) {
+        if (activeThreadIdRef.current) {
+          fetch('/api/threads/' + encodeURIComponent(String(activeThreadIdRef.current)) + '/rich-message-capabilities')
+            .then(r => r.json())
+            .then(data => {
+              if (data && !data.error) setRichCapabilities(data);
+            })
+            .catch(() => {});
+        }
+        loadAccounts();
+        loadInboxSources();
+      }
     });
 
     socket.on('CONTACT_UPDATED', (contactUpdate = {}) => {
@@ -826,6 +1009,27 @@ export default function App() {
           const idx = updatedThreads.findIndex(t => 
             String(t.id || t.thread_id || '') === syncedIdStr && String(t.account_id || accIdStr) === syncedAccStr
           );
+
+          const isNowUnread = Boolean(synced.is_unread);
+          const oldThread = idx >= 0 ? updatedThreads[idx] : null;
+          const wasUnread = Boolean(oldThread?.is_unread);
+          const lastMsgChanged = Boolean(synced.last_message && synced.last_message !== oldThread?.last_message);
+          const isOutgoingPreview = /^(?:Bạn:|You:)/i.test(String(synced.last_message || '').trim());
+
+          if (isNowUnread && !isOutgoingPreview && (!wasUnread || lastMsgChanged)) {
+            const isCurrentlyViewing = String(activeThreadIdRef.current || '') === syncedIdStr && !document.hidden;
+            if (!isCurrentlyViewing) {
+              const contactName = synced.contact_name || synced.name || oldThread?.contact_name || oldThread?.name || 'Khách hàng';
+              const previewText = synced.last_message || 'Có tin nhắn mới từ khách hàng';
+              const avatarUrl = synced.avatar_url || oldThread?.avatar_url || null;
+              triggerIncomingNotification({
+                thread_id: syncedIdStr,
+                name: contactName,
+                content: previewText,
+                avatar_url: avatarUrl
+              });
+            }
+          }
 
           if (idx >= 0) {
             updatedThreads[idx] = {
@@ -955,8 +1159,8 @@ export default function App() {
       const mediaMsg = {
         client_message_id: payload.client_message_id + '_media',
         content: '',
-        attachment_id: payload.attachment_id,
-        attachment: payload.attachment,
+        attachment_id: payload.attachment_id || null,
+        attachment: payload.attachment || null,
         media_type: payload.attachment?.media_type || 'image',
         media_url: payload.attachment?.preview_url || null,
         media_name: payload.attachment?.safe_name || payload.attachment?.original_name || null,
@@ -971,7 +1175,7 @@ export default function App() {
       };
       const textMsg = {
         client_message_id: payload.client_message_id,
-        content: payload.content,
+        content: payload.content || '',
         attachment_id: null,
         attachment: null,
         media_type: 'text',
@@ -987,10 +1191,10 @@ export default function App() {
     } else {
       const newMsg = {
         client_message_id: payload.client_message_id,
-        content: payload.content,
-        attachment_id: payload.attachment_id,
-        attachment: payload.attachment,
-        media_type: payload.attachment?.media_type || 'text',
+        content: payload.content || '',
+        attachment_id: payload.attachment_id || null,
+        attachment: payload.attachment || null,
+        media_type: payload.attachment?.media_type || (payload.attachment ? 'image' : 'text'),
         media_url: payload.attachment?.preview_url || null,
         media_name: payload.attachment?.safe_name || payload.attachment?.original_name || null,
         media_mime_type: payload.attachment?.mime_type || null,
@@ -1179,18 +1383,19 @@ export default function App() {
   ) : null;
   const activeMessages = activeThreadId ? (messages[String(activeThreadId)] || []) : [];
   const currentAccount = selectedThread ? accounts.find(a => String(a.id) === String(selectedThread.account_id)) : null;
+  const activeContactData = (activeThreadId ? contacts[String(activeThreadId)] : null) || {};
   const activeContact = activeThreadId && selectedThread ? {
     thread_id: String(activeThreadId),
-    name: selectedThread.contact_name || selectedThread.name || 'Khách hàng',
-    nickname: selectedThread.nickname || null,
-    avatar_url: selectedThread.avatar_url,
     status: selectedThread.status,
     account_id: selectedThread.account_id,
     account_name: currentAccount ? (currentAccount.name || currentAccount.id) : selectedThread.account_id,
     archived_at: selectedThread.archived_at,
     reminder_due_at: selectedThread.reminder_due_at,
     reminder_note: selectedThread.reminder_note,
-    ...(contacts[String(activeThreadId)] || {})
+    ...activeContactData,
+    name: selectedThread.contact_name || activeContactData.name || selectedThread.name || 'Khách hàng',
+    nickname: selectedThread.nickname || activeContactData.nickname || null,
+    avatar_url: selectedThread.avatar_url || activeContactData.avatar_url || null
   } : null;
 
   const isCurrentExtensionDisconnected = currentAccount ? currentAccount.is_extension_connected === false : false;
@@ -1330,8 +1535,9 @@ export default function App() {
               onRetryMessage={handleRetryMessage}
               historySyncing={String(historySyncingThreadId || '') === String(activeThreadId)}
               onViewportScroll={(scrollDelta) => {
-                const direction = Number(scrollDelta) < 0 ? 'older' : 'viewport';
-                requestThreadMessageSync(activeThreadId, direction, scrollDelta);
+                if (Number(scrollDelta) < 0) {
+                  requestThreadMessageSync(activeThreadId, 'older', scrollDelta);
+                }
               }}
             />
             {['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(selectedThread.inbox_folder) ? (
@@ -1484,6 +1690,13 @@ export default function App() {
 
           socket.emit('ANSWER_INCOMING_CALL', { action, thread_id, source_tab_id, source_frame_id, account_id, call_id });
         }}
+      />
+
+      {/* REAL-TIME NOTIFICATION TOASTS */}
+      <NotificationToastContainer
+        toasts={toasts}
+        onDismiss={handleDismissToast}
+        onSelectThread={handleSelectThreadFromToast}
       />
 
       {/* FULL LOCK OVERLAY IF NOT LICENSED */}
