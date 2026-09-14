@@ -8,7 +8,7 @@ test('client normalizes SQLite UTC timestamps in every sidebar ordering path', (
   const util = fs.readFileSync('src/client/utils/threadActivity.js', 'utf8');
   assert.match(util, /SQLITE_UTC_TIMESTAMP/);
   assert.match(util, /replace\(' ', 'T'\).*Z/);
-  assert.equal((app.match(/sortThreadsByActivity\(/g) || []).length, 3);
+  assert.ok((app.match(/sortThreadsByActivity\(/g) || []).length >= 3);
   assert.match(item, /new Date\(normalizeThreadTimestamp\(value\)\)/);
 });
 

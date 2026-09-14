@@ -58,9 +58,9 @@ test('normalizing a multi-page history snapshot removes duplicate ranks and orde
   db.prepare('INSERT INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-1', 'Test', '/tmp/test');
   ConversationRepository.upsertThread({ id: 'thread-1', account_id: 'acct-1', contact_name: 'Alice' }, db);
   ConversationRepository.saveMessagesTransaction('thread-1', [
-    { fb_message_id: 'new-1', content: 'new', timestamp_ms: 3000, sequence_order: 1 },
-    { fb_message_id: 'old-1', content: 'old', timestamp_ms: 1000, sequence_order: 1 },
-    { fb_message_id: 'middle-1', content: 'middle', timestamp_ms: 2000, sequence_order: 17557 }
+    { fb_message_id: 'new-1', content: 'new', timestamp_ms: 180000, sequence_order: 1 },
+    { fb_message_id: 'old-1', content: 'old', timestamp_ms: 60000, sequence_order: 1 },
+    { fb_message_id: 'middle-1', content: 'middle', timestamp_ms: 120000, sequence_order: 17557 }
   ], db);
 
   assert.equal(ConversationRepository.normalizeMessageSequence('thread-1', db), 3);
