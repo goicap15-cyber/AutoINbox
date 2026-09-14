@@ -307,15 +307,16 @@ class ConversationRepository {
       WHERE thread_id = ?
     `).all(threadId);
 
-    // Sort using cluster-based logic:
-    // If timestamp_ms differs by > 120s (different hours / days), sort by timestamp_ms.
-    // Otherwise, within the same cluster (same date separator), sort by autoincrement id ASC.
+    // Sort by timestamp_ms when valid and distinct, fallback to sequence_order then id
     rows.sort((a, b) => {
       const timeA = Number(a.timestamp_ms) || 0;
       const timeB = Number(b.timestamp_ms) || 0;
-      if (timeA > 0 && timeB > 0 && Math.abs(timeA - timeB) > 120000) {
+      if (timeA > 0 && timeB > 0 && timeA !== timeB) {
         return timeA - timeB;
       }
+      const seqA = a.sequence_order !== null && a.sequence_order !== undefined ? Number(a.sequence_order) : Number(a.id);
+      const seqB = b.sequence_order !== null && b.sequence_order !== undefined ? Number(b.sequence_order) : Number(b.id);
+      if (seqA !== seqB) return seqA - seqB;
       return Number(a.id) - Number(b.id);
     });
 
@@ -529,23 +530,27 @@ class ConversationRepository {
         pushMsg(m);
       }
 
-      // Items in the overlapping window (merge incoming updates into existing)
-      const incomingOverlapMap = new Map();
-      for (let i = firstIncomingMatch; i <= lastIncomingMatch; i++) {
-        if (incomingBatch[i].fb_message_id) {
-          incomingOverlapMap.set(incomingBatch[i].fb_message_id, incomingBatch[i]);
+      // Items in the overlapping window: follow the incoming batch's authoritative DOM order!
+      const existingOverlapMap = new Map();
+      for (let i = firstExistingMatch; i <= lastExistingMatch; i++) {
+        if (existingRows[i].fb_message_id) {
+          existingOverlapMap.set(existingRows[i].fb_message_id, existingRows[i]);
         }
       }
 
-      for (let i = firstExistingMatch; i <= lastExistingMatch; i++) {
-        const ex = existingRows[i];
-        const inc = incomingOverlapMap.get(ex.fb_message_id);
-        pushMsg(inc ? { ...ex, ...inc } : ex);
+      for (let i = firstIncomingMatch; i <= lastIncomingMatch; i++) {
+        const inc = incomingBatch[i];
+        const ex = existingOverlapMap.get(inc.fb_message_id);
+        pushMsg(ex ? { ...ex, ...inc } : inc);
       }
 
-      // Also include any incoming items in the overlap span that were not in existing
-      for (let i = firstIncomingMatch; i <= lastIncomingMatch; i++) {
-        pushMsg(incomingBatch[i]);
+      // Also include any existing items in the overlap span that were unmounted/not in incomingBatch (skip stale synthetic likes)
+      for (let i = firstExistingMatch; i <= lastExistingMatch; i++) {
+        const exRow = existingRows[i];
+        if (exRow && exRow.fb_message_id && exRow.fb_message_id.startsWith('page_like_')) {
+          continue;
+        }
+        pushMsg(exRow);
       }
 
       // Newer incoming items that appeared after the last anchor
@@ -553,9 +558,13 @@ class ConversationRepository {
         pushMsg(m);
       }
 
-      // Any remaining existing rows after the last match
+      // Any remaining existing rows after the last match (filter out stale synthetic like messages)
       for (let i = lastExistingMatch + 1; i < existingRows.length; i++) {
-        pushMsg(existingRows[i]);
+        const exRow = existingRows[i];
+        if (exRow && exRow.fb_message_id && exRow.fb_message_id.startsWith('page_like_')) {
+          continue;
+        }
+        pushMsg(exRow);
       }
 
       mergedList.forEach((msg, idx) => {

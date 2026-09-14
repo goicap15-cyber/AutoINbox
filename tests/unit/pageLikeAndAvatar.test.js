@@ -168,4 +168,163 @@ test('isLikeElementOrWrapper logic identifies thumbs-up inside role="button" mes
   assert.equal(isLike(actionMenuButton, ''), false);
 });
 
+test('rawUnits sorting keeps interleaved text and like messages in strict DOM order', () => {
+  // Mô phỏng 8 phần tử xuất hiện trong DOM từ trên xuống dưới
+  const domPositions = [
+    { id: 'msg-co-thay-tin-ko', text: 'có thấy tin ko', domIndex: 1 },
+    { id: 'like-khach-1', text: '👍', domIndex: 2 },
+    { id: 'like-page-1', text: '👍', domIndex: 3 },
+    { id: 'msg-ko', text: 'Ko', domIndex: 4 },
+    { id: 'like-khach-2', text: '👍', domIndex: 5 },
+    { id: 'msg-ok-ko', text: 'Ok ko', domIndex: 6 },
+    { id: 'like-khach-3', text: '👍', domIndex: 7 },
+    { id: 'like-khach-4', text: '👍', domIndex: 8 },
+    { id: 'like-page-2', text: '👍', domIndex: 9 }
+  ];
 
+  // Giả lập danh sách bị gom riêng text rồi tới like
+  const unorganized = [
+    domPositions[0], // có thấy tin ko
+    domPositions[3], // Ko
+    domPositions[5], // Ok ko
+    domPositions[1], // like 1
+    domPositions[2], // like 2
+    domPositions[4], // like 3
+    domPositions[6], // like 4
+    domPositions[7], // like 5
+    domPositions[8]  // like 6
+  ];
+
+  // Sort theo mock compareDocumentPosition
+  const sorted = [...unorganized].sort((a, b) => a.domIndex - b.domIndex);
+
+  assert.equal(sorted.length, 9);
+  assert.equal(sorted[0].id, 'msg-co-thay-tin-ko');
+  assert.equal(sorted[1].id, 'like-khach-1');
+  assert.equal(sorted[2].id, 'like-page-1');
+  assert.equal(sorted[3].id, 'msg-ko');
+  assert.equal(sorted[4].id, 'like-khach-2');
+  assert.equal(sorted[5].id, 'msg-ok-ko');
+  assert.equal(sorted[6].id, 'like-khach-3');
+  assert.equal(sorted[7].id, 'like-khach-4');
+  assert.equal(sorted[8].id, 'like-page-2');
+});
+
+test('like color evidence classifies page yellow/gold like as outgoing and blue like as incoming', () => {
+  const detectLikeDirection = (likeNode) => {
+    const combined = ((likeNode.fill || '') + ' ' + (likeNode.style || '')).toLowerCase();
+    if (/f7b125|fa3e3e|fa7b25|rgb\(\s*247|rgb\(\s*250|yellow|gold|amber|orange/i.test(combined)) {
+      return { direction: true, source: 'like_color_page' };
+    }
+    if (/0084ff|0080ff|0a7cff|rgb\(\s*0,\s*132|rgb\(\s*0,\s*128|blue/i.test(combined)) {
+      return { direction: false, source: 'like_color_customer' };
+    }
+    return { direction: null, source: 'unknown' };
+  };
+
+  const pageGoldLike = { fill: '#f7b125', style: 'color: rgb(247, 177, 37);' };
+  const custBlueLike = { fill: '#0084ff', style: 'color: rgb(0, 132, 255);' };
+  const unknownLike = { fill: '', style: '' };
+
+  assert.equal(detectLikeDirection(pageGoldLike).direction, true);
+  assert.equal(detectLikeDirection(pageGoldLike).source, 'like_color_page');
+
+  assert.equal(detectLikeDirection(custBlueLike).direction, false);
+  assert.equal(detectLikeDirection(custBlueLike).source, 'like_color_customer');
+
+  assert.equal(detectLikeDirection(unknownLike).direction, null);
+});
+
+test('deterministic contextual like IDs remain stable across viewport shifts', () => {
+  const generateBatchIds = (rawUnits, currentThread) => {
+    const list = [];
+    let lastKnownMsgId = null;
+    let likeCounterAfterAnchor = 0;
+    for (let i = 0; i < rawUnits.length; i++) {
+      const unit = rawUnits[i];
+      let fbMessageId = unit.fbMessageId;
+      if (fbMessageId && !unit.isStandaloneLike) {
+        lastKnownMsgId = fbMessageId;
+        likeCounterAfterAnchor = 0;
+      } else if (!fbMessageId || list.some(item => item.fb_message_id === fbMessageId)) {
+        likeCounterAfterAnchor++;
+        const anchorKey = lastKnownMsgId ? `after_${lastKnownMsgId}` : 'prefix';
+        fbMessageId = `page_like_${currentThread}_${anchorKey}_${likeCounterAfterAnchor}`;
+      }
+      list.push({ fb_message_id: fbMessageId });
+    }
+    return list.map(x => x.fb_message_id);
+  };
+
+  const fullUnits = [
+    { fbMessageId: 'mid.co_thay_tin_ko', isStandaloneLike: false },
+    { fbMessageId: null, isStandaloneLike: true },
+    { fbMessageId: 'mid.ko', isStandaloneLike: false },
+    { fbMessageId: null, isStandaloneLike: true },
+    { fbMessageId: 'mid.ok_ko', isStandaloneLike: false },
+    { fbMessageId: null, isStandaloneLike: true },
+    { fbMessageId: null, isStandaloneLike: true }
+  ];
+
+  const fullIds = generateBatchIds(fullUnits, 'th1');
+  assert.equal(fullIds[1], 'page_like_th1_after_mid.co_thay_tin_ko_1');
+  assert.equal(fullIds[3], 'page_like_th1_after_mid.ko_1');
+  assert.equal(fullIds[5], 'page_like_th1_after_mid.ok_ko_1');
+  assert.equal(fullIds[6], 'page_like_th1_after_mid.ok_ko_2');
+
+  // Khi viewport chỉ mount từ mid.ko trở xuống (ảo hóa unmount phần trên):
+  const scrolledUnits = [
+    { fbMessageId: 'mid.ko', isStandaloneLike: false },
+    { fbMessageId: null, isStandaloneLike: true },
+    { fbMessageId: 'mid.ok_ko', isStandaloneLike: false },
+    { fbMessageId: null, isStandaloneLike: true },
+    { fbMessageId: null, isStandaloneLike: true }
+  ];
+
+  const scrolledIds = generateBatchIds(scrolledUnits, 'th1');
+  // Nút Like sau mid.ko và mid.ok_ko vẫn giữ NGUYÊN ID chính xác!
+  assert.equal(scrolledIds[1], 'page_like_th1_after_mid.ko_1');
+  assert.equal(scrolledIds[3], 'page_like_th1_after_mid.ok_ko_1');
+  assert.equal(scrolledIds[4], 'page_like_th1_after_mid.ok_ko_2');
+});
+
+test('reconcileBatchWithAnchors preserves exact interleaved order of text and like messages', () => {
+  const ConversationRepository = require('../../src/server/repositories/ConversationRepository');
+
+  const existingRows = [
+    { fb_message_id: 'msg_co_thay_tin_ko', content: 'có thấy tin ko', sequence_order: 1 },
+    { fb_message_id: 'msg_ko', content: 'Ko', sequence_order: 2 },
+    { fb_message_id: 'msg_ok_ko', content: 'Ok ko', sequence_order: 3 },
+    { fb_message_id: 'page_like_old_stale_1', content: '👍', sequence_order: 4 } // rác cũ ở đuôi
+  ];
+
+  // Batch mới từ DOM có đầy đủ các nút Like xen kẽ chuẩn xác
+  const incomingBatch = [
+    { fb_message_id: 'msg_co_thay_tin_ko', content: 'có thấy tin ko', is_outgoing: true, dom_order: 0 },
+    { fb_message_id: 'like_khach_1', content: '👍', is_outgoing: false, dom_order: 1 },
+    { fb_message_id: 'msg_ko', content: 'Ko', is_outgoing: false, dom_order: 2 },
+    { fb_message_id: 'like_page_1', content: '👍', is_outgoing: true, dom_order: 3 },
+    { fb_message_id: 'like_khach_2', content: '👍', is_outgoing: false, dom_order: 4 },
+    { fb_message_id: 'msg_ok_ko', content: 'Ok ko', is_outgoing: false, dom_order: 5 },
+    { fb_message_id: 'like_khach_3', content: '👍', is_outgoing: false, dom_order: 6 },
+    { fb_message_id: 'like_page_2', content: '👍', is_outgoing: true, dom_order: 7 }
+  ];
+
+  const res = ConversationRepository.reconcileBatchWithAnchors(existingRows, incomingBatch, { mode: 'page_initial' });
+  assert.equal(res.status, 'committed');
+
+  const ids = res.mergedList.map(m => m.fb_message_id);
+  assert.deepEqual(ids, [
+    'msg_co_thay_tin_ko',
+    'like_khach_1',
+    'msg_ko',
+    'like_page_1',
+    'like_khach_2',
+    'msg_ok_ko',
+    'like_khach_3',
+    'like_page_2'
+  ]);
+
+  // Đảm bảo không còn tồn tại tin like rác cũ 'page_like_old_stale_1' ở đuôi
+  assert.equal(ids.includes('page_like_old_stale_1'), false);
+});

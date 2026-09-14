@@ -371,12 +371,11 @@ if (isBusiness) {
 
             // 2. Tìm visual element thực sự bên trong (tránh lấy bounding box của thẻ cha width 100%)
             let targetMeasureEl = messageEl;
-            // Ưu tiên: nếu là nút Like / Sticker, tìm chính xác phần tử Like bên trong thay vì thẻ cha
-            const likeVisual = isLikeElementOrWrapper(messageEl)
-                ? messageEl.querySelector?.('svg:not([aria-label*="tùy chọn" i]):not([aria-label*="bày tỏ" i]):not([aria-label*="khác" i]), [role="img"]:not([aria-label*="đại diện" i]), img:not([alt*="đại diện" i])')
-                : null;
-            if (likeVisual) {
-                targetMeasureEl = likeVisual;
+            if (messageEl.tagName && (messageEl.tagName.toLowerCase() === 'svg' || messageEl.tagName.toLowerCase() === 'img' || messageEl.getAttribute?.('role') === 'img')) {
+                targetMeasureEl = messageEl;
+            } else if (isLikeElementOrWrapper(messageEl)) {
+                const likeVisual = messageEl.querySelector?.('svg:not([aria-label*="tùy chọn" i]):not([aria-label*="bày tỏ" i]):not([aria-label*="khác" i]), [role="img"]:not([aria-label*="đại diện" i]), img:not([alt*="đại diện" i])');
+                if (likeVisual) targetMeasureEl = likeVisual;
             } else {
                 const innerVisual = messageEl.querySelector?.('[dir="auto"], svg:not([aria-label*="tùy chọn" i]):not([aria-label*="bày tỏ" i]):not([aria-label*="khác" i]), img:not([alt*="đại diện" i]):not([alt*="profile" i]), [role="img"]:not([aria-label*="đại diện" i])');
                 if (innerVisual) {
@@ -409,6 +408,28 @@ if (isBusiness) {
             // Nếu phát hiện có avatar của khách hàng trong cụm tin nhắn -> 100% là tin khách gửi (incoming)
             if (hasContactAvatar) {
                 return { direction: false, source: 'avatar_contact_match', confidence: 'high' };
+            }
+
+            // 3.5. Kiểm tra đặc trưng Màu sắc cho nút Like (Vàng/Cam = Page, Xanh = Khách)
+            if (isLikeElementOrWrapper(messageEl)) {
+                const checkElements = [messageEl, targetMeasureEl, messageEl.parentElement, ...(messageEl.querySelectorAll ? Array.from(messageEl.querySelectorAll('svg, path, [role="img"], img')) : [])];
+                for (const node of checkElements) {
+                    if (!node) continue;
+                    const fill = (node.getAttribute?.('fill') || (node.style && node.style.fill) || '').toLowerCase();
+                    const stroke = (node.getAttribute?.('stroke') || (node.style && node.style.stroke) || '').toLowerCase();
+                    const style = (node.getAttribute?.('style') || '').toLowerCase();
+                    const color = (node.style && node.style.color ? node.style.color : '').toLowerCase();
+                    const combined = fill + ' ' + stroke + ' ' + style + ' ' + color;
+
+                    // Màu vàng/cam/amber -> Nút Like của Page (Outgoing)
+                    if (/f7b125|fa3e3e|fa7b25|rgb\(\s*247|rgb\(\s*250|rgb\(\s*255,\s*(?:1|2)|yellow|gold|amber|orange/i.test(combined)) {
+                        return { direction: true, source: 'like_color_page', confidence: 'high' };
+                    }
+                    // Màu xanh dương -> Nút Like của Khách (Incoming)
+                    if (/0084ff|0080ff|0a7cff|rgb\(\s*0,\s*132|rgb\(\s*0,\s*128|blue/i.test(combined)) {
+                        return { direction: false, source: 'like_color_customer', confidence: 'high' };
+                    }
+                }
             }
 
             // 4. Đo mép container kết hợp đường phân chia trung tâm (Center-line)
@@ -509,6 +530,7 @@ if (isBusiness) {
 
     let threadSM = null;
     let lastSyncedOldestMessageId = null;
+    let lastSyncedMountedSignature = '';
 
     function getOrInitStateMachine(threadId) {
         if (!threadId) return null;
@@ -518,6 +540,7 @@ if (isBusiness) {
             if (SMClass) {
                 threadSM = new SMClass(threadId);
                 lastSyncedOldestMessageId = null;
+                lastSyncedMountedSignature = '';
             }
         }
         return threadSM;
@@ -565,22 +588,117 @@ if (isBusiness) {
 
     function collectMountedBatchMessages(container) {
         if (!container) return [];
-        const messageEls = Array.from(container.querySelectorAll('[data-message-id]'));
         const parser = (typeof FbPageTimestampParser !== 'undefined' ? FbPageTimestampParser.parsePageTimestamp : null)
             || (typeof window !== 'undefined' && window.FbPageTimestampParser ? window.FbPageTimestampParser.parsePageTimestamp : null);
 
         const separators = findDateSeparatorsInContainer(container);
+        const currentThread = resolveCurrentThreadId();
 
-        const list = [];
-        for (let i = 0; i < messageEls.length; i++) {
-            const el = messageEls[i];
+        const messageEls = Array.from(container.querySelectorAll('[data-message-id]'));
+        const likeCandidates = Array.from(container.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i]'))
+            .filter(cand => {
+                if (cand.closest('[aria-label*="tùy chọn" i], [aria-label*="bày tỏ" i], [aria-label*="chuyển tiếp" i], [aria-label*="trả lời" i], button[aria-label*="menu" i], [data-surface*="composer"], form, footer')) {
+                    return false;
+                }
+                return isLikeElementOrWrapper(cand);
+            });
+
+        // Xây dựng danh sách các đơn vị tin nhắn (rawUnits)
+        const rawUnits = [];
+        const handledLikeNodes = new Set();
+
+        // 1. Duyệt qua các messageEls có sẵn
+        for (const el of messageEls) {
             const fbMessageId = el.getAttribute('data-message-id');
             if (!fbMessageId) continue;
 
-            const resolved = resolveMessageContent(el);
-            if (resolved.kind === 'none') continue;
+            const likesInside = likeCandidates.filter(cand => el.contains(cand));
+            if (likesInside.length === 0) {
+                // Tin nhắn bình thường (text hoặc media)
+                const resolved = resolveMessageContent(el);
+                if (resolved.kind !== 'none') {
+                    rawUnits.push({
+                        element: el,
+                        fbMessageId: fbMessageId,
+                        resolved: resolved,
+                        isStandaloneLike: false
+                    });
+                }
+            } else {
+                // Có nút Like bên trong messageEl
+                const rawText = (el.innerText || el.textContent || '').trim();
+                const hasSubstantialText = rawText.length > 0 && rawText !== '👍' && !/^(?:thích|like)$/i.test(rawText);
+                if (hasSubstantialText) {
+                    rawUnits.push({
+                        element: el,
+                        fbMessageId: fbMessageId,
+                        resolved: { kind: 'text', text: rawText },
+                        isStandaloneLike: false
+                    });
+                }
+                for (let li = 0; li < likesInside.length; li++) {
+                    const likeNode = likesInside[li];
+                    handledLikeNodes.add(likeNode);
+                    rawUnits.push({
+                        element: likeNode,
+                        fbMessageId: li === 0 && !hasSubstantialText ? fbMessageId : null,
+                        resolved: { kind: 'text', text: '👍' },
+                        isStandaloneLike: true
+                    });
+                }
+            }
+        }
 
-            const dirEvidence = getDirectionEvidence(el, container);
+        // 2. Thêm các likeCandidates độc lập nằm ngoài bất kỳ messageEl nào
+        for (const cand of likeCandidates) {
+            if (handledLikeNodes.has(cand)) continue;
+            handledLikeNodes.add(cand);
+            // Standalone customer like: không kế thừa ID của container cha tránh đè lên message khác
+            const ownMsgId = cand.getAttribute('data-message-id') || (cand.parentElement && cand.parentElement.getAttribute('data-message-id'));
+            rawUnits.push({
+                element: cand,
+                fbMessageId: ownMsgId || null,
+                resolved: { kind: 'text', text: '👍' },
+                isStandaloneLike: true
+            });
+        }
+
+        // 3. Sắp xếp rawUnits theo ĐÚNG THỨ TỰ XUẤT HIỆN TỰ NHIÊN TRONG CÂY DOM (Top-to-Bottom)
+        rawUnits.sort((a, b) => {
+            if (a.element === b.element) return 0;
+            const pos = a.element.compareDocumentPosition(b.element);
+            if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+            if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+            return 0;
+        });
+
+        // 4. Xây dựng danh sách batch kết quả theo thứ tự DOM chuẩn
+        const list = [];
+        let lastKnownMsgId = null;
+        let likeCounterAfterAnchor = 0;
+        for (let i = 0; i < rawUnits.length; i++) {
+            const unit = rawUnits[i];
+            let fbMessageId = unit.fbMessageId;
+            if (fbMessageId && !unit.isStandaloneLike) {
+                lastKnownMsgId = fbMessageId;
+                likeCounterAfterAnchor = 0;
+            } else if (unit.isStandaloneLike) {
+                if (!fbMessageId || list.some(item => item.fb_message_id === fbMessageId) || !fbMessageId.startsWith('mid.')) {
+                    likeCounterAfterAnchor++;
+                    const anchorKey = lastKnownMsgId ? `after_${lastKnownMsgId}` : 'prefix';
+                    fbMessageId = `page_like_${currentThread}_${anchorKey}_${likeCounterAfterAnchor}`;
+                } else {
+                    lastKnownMsgId = fbMessageId;
+                    likeCounterAfterAnchor = 0;
+                }
+            } else if (!fbMessageId || list.some(item => item.fb_message_id === fbMessageId)) {
+                likeCounterAfterAnchor++;
+                const anchorKey = lastKnownMsgId ? `after_${lastKnownMsgId}` : 'prefix';
+                fbMessageId = `page_like_${currentThread}_${anchorKey}_${likeCounterAfterAnchor}`;
+            }
+
+            const targetMeasure = unit.element;
+            const dirEvidence = getDirectionEvidence(targetMeasure, container);
             const rawDir = dirEvidence.direction;
             const isOutgoing = (rawDir === true || rawDir === 1)
                 ? true
@@ -589,21 +707,21 @@ if (isBusiness) {
             let parsedTs = 0;
             let tsSource = 'unknown';
 
-            // 1. Kiểm tra timestamp trên bubble
-            if (typeof parser === 'function') {
-                const p = parser(el);
+            // A. Timestamp trên bubble nếu có parser
+            if (typeof parser === 'function' && !unit.isStandaloneLike) {
+                const p = parser(unit.element);
                 if (p && p.timestamp_ms > 0) {
                     parsedTs = p.timestamp_ms;
                     tsSource = p.timestamp_source;
                 }
             }
 
-            // 2. Nếu chưa có, tìm Date Separator gần nhất xuất hiện trước bubble này
+            // B. Date Separator xuất hiện trước phần tử này
             if (parsedTs === 0 && separators.length > 0) {
                 let matchingSep = null;
                 for (let sIdx = 0; sIdx < separators.length; sIdx++) {
                     const sep = separators[sIdx];
-                    if (sep.element.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) {
+                    if (sep.element.compareDocumentPosition(unit.element) & Node.DOCUMENT_POSITION_FOLLOWING) {
                         matchingSep = sep;
                     } else {
                         break;
@@ -615,7 +733,7 @@ if (isBusiness) {
                 }
             }
 
-            // 3. Fallback theo knownMessageTimestamps nếu đã biết từ trước
+            // C. Fallback knownMessageTimestamps
             if (parsedTs === 0 && knownMessageTimestamps.has(fbMessageId)) {
                 parsedTs = knownMessageTimestamps.get(fbMessageId);
                 tsSource = 'dom_order';
@@ -625,14 +743,14 @@ if (isBusiness) {
                 knownMessageTimestamps.set(fbMessageId, parsedTs);
             }
 
-            const isMedia = resolved.kind === 'media';
-            const text = isMedia ? (resolved.caption || '') : resolved.text;
+            const isMedia = unit.resolved.kind === 'media';
+            const text = isMedia ? (unit.resolved.caption || '') : unit.resolved.text;
 
             list.push({
                 fb_message_id: fbMessageId,
                 content: text,
                 media_type: isMedia ? 'image' : 'text',
-                media_url: isMedia ? resolved.mediaUrl : null,
+                media_url: isMedia ? unit.resolved.mediaUrl : null,
                 is_outgoing: isOutgoing,
                 direction_status: isOutgoing === null ? 'pending' : 'confirmed',
                 direction_confidence: isOutgoing === null ? 'unknown' : dirEvidence.confidence,
@@ -642,65 +760,14 @@ if (isBusiness) {
             });
         }
 
-        // Bổ sung: Thu thập các nút Like (Thumbs Up) trong container chưa được gom vào messageEls
-        try {
-            const likeCandidates = Array.from(container.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i]'));
-            let syntheticLikeIdx = 0;
-            const currentThread = resolveCurrentThreadId();
-            for (const cand of likeCandidates) {
-                if (cand.closest('[aria-label*="tùy chọn" i], [aria-label*="bày tỏ" i], [aria-label*="chuyển tiếp" i], [aria-label*="trả lời" i], button[aria-label*="menu" i], [data-surface*="composer"], form, footer')) {
-                    continue;
-                }
-                if (!isLikeElementOrWrapper(cand)) continue;
-
-                // Nếu candidate này nằm bên trong một messageEl đã được xử lý trong list -> bỏ qua
-                const parentMsgEl = cand.closest('[data-message-id]');
-                if (parentMsgEl && messageEls.includes(parentMsgEl)) {
-                    const inList = list.some(item => item.fb_message_id === parentMsgEl.getAttribute('data-message-id'));
-                    if (inList) continue;
-                }
-
-                let fbMessageId = parentMsgEl ? parentMsgEl.getAttribute('data-message-id') : null;
-                if (!fbMessageId || list.some(item => item.fb_message_id === fbMessageId)) {
-                    syntheticLikeIdx++;
-                    fbMessageId = `page_like_${currentThread}_${list.length + syntheticLikeIdx}`;
-                }
-
-                const dirEvidence = getDirectionEvidence(cand, container);
-                const rawDir = dirEvidence.direction;
-                const isOutgoing = (rawDir === true || rawDir === 1)
-                    ? true
-                    : ((rawDir === false || rawDir === 0) ? false : null);
-
-                let parsedTs = 0;
-                let tsSource = 'dom_order';
-                if (separators.length > 0) {
-                    for (let sIdx = 0; sIdx < separators.length; sIdx++) {
-                        const sep = separators[sIdx];
-                        if (sep.element.compareDocumentPosition(cand) & Node.DOCUMENT_POSITION_FOLLOWING) {
-                            parsedTs = sep.timestamp_ms + (list.length * 10);
-                            tsSource = 'separator_date_clock';
-                        } else {
-                            break;
-                        }
-                    }
-                }
-
-                list.push({
-                    fb_message_id: fbMessageId,
-                    content: '👍',
-                    media_type: 'text',
-                    media_url: null,
-                    is_outgoing: isOutgoing,
-                    direction_status: isOutgoing === null ? 'pending' : 'confirmed',
-                    direction_confidence: isOutgoing === null ? 'unknown' : dirEvidence.confidence,
-                    dom_order: list.length,
-                    timestamp_ms: parsedTs,
-                    timestamp_source: tsSource
-                });
+        // 5. Nội suy đơn điệu (Monotonic Interpolation) để các tin nhắn Like xen kẽ có timestamp tăng dần chuẩn xác
+        const orderedIds = list.map(item => item.fb_message_id);
+        assignOrderedTimestamps(orderedIds);
+        for (let i = 0; i < list.length; i++) {
+            const item = list[i];
+            if (knownMessageTimestamps.has(item.fb_message_id)) {
+                item.timestamp_ms = knownMessageTimestamps.get(item.fb_message_id);
             }
-        } catch (err) {
-            console.warn('[PageContent] Lỗi quét likeCandidates trong batch:', err.message);
         }
 
         return list;
@@ -748,6 +815,7 @@ if (isBusiness) {
                 currentAvatarSourceTier = 0;
                 lastReportedContactName = null;
                 lastReportedAvatarUrl = null;
+                lastSyncedMountedSignature = '';
                 seedTimestampAnchorsForThread(currentThreadId);
             }
 
@@ -813,7 +881,18 @@ if (isBusiness) {
                 }
             }
 
+            // Compute mounted DOM signature for messageListContainer
+            let currentMountedSignature = '';
+            if (messageListContainer) {
+                const mountedMsgEls = messageListContainer.querySelectorAll('[data-message-id]');
+                const mountedLikes = messageListContainer.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i]');
+                const firstMid = mountedMsgEls.length > 0 ? (mountedMsgEls[0].getAttribute('data-message-id') || '') : '';
+                const lastMid = mountedMsgEls.length > 0 ? (mountedMsgEls[mountedMsgEls.length - 1].getAttribute('data-message-id') || '') : '';
+                currentMountedSignature = `${currentThreadId}_${mountedMsgEls.length}_${mountedLikes.length}_${firstMid}_${lastMid}`;
+            }
+
             // Kích hoạt Baselining theo State Machine khi thread mới mở và DOM đã mount tin nhắn
+            // HOẶC khi DOM thay đổi / mount thêm tin nhắn & Like mới trong lúc State Machine đã READY
             const sm = getOrInitStateMachine(currentThreadId);
             if (sm && sm.getState() === 'UNINITIALIZED' && messageListContainer) {
                 const batchMessages = collectMountedBatchMessages(messageListContainer);
@@ -821,6 +900,7 @@ if (isBusiness) {
                 if (batchMessages.length > 0) {
                     const meta = sm.startBaselining();
                     lastSyncedOldestMessageId = batchMessages[0].fb_message_id;
+                    lastSyncedMountedSignature = currentMountedSignature;
                     chrome.runtime.sendMessage({
                         type: 'PAGE_THREAD_MESSAGES_SYNCED_V1',
                         data: {
@@ -830,8 +910,30 @@ if (isBusiness) {
                             session_epoch: meta.session_epoch,
                             generation: meta.generation,
                             scan_id: meta.scan_id,
-                            batch_sequence: 1,
+                            batch_sequence: meta.generation,
                             mode: 'page_initial',
+                            contact_name: currentContactName || null,
+                            messages: batchMessages
+                        }
+                    });
+                }
+            } else if (sm && sm.getState() === 'READY' && !crawlInProgress && messageListContainer && currentMountedSignature && currentMountedSignature !== lastSyncedMountedSignature) {
+                const batchMessages = collectMountedBatchMessages(messageListContainer);
+                if (batchMessages.length > 0) {
+                    const meta = sm.startBaselining();
+                    lastSyncedOldestMessageId = batchMessages[0].fb_message_id;
+                    lastSyncedMountedSignature = currentMountedSignature;
+                    chrome.runtime.sendMessage({
+                        type: 'PAGE_THREAD_MESSAGES_SYNCED_V1',
+                        data: {
+                            thread_id: currentThreadId,
+                            account_id: null,
+                            page_id: assetId,
+                            session_epoch: meta.session_epoch,
+                            generation: meta.generation,
+                            scan_id: meta.scan_id,
+                            batch_sequence: meta.generation,
+                            mode: 'page_mounted_update',
                             contact_name: currentContactName || null,
                             messages: batchMessages
                         }
@@ -994,29 +1096,10 @@ if (isBusiness) {
             }
 
             // Pass 2b (Direct Thumbs Up / Like Scanner):
-            // Bắt trực tiếp các nút Like của khách hàng trong messageListContainer mà không phụ thuộc vào data-message-id hay TreeWalker SHOW_TEXT
-            if (messageListContainer) {
-                const likeSvgs = Array.from(messageListContainer.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i]'));
-                for (let li = 0; li < likeSvgs.length; li++) {
-                    const candSvg = likeSvgs[li];
-                    if (candSvg.closest('[aria-label*="tùy chọn" i], [aria-label*="bày tỏ" i], [aria-label*="chuyển tiếp" i], [aria-label*="trả lời" i], button[aria-label*="menu" i], [data-surface*="composer"], form, footer')) {
-                        continue;
-                    }
-                    if (!isLikeElementOrWrapper(candSvg)) continue;
-
-                    const parentMsg = candSvg.closest('[data-message-id]');
-                    if (parentMsg && processedWrappersThisTick.has(parentMsg)) {
-                        continue;
-                    }
-                    if (processedWrappersThisTick.has(candSvg)) continue;
-                    processedWrappersThisTick.add(candSvg);
-                    if (parentMsg) processedWrappersThisTick.add(parentMsg);
-
-                    const fbMessageId = parentMsg ? parentMsg.getAttribute('data-message-id') : null;
-                    const { isInsideMessageBubble, inChatContainer } = walkBubbleAncestors(candSvg, messageListContainer);
-                    forwardResolvedMessage(parentMsg || candSvg, candSvg, fbMessageId, isInsideMessageBubble || true, inChatContainer, { kind: 'text', text: '👍' }, messageListContainer);
-                }
-            }
+            // Lưu ý: Toàn bộ nút Like đã mount trong messageListContainer đều được xử lý và đồng bộ
+            // bảo toàn 100% thứ tự DOM qua hàm collectMountedBatchMessages (PAGE_THREAD_MESSAGES_SYNCED_V1).
+            // Không bắn lẻ qua forwardResolvedMessage (NEW_PAGE_MESSAGE_FROM_DOM) để tránh việc backend
+            // hiểu lầm là tin nhắn mới phát sinh và gán sequence_order = MAX + 1 đẩy xuống đáy.
 
             // Pass 3 (Call Log): Quét span[dir="auto"] TRONG KHUNG CHAT (messageListContainer)
             var callSpans = messageListContainer ? messageListContainer.querySelectorAll('span[dir="auto"]') : [];
@@ -1369,12 +1452,11 @@ if (isBusiness) {
         ));
 
         let effectiveFbMessageId = fbMessageId;
-        if (!effectiveFbMessageId && text === '👍' && messageListContainer) {
-            const allLikes = Array.from(messageListContainer.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i]'));
-            const likeIdx = allLikes.indexOf(anchorElement);
-            if (likeIdx >= 0) {
-                effectiveFbMessageId = `page_like_${threadId}_${likeIdx}`;
-            }
+        if (text === '👍' && messageListContainer) {
+            // Nút Like độc lập (cả Like của Page lẫn Like của Khách) đã nằm trong khung chat
+            // được quản lý đồng bộ chính xác theo thứ tự DOM bởi Batch Sync (PAGE_THREAD_MESSAGES_SYNCED_V1).
+            // Không bắn lẻ qua NEW_PAGE_MESSAGE_FROM_DOM để tránh gán sai sequence_order ở đuôi DB.
+            return;
         }
 
         const dedupKey = effectiveFbMessageId || text + '_' + (isOutgoing === null ? 'unknown' : isOutgoing);
