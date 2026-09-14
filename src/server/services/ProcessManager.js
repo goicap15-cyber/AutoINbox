@@ -1,4 +1,4 @@
-const { spawn, exec, spawnSync } = require('child_process');
+const { spawn, exec, execFile, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const { resolveChromePath } = require('../../../chrome-bundling/resolveChromePath');
@@ -109,7 +109,7 @@ if ($processedCount -eq 0) {
 `;
   const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
   return new Promise((resolve) => {
-    exec(`powershell -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`, (err, stdout, stderr) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], (err, stdout, stderr) => {
       if (err) {
         const errorMsg = String(stderr || err.message || 'NO_WINDOW_FOUND').trim();
         console.error('[ProcessManager] Lỗi ẩn Chrome khỏi màn hình/taskbar:', errorMsg);
@@ -141,7 +141,7 @@ Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $targetP
   [SyncWindowHelper]::ShowWindowAsync($h, 6) | Out-Null
 }`;
   const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
-  exec(`powershell -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${encoded}`, () => {});
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => {});
 }
 
 // Tự động cấp quyền (Micro, Camera, Popups, Notifications) cho Facebook trong Chrome Profile Preferences
@@ -759,7 +759,7 @@ if ($processedCount -eq 0) {
 
         const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
         const result = await new Promise((resolve) => {
-          exec(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, (err, stdout, stderr) => {
+          execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], (err, stdout, stderr) => {
             if (err) {
               const errorMsg = String(stderr || err.message || 'NO_WINDOW_FOUND').trim();
               console.error('[ProcessManager] Lỗi đưa cửa sổ Chrome lên foreground:', errorMsg);

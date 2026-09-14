@@ -85,11 +85,17 @@ class OutboundConfirmationService {
           : candidate.message_media_type;
         const isSameMediaEcho = conflictingMessage.is_outgoing === 1
           && String(conflictingMessage.thread_id) === String(candidate.thread_id)
-          && mediaType !== 'text'
-          && String(conflictingMessage.media_type || '') === String(mediaType)
-          && String(candidateMediaType || '') === String(mediaType);
+          && (
+            (mediaType !== 'text'
+              && String(conflictingMessage.media_type || '') === String(mediaType)
+              && String(candidateMediaType || '') === String(mediaType))
+            || (
+              String(conflictingMessage.content || '').trim() !== ''
+              && String(conflictingMessage.content || '').trim() === String(candidate.content || '').trim()
+            )
+          );
         if (isSameMediaEcho) {
-          // History/realtime may persist Facebook's official media bubble just
+          // History/realtime may persist Facebook's official media bubble or text caption just
           // before this observer sees the pending CRM attempt. It is the same
           // send, not an ID conflict: retain the CRM row (stable UI position,
           // attachment preview and client id) and remove only the official echo.

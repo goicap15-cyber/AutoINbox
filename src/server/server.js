@@ -725,6 +725,11 @@ function cleanupStalePendingOutbound(threadId) {
   for (const pending of stalePending) {
     const pContent = (pending.content || '').trim();
     if (pContent && confirmedContents.has(pContent)) {
+      // Bảo vệ: Nếu tin nhắn pending có đính kèm media (video/ảnh/tệp),
+      // không được xóa nó chỉ vì caption text trùng khớp với một tin nhắn text đồng hành trên Facebook!
+      if (pending.attachment_id || (pending.media_type && pending.media_type !== 'text')) {
+        continue;
+      }
       deleteOutboundMessageRows({ messageId: pending.id });
       deletedCount++;
       continue;
@@ -1019,14 +1024,20 @@ wss.on('connection', (ws, req) => {
           if (previousExtension && previousExtension !== ws && previousExtension.readyState === WebSocket.OPEN) {
             previousExtension.close(1000, 'ACCOUNT_CONNECTION_REPLACED');
           }
+          const isSameConnection = previousExtension === ws;
           extensionConnections.set(account_id, ws);
           ws.lastHeartbeatAt = Date.now();
           // A pending account is still inside Facebook's interactive login /
           // encrypted-history PIN setup. Do not start background sidebar
           // polling until the operator finishes setup and reconnects it as an
           // existing account (REGISTER_ACCOUNT without pending_key).
-          if (!pending_key) InboxSyncScheduler.registerAccount(account_id);
-          else newAccountBootstrapSyncs.set(String(account_id), { awaitingSetup: true, attempt: 0, timer: null });
+          if (!pending_key) {
+            if (!isSameConnection || !InboxSyncScheduler.accounts.has(String(account_id))) {
+              InboxSyncScheduler.registerAccount(account_id);
+            }
+          } else {
+            newAccountBootstrapSyncs.set(String(account_id), { awaitingSetup: true, attempt: 0, timer: null });
+          }
           domReplaySuppressUntil.set(account_id, Date.now() + 8000);
           ws.accountId = account_id;
 
@@ -1936,7 +1947,6 @@ wss.on('connection', (ws, req) => {
                 source: m.source,
                 isOutgoing: directionStatus === 'pending' ? null : isOutgoing,
                 direction_status: directionStatus,
-            thread_summary: realtimeThread || null,
                 direction_confidence: m.direction_confidence,
                 tsMs,
                 tsSource,
@@ -2273,6 +2283,7 @@ wss.on('connection', (ws, req) => {
             const changedUnreadThreads = [];
             const txn = db.transaction((account_id, threads) => {
               for (const t of threads) {
+                const threadId = t.thread_id || t.id;
                 const { isBlacklistedThreadId } = require('./utils/threadGuard');
                 if (!threadId || isBlacklistedThreadId(threadId)) continue;
                 // The repository may namespace a Facebook thread id when the
@@ -4190,7 +4201,7 @@ app.get(
       if (attachment == null) {
         return res.status(404).json({ code: 'ATTACHMENT_NOT_FOUND', error: 'Không tìm thấy file.' });
       }
-      const disposition = attachment.media_type === 'image' ? 'inline' : 'attachment';
+      const disposition = (attachment.media_type === 'image' || attachment.media_type === 'video' || attachment.media_type === 'voice') ? 'inline' : 'attachment';
       res.set('Cache-Control', 'private, no-store');
       res.set('Content-Type', attachment.mime_type);
       res.set(

@@ -67,6 +67,9 @@
     /^\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM))?$/i,
     /^(?:T[2-7]|CN)$/i,
 
+    // Video player duration timestamps (e.g. 0:00 / 0:19, 00:00 / 01:23)
+    /^\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}$/i,
+
     // Media label placeholders (e.g. [Ảnh], [Video], [File], [Attachment])
     /^\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment)\]?$/i,
 
@@ -138,6 +141,10 @@
     // 3. Strip leading/trailing timestamps ONLY if isolated/standalone on line
     text = text.replace(/^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?\s*$/i, '').replace(/(?:\n|\r)\s*\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i, '').trim();
     text = text.replace(/^[:\s]+/, '').trim();
+
+    // 4. Strip video player duration timestamps (e.g. 0:00 / 0:19)
+    text = text.replace(/^\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}(?:\s+|\n|\r)/i, '').trim();
+    text = text.replace(/(?:\s+|\n|\r)\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}$/i, '').trim();
 
     if (/^(?:thích|like|biểu tượng thích|biểu tượng cảm xúc thích|gửi biểu tượng thích|thumbs up)$/i.test(text)) {
       return '👍';

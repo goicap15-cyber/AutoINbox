@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { isInvalidContactName, cleanContactName } = require('../utils/textFilter');
+const { isInvalidContactName, cleanContactName, cleanMessageText, isSystemOrMetadataText } = require('../utils/textFilter');
 const { isBlacklistedThreadId } = require('../utils/threadGuard');
 let defaultDb;
 function getDefaultDb() {
@@ -368,9 +368,17 @@ class ConversationRepository {
         let stableId = msg.fb_message_id || msg.messageId || msg.client_message_id || ConversationRepository.fingerprint(threadId, msg);
         const observedTimestampMs = Number(msg.timestamp_ms || msg.timestamp || 0);
         const observedTimestampSource = msg.timestamp_source || 'sync';
-        const content = msg.content ?? msg.text ?? msg.cleaned ?? null;
+        let content = msg.content ?? msg.text ?? msg.cleaned ?? null;
         const mediaType = msg.media_type || (msg.media_url ? 'image' : 'text');
         const mediaUrl = msg.media_url || null;
+        if (!mediaUrl && mediaType === 'text') {
+          const cleaned = cleanMessageText(content);
+          if (!cleaned || isSystemOrMetadataText(cleaned) || cleaned === 'Đang tải...') {
+            result.skippedCount += 1;
+            continue;
+          }
+          content = cleaned;
+        }
         const observedCreatedAt = msg.created_at || (observedTimestampMs > 0 ? new Date(observedTimestampMs).toISOString() : new Date().toISOString());
         let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
         let promotedSidebarPreview = false;

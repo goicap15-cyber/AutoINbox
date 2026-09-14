@@ -749,7 +749,7 @@ if (isBusiness) {
             list.push({
                 fb_message_id: fbMessageId,
                 content: text,
-                media_type: isMedia ? 'image' : 'text',
+                media_type: isMedia ? (unit.resolved.mediaType || 'image') : 'text',
                 media_url: isMedia ? unit.resolved.mediaUrl : null,
                 is_outgoing: isOutgoing,
                 direction_status: isOutgoing === null ? 'pending' : 'confirmed',
@@ -1319,6 +1319,20 @@ if (isBusiness) {
             return { kind: 'text', text: rawText };
         }
 
+        // Kiểm tra Video bằng pageVideoDetector chuyên biệt cho Page
+        const videoDetector = globalThis.FbPageVideoDetector || (typeof window !== 'undefined' && window.FbPageVideoDetector);
+        if (videoDetector && typeof videoDetector.detectPageVideo === 'function') {
+            const videoResult = videoDetector.detectPageVideo(messageIdNode, cleanedText || rawText);
+            if (videoResult && videoResult.isVideo) {
+                return {
+                    kind: 'media',
+                    mediaType: 'video',
+                    mediaUrl: videoResult.mediaUrl || null,
+                    caption: videoResult.caption || null
+                };
+            }
+        }
+
         const imgs = messageIdNode.querySelectorAll('img[src]');
         for (const img of imgs) {
             const src = img.getAttribute('src') || '';
@@ -1519,7 +1533,7 @@ if (isBusiness) {
             timestamp_source: tsSource
         };
         if (isMedia) {
-            payloadData.media_type = 'image';
+            payloadData.media_type = resolvedContent.mediaType || 'image';
             payloadData.media_url = resolvedContent.mediaUrl;
         }
         if (currentContactName) payloadData.contact_name = currentContactName;

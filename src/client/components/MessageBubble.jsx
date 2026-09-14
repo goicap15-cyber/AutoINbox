@@ -172,7 +172,7 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
           {isOutgoing && (status === 'sending' || status === 'pending') && (
             <span className="inline-flex items-center gap-1">
               <Loader2 size={12} className="animate-spin text-[var(--color-accent)]" />
-              {hasMedia ? 'Đang gửi ảnh...' : 'Đang gửi'}
+              {hasMedia ? (mediaType === 'video' ? 'Đang gửi video...' : 'Đang gửi ảnh...') : 'Đang gửi'}
             </span>
           )}
           {isOutgoing && status === 'failed' && (

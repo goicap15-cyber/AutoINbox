@@ -1,5 +1,5 @@
 // AutoChatbot FB Engine - Service Worker Background Script
-importScripts('tabCreationCoordinator.js', 'queueEnvelopeValidation.js', 'callTabDeduplicator.js', 'messengerTabDeduplicator.js', 'messengerTabRoles.js');
+importScripts('tabCreationCoordinator.js', 'queueEnvelopeValidation.js', 'callTabDeduplicator.js', 'messengerTabDeduplicator.js', 'messengerTabRoles.js', 'pageVideoUploader.js');
 const tabCreationCoordinator = self.FbCrmTabCreationCoordinator.createTabCreationCoordinator();
 
 async function blockFacebookNativeNotifications() {
@@ -444,6 +444,118 @@ async function waitForMessengerAttachmentReady(tabId, attachmentOrManifest) {
   throw error;
 }
 
+async function waitForBusinessSuiteAttachmentReady(tabId, attachmentOrManifest) {
+  if (!attachmentOrManifest) return null;
+  const items = Array.isArray(attachmentOrManifest) ? attachmentOrManifest : [attachmentOrManifest];
+  const hasVideo = items.some((item) => item?.media_type === 'video' || String(item?.mime_type || '').toLowerCase().startsWith('video/'));
+  const byteSize = items.reduce((sum, item) => sum + Number(item?.byte_size || 0), 0);
+  const timeoutMs = hasVideo
+    ? Math.min(120000, Math.max(25000, 15000 + Math.ceil(byteSize / (256 * 1024)) * 1000))
+    : 35000;
+  const deadline = Date.now() + timeoutMs;
+  const basenames = items.map((i) => (i?.local_path || i?.name || '').split(/[\\/]/).pop()).filter(Boolean);
+  let lastState = null;
+  let readyStreak = 0;
+
+  while (Date.now() < deadline) {
+    lastState = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (searchNames, expectVideo) => {
+        const uploader = typeof FbPageVideoUploader !== 'undefined' ? FbPageVideoUploader : null;
+        if (uploader && typeof uploader.evaluateBusinessSuiteUploadState === 'function') {
+          return uploader.evaluateBusinessSuiteUploadState(document, searchNames, expectVideo);
+        }
+
+        const visible = (el) => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          return Boolean(r && r.width > 0 && r.height > 0);
+        };
+        const composerCandidates = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"]')];
+        const composer = composerCandidates
+          .filter((el) => {
+            if (!visible(el)) return false;
+            const label = String(el.getAttribute('aria-label') || '').toLowerCase();
+            return !label.includes('search') && !label.includes('tìm kiếm');
+          })
+          .sort((a, b) => {
+            const ra = a.getBoundingClientRect();
+            const rb = b.getBoundingClientRect();
+            return (rb.width * rb.height) - (ra.width * ra.height);
+          })[0] || null;
+
+        const scope = (composer && typeof composer.closest === 'function')
+          ? (composer.closest('[role="main"], form, [data-surface*="composer"], footer') || document.body)
+          : document.body;
+
+        const SEND_SELECTOR = 'button[aria-label="Nhấn Enter để gửi"], [role="button"][aria-label="Nhấn Enter để gửi"], ' +
+          'button[aria-label="Gửi"], [role="button"][aria-label="Gửi"], ' +
+          'button[aria-label="Send"], [role="button"][aria-label="Send"], ' +
+          'button[aria-label="Gửi tin nhắn"], [role="button"][aria-label="Gửi tin nhắn"]';
+
+        const isNotLikeButton = (el) => {
+          if (!el) return false;
+          const label = (el.getAttribute('aria-label') || '').toLowerCase();
+          const title = (el.getAttribute('title') || '').toLowerCase();
+          return !/thích|like|cảm xúc|sticker|emoji|thả tim|biểu tượng|nhãn dán|icon|thumbs/i.test(label + ' ' + title);
+        };
+
+        const isReadySendButton = (el) => el && visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true' && isNotLikeButton(el);
+
+        let sendButton = [...scope.querySelectorAll(SEND_SELECTOR)].find(isReadySendButton);
+        if (!sendButton) {
+          sendButton = [...scope.querySelectorAll('button, [role="button"]')].find((el) =>
+            isReadySendButton(el) && /^(Gửi|Send)$/i.test((el.textContent || '').trim())
+          );
+        }
+
+        const busyElements = [...scope.querySelectorAll('[role="progressbar"], [aria-busy="true"]')].filter(visible);
+        const uploadLabels = [...scope.querySelectorAll('[aria-label]')].filter((el) =>
+          visible(el) && /đang (?:tải|gửi|xử lý)|uploading|processing/i.test(el.getAttribute('aria-label') || '')
+        );
+        const spinnerElements = [...scope.querySelectorAll('svg circle[stroke-dasharray], [class*="loading" i], [class*="spinner" i]')].filter(visible);
+        const totalBusy = busyElements.length + uploadLabels.length + spinnerElements.length;
+
+        const videos = scope.querySelectorAll('video, [role="img"][aria-label*="video" i]');
+        const blobImages = scope.querySelectorAll('img[src^="blob:"]');
+        const stagedFileInput = [...scope.querySelectorAll('input[type="file"]')].some((inp) =>
+          [...(inp.files || [])].length > 0
+        );
+
+        const names = (searchNames || []).filter(Boolean);
+        const haystacks = [scope.innerText || ''];
+        scope.querySelectorAll('[aria-label]').forEach((el) => haystacks.push(el.getAttribute('aria-label') || ''));
+        const text = haystacks.join('\n');
+        const matchedNames = names.filter((name) => text.includes(name));
+
+        const hasStagedMedia = videos.length > 0 || blobImages.length > 0 || stagedFileInput || matchedNames.length > 0;
+        const ready = Boolean(sendButton) && totalBusy === 0 && (hasStagedMedia || Boolean(sendButton));
+
+        return {
+          ready,
+          send_found: Boolean(sendButton),
+          has_staged_media: hasStagedMedia,
+          busy: totalBusy,
+          matched_names: matchedNames
+        };
+      },
+      args: [basenames, hasVideo]
+    }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+
+    readyStreak = lastState?.ready ? readyStreak + 1 : 0;
+    if (readyStreak >= (hasVideo ? 2 : 1)) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'page_attachment_ready', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
+      return lastState;
+    }
+    await delay(hasVideo ? 250 : 150);
+  }
+
+  const error = new Error('Business Suite chưa tải xong file đính kèm để gửi');
+  error.code = 'ATTACHMENT_UPLOAD_TIMEOUT';
+  sendToBackend('COMPOSER_DEBUG', { stage: 'page_attachment_ready_timeout', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...(lastState || {}) });
+  throw error;
+}
+
 async function refocusComposer(tabId) {
   try {
     const result = await chrome.scripting.executeScript({
@@ -533,7 +645,7 @@ async function checkFacebookCookiesAndRegister() {
           const stored = await chrome.storage.local.get(['crm_pending_key']);
           pending_key = stored?.crm_pending_key || null;
         }
-        if (!hadUser || userChanged || pending_key) {
+        if (!hadUser || userChanged || !backendAccountRegistered) {
           if (ws && ws.readyState === WebSocket.OPEN) {
             console.log('[FB Engine] 📤 Gửi REGISTER_ACCOUNT (từ cookie check):', { account_id: user_id, pending_key });
             sendToBackend('REGISTER_ACCOUNT', { account_id: user_id, fb_dtsg: fb_dtsg || '', pending_key, name: account_name || null, avatar_url: account_avatar_url || null });
@@ -1007,7 +1119,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[FB Engine] ✅ Đã lấy tokens cho user:', user_id, '| pending_key:', pending_key);
     persistFacebookSessionCookies().catch(() => {});
     if (ws && ws.readyState === WebSocket.OPEN) {
-      if (!hadUser || userChanged || incomingPendingKey || accountNameChanged || accountAvatarChanged) {
+      const isNewPendingKey = Boolean(incomingPendingKey && incomingPendingKey !== pending_key);
+      if (!hadUser || userChanged || !backendAccountRegistered || isNewPendingKey || accountNameChanged || accountAvatarChanged) {
         // Do not flush realtime messages under the previous WebSocket account
         // while this profile is being rebound to a newly detected Facebook user.
         backendAccountRegistered = false;
@@ -2374,21 +2487,23 @@ async function findAttachButtonCenter(tabId, timeoutMs = 6000, preferredKind = '
       // diacritic in the trailing, size-dependent portion exactly right.
       const exactLabels = [
         'Đính kèm file', 'Đính kèm ảnh', 'Đính kèm PDF', 'Đính kèm tệp', 'Đính kèm hình ảnh',
-        'Thêm file', 'Thêm ảnh', 'Attach a file', 'Attach photo', 'Attach file'
+        'Thêm file', 'Thêm ảnh', 'Attach a file', 'Attach photo', 'Attach file',
+        'Đính kèm ảnh/video', 'Thêm ảnh/video', 'Attach photo or video', 'Attach video'
       ];
       const prefixLabels = [
         'Đính kèm file', 'Đính kèm tệp', 'Đính kèm ảnh', 'Đính kèm', 'Thêm file', 'Thêm ảnh', 'Attach'
       ];
       const normalizeLabel = (value) => String(value || '')
         .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-      const scoreForKind = (element) => {
-        const label = normalizeLabel(`${element.getAttribute('aria-label') || ''} ${element.getAttribute('title') || ''}`);
+      const scoreForKind = (element, composerRect = null) => {
+        const rawLabel = String(element.getAttribute('aria-label') || '');
+        const label = normalizeLabel(`${rawLabel} ${element.getAttribute('title') || ''}`);
         let score = 0;
         if (label.includes('dinh kem') || label.includes('attach') || label.includes('them')) score += 10;
         if (payload.preferredKind === 'video') {
           if (label.includes('video')) score += 120;
           if (label.includes('file') || label.includes('tep')) score += 70;
-          if (label.includes('anh') || label.includes('photo') || label.includes('image')) score -= 100;
+          if (label.includes('anh') || label.includes('photo') || label.includes('image')) score += 60;
         } else if (payload.preferredKind === 'image') {
           if (label.includes('anh') || label.includes('photo') || label.includes('image')) score += 120;
           if (label.includes('file') || label.includes('tep')) score += 40;
@@ -2397,23 +2512,67 @@ async function findAttachButtonCenter(tabId, timeoutMs = 6000, preferredKind = '
           if (label.includes('anh') || label.includes('photo') || label.includes('image')) score -= 80;
         }
         const rect = element.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) score += 20;
+        if (rect.width > 0 && rect.height > 0) {
+          score += 20;
+          // Proximity scoring: heavily prioritize attach button near the active chat composer
+          // and penalize unrelated buttons in sidebar/top nav (e.g. "Thư viện video").
+          if (composerRect) {
+            const dy = Math.abs((rect.top + rect.bottom) / 2 - (composerRect.top + composerRect.bottom) / 2);
+            const dx = Math.abs((rect.left + rect.right) / 2 - (composerRect.left + composerRect.right) / 2);
+            if (dy <= 160) {
+              score += 300;
+              if (dx <= 600) score += 100;
+            } else if (dy > 300) {
+              score -= 250;
+            }
+          }
+        }
+        // Exact match boost for verified Business Suite paperclip: <div role="button" aria-label="Đính kèm file">
+        if (/^(đính kèm file|đính kèm tệp|attach a file|attach file)$/i.test(rawLabel.trim())) {
+          score += 150;
+        }
+        if (element.getAttribute('role') === 'button' || element.tagName === 'BUTTON') {
+          score += 30;
+        }
         return score;
       };
       const find = () => {
+        const visibleComposers = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
+          .filter((element) => {
+            const rect = element.getBoundingClientRect();
+            const label = String(element.getAttribute('aria-label') || '').toLowerCase();
+            return rect.width > 10 && rect.height > 10 && !label.includes('search') && !label.includes('tìm kiếm');
+          })
+          .sort((left, right) => {
+            const leftRect = left.getBoundingClientRect();
+            const rightRect = right.getBoundingClientRect();
+            return rightRect.bottom - leftRect.bottom;
+          });
+        const activeComposer = visibleComposers[0] || null;
+        const composerRect = activeComposer ? activeComposer.getBoundingClientRect() : null;
+        const composerScope = activeComposer
+          ? (activeComposer.closest('form, footer, [data-surface*="composer"], div[role="main"]') || activeComposer.parentElement?.parentElement?.parentElement || document)
+          : document;
+
         const candidates = new Set();
         for (const label of exactLabels) {
+          composerScope.querySelectorAll(`[aria-label="${label}"]`).forEach((element) => candidates.add(element));
           document.querySelectorAll(`[aria-label="${label}"]`).forEach((element) => candidates.add(element));
         }
         for (const prefix of prefixLabels) {
+          composerScope.querySelectorAll(`[aria-label^="${prefix}"]`).forEach((element) => candidates.add(element));
           document.querySelectorAll(`[aria-label^="${prefix}"]`).forEach((element) => candidates.add(element));
         }
+        composerScope.querySelectorAll('[role="button"][aria-label], button[aria-label]').forEach((element) => {
+          const label = normalizeLabel(element.getAttribute('aria-label'));
+          if (label.includes('dinh kem') || label.includes('attach')) candidates.add(element);
+        });
         document.querySelectorAll('[aria-label]').forEach((element) => {
           const label = normalizeLabel(element.getAttribute('aria-label'));
           if (label.includes('dinh kem') || label.includes('attach')) candidates.add(element);
         });
-        const ranked = [...candidates].sort((left, right) => scoreForKind(right) - scoreForKind(left));
-        if (ranked.length && scoreForKind(ranked[0]) > 0) return ranked[0];
+        const ranked = [...candidates].sort((left, right) => scoreForKind(right, composerRect) - scoreForKind(left, composerRect));
+        if (ranked.length && scoreForKind(ranked[0], composerRect) > 0) return ranked[0];
         const fileInputs = [...document.querySelectorAll('input[type="file"]')];
         const desired = String(payload.preferredKind || 'file');
         const compatible = fileInputs.find((input) => {
@@ -2535,8 +2694,8 @@ async function stageAttachmentViaFileChooser(tabId, point, attachmentOrList, { p
           const acceptsKind = (input) => {
             const accept = String(input.getAttribute('accept') || '').toLowerCase();
             if (!accept) return true;
-            if (desiredKind === 'video') return /video|mp4|mov|webm|avi/.test(accept);
-            if (desiredKind === 'image') return /image|photo|png|jpe?g|webp/.test(accept);
+            if (desiredKind === 'video') return /video|mp4|mov|webm|avi|\*/.test(accept);
+            if (desiredKind === 'image') return /image|photo|png|jpe?g|webp|\*/.test(accept);
             return true;
           };
           // Prefer an input that explicitly accepts the requested media kind.
@@ -2565,7 +2724,7 @@ async function stageAttachmentViaFileChooser(tabId, point, attachmentOrList, { p
       }
       await chrome.debugger.sendCommand(target, 'Page.setInterceptFileChooserDialog', { enabled: true });
       try {
-        const chooserOpened = waitForFileChooserOpened(tabId, 4000);
+        const chooserOpened = waitForFileChooserOpened(tabId, 8000);
         await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
           type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1
         });
@@ -2642,7 +2801,14 @@ async function stageBusinessSuiteAttachment(tabId, attachmentOrManifest) {
   if (!attachmentOrManifest) return;
   assertValidAttachmentOrManifest(attachmentOrManifest);
 
-  const point = await findAttachButtonCenter(tabId);
+  const uploader = self.FbPageVideoUploader || (typeof FbPageVideoUploader !== 'undefined' ? FbPageVideoUploader : null);
+  const preferredKind = uploader && typeof uploader.resolvePreferredKind === 'function'
+    ? uploader.resolvePreferredKind(attachmentOrManifest)
+    : (Array.isArray(attachmentOrManifest)
+        ? (attachmentOrManifest.some((i) => i?.media_type === 'video') ? 'video' : 'file')
+        : (attachmentOrManifest?.media_type === 'video' ? 'video' : 'file'));
+
+  const point = await findAttachButtonCenter(tabId, 6000, preferredKind);
   if (!point) {
     const error = new Error('Không tìm thấy icon đính kèm của Business Suite');
     error.code = 'ATTACHMENT_STAGE_FAILED';
@@ -2650,7 +2816,15 @@ async function stageBusinessSuiteAttachment(tabId, attachmentOrManifest) {
   }
 
   try {
-    await stageAttachmentViaFileChooser(tabId, point, attachmentOrManifest);
+    await stageAttachmentViaFileChooser(tabId, point, attachmentOrManifest, {
+      preferDirectInput: false
+    });
+
+    if (preferredKind === 'video' && uploader && typeof uploader.pollForBusinessSuiteVideoReadiness === 'function') {
+      const items = Array.isArray(attachmentOrManifest) ? attachmentOrManifest : [attachmentOrManifest];
+      const basenames = items.map((i) => (i?.local_path || '').split(/[\\/]/).pop()).filter(Boolean);
+      await uploader.pollForBusinessSuiteVideoReadiness(tabId, basenames, chrome.scripting, 10000);
+    }
   } catch (error) {
     const wrapped = new Error(error?.message || 'Business Suite không nhận attachment');
     wrapped.code = 'ATTACHMENT_STAGE_FAILED';
@@ -2799,7 +2973,7 @@ async function typeAndSubmitComposer(tabId, content) {
         return findInScope(document);
       };
       let sendButton = findSendButton();
-      for (let i = 0; !sendButton && i < 8; i += 1) {
+      for (let i = 0; !sendButton && i < 20; i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 100));
         sendButton = findSendButton();
       }
@@ -3001,7 +3175,11 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
     throw new Error(`Business Suite contact identity mismatch: ${visibleContactName} !== ${expected_contact_name}`);
   }
 
-  await stageBusinessSuiteAttachment(tab.id, attachmentManifest || attachment);
+  const attachmentPayload = attachmentManifest || attachment;
+  if (attachmentPayload) {
+    await stageBusinessSuiteAttachment(tab.id, attachmentPayload);
+    await waitForBusinessSuiteAttachmentReady(tab.id, attachmentPayload);
+  }
 
   await typeAndSubmitComposer(tab.id, content);
 
@@ -3435,12 +3613,8 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
         // hidden/off-screen) Chrome window before selecting Requests/Spam.
         // This does not foreground Chrome on the user's desktop.
         await chrome.tabs.update(target.tab.id, { active: true }).catch(() => null);
-<<<<<<< HEAD
-        await delay(target.requestSection ? 1200 : 500);
-=======
         await delay(target.requestSection ? 1200 : (isRealtimeScan ? 50 : 500));
         let scraped = [];
->>>>>>> origin/fix/messenger-sync-stability-20260914
         if (target.isBizTab) {
           let results = null;
           try {
