@@ -96,7 +96,9 @@ class AssignmentManager {
     }
 
     if (where.length) query += ' WHERE ' + where.join(' AND ');
-    query += ' ORDER BY t.last_activity DESC';
+    // last_activity contains both ISO strings and SQLite CURRENT_TIMESTAMP.
+    // julianday normalizes both instead of comparing their string shapes.
+    query += ' ORDER BY julianday(t.last_activity) DESC, t.id DESC';
     return this.db.prepare(query).all(...params);
   }
 }

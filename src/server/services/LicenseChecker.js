@@ -8,6 +8,16 @@ const DATA_DIR = APP_DATA_ROOT;
 const LICENSE_FILE = path.join(DATA_DIR, 'license.json');
 const LICENSE_SERVER_URL = process.env.LICENSE_SERVER_URL || 'https://genblackmmoonline.online/license_server';
 
+async function fetchLicenseWithTimeout(url, options = {}, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 class LicenseChecker {
   constructor() {
     this.cachedStatus = {
@@ -76,7 +86,7 @@ class LicenseChecker {
 
     try {
       const machineId = getMachineId();
-      const res = await fetch(`${LICENSE_SERVER_URL}/api/license/verify`, {
+      const res = await fetchLicenseWithTimeout(`${LICENSE_SERVER_URL}/api/license/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: savedKey, machineId })

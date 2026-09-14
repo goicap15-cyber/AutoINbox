@@ -50,6 +50,16 @@ describe('Lead Tags Logic & State Transitions (Spec 028)', () => {
   });
 
   describe('Inline Editor Draft & Apply Lifecycle', () => {
+    test('three consecutive custom labels accumulate instead of replacing a stale draft', () => {
+      let latestDraft = [];
+      for (const label of ['Nhãn 1', 'Nhãn 2', 'Nhãn 3']) {
+        const result = addTag(latestDraft, label);
+        assert.equal(result.error, null);
+        latestDraft = result.tags;
+      }
+      assert.deepEqual(latestDraft, ['Nhãn 1', 'Nhãn 2', 'Nhãn 3']);
+    });
+
     test('opening editor copies committedTags to draftTags', () => {
       const committedTags = ['Tiềm năng', 'Khách VIP'];
       let draftTags = [...committedTags];

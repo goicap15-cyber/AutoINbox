@@ -53,7 +53,11 @@ export default function ChatHeader({
   const accountName = account ? (account.name || account.id) : (activeThread.account_id || 'Facebook');
   const sourceType = activeThread.source_type || source?.source_type || 'personal_messenger';
   const sourceName = activeThread.source_name || source?.display_name || accountName;
-  const sourceLabel = sourceType === 'page_messenger' ? `Page · ${sourceName}` : `Messenger · ${sourceName}`;
+  const senderAccountName = sourceType === 'page_messenger' ? sourceName : accountName;
+  const senderAccountId = sourceType === 'page_messenger' ? (source?.external_id || activeThread.source_external_id || activeThread.source_id) : activeThread.account_id;
+  const senderAccountSuffix = String(senderAccountId || '').slice(-4);
+  const senderAvatarUrl = sourceType === 'page_messenger' ? source?.avatar_url : (account?.avatar_url || source?.avatar_url);
+  const sourceLabel = sourceType === 'page_messenger' ? `Gửi bằng Page: ${senderAccountName}` : `Gửi bằng: ${senderAccountName}`;
   const sourceStatus = activeThread.source_status || source?.status || 'ACTIVE';
   const isExtConnected = sourceType === 'page_messenger' ? sourceStatus === 'ACTIVE' : (account ? account.is_extension_connected !== false : true);
   const customerName = activeThread.nickname || activeThread.contact_name || activeThread.name || 'Khách hàng';
@@ -125,15 +129,24 @@ export default function ChatHeader({
         <div className="min-w-0">
           <div className="flex items-center gap-2 min-w-0">
             <h2 className="font-bold text-[var(--color-text-primary)] text-base truncate">{customerName}</h2>
-            {(showAccountPill || activeThread.source_id) && (
-              <span className={`hidden sm:inline-flex text-[11px] px-2 py-0.5 rounded-full font-medium truncate max-w-[180px] ${sourceType === 'page_messenger' ? 'bg-violet-500/10 text-violet-500' : 'bg-[var(--color-accent-subtle)] text-[var(--color-accent)]'}`}>
-                {sourceLabel}
-              </span>
-            )}
           </div>
-          <div className="flex items-center gap-1.5 mt-0.5 text-xs text-[var(--color-text-muted)]">
-            <span className={`w-2 h-2 rounded-full ${isExtConnected ? 'bg-[var(--color-success)]' : 'bg-[var(--color-danger)]'}`} />
-            <span>{sourceType === 'page_messenger' ? (isExtConnected ? 'Page API Active' : 'Page disconnected') : (isExtConnected ? 'Đang hoạt động' : 'Không hoạt động')}</span>
+          <div className="flex items-center gap-1.5 mt-0.5 min-w-0">
+            <span className={`w-2 h-2 shrink-0 rounded-full ${isExtConnected ? 'bg-[var(--color-success)]' : 'bg-[var(--color-danger)]'}`} />
+            {(showAccountPill || activeThread.source_id) ? (
+              <span
+                className={`inline-flex min-w-0 max-w-[260px] items-center gap-1.5 truncate rounded-full border px-2 py-0.5 text-[11px] font-bold ${sourceType === 'page_messenger' ? 'border-violet-500/25 bg-violet-500/10 text-violet-500' : 'border-[var(--color-accent)]/25 bg-[var(--color-accent-subtle)] text-[var(--color-accent)]'}`}
+                title={`${sourceLabel} · ID ${sourceType === 'page_messenger' ? (source?.external_id || '') : (activeThread.account_id || '')}`}
+              >
+                <span className="relative flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--color-accent)] text-[9px] font-extrabold text-white">
+                  {String(senderAccountName || 'F').charAt(0).toUpperCase()}
+                  {senderAvatarUrl && <img src={senderAvatarUrl} alt="" className="absolute inset-0 h-full w-full object-cover" onError={(event) => { event.currentTarget.style.display = 'none'; }} />}
+                </span>
+                <span className="min-w-0 truncate">{sourceLabel}</span>
+                {senderAccountSuffix && <span className="shrink-0 font-mono text-[9px] opacity-75">#{senderAccountSuffix}</span>}
+              </span>
+            ) : (
+              <span className="text-xs text-[var(--color-text-muted)]">{isExtConnected ? 'Đang hoạt động' : 'Không hoạt động'}</span>
+            )}
           </div>
         </div>
       </div>

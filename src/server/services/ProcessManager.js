@@ -628,6 +628,7 @@ class ProcessManager {
 
       if (process.platform === 'win32') {
         const psScript = `
+Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -647,6 +648,7 @@ public class Win32UnhideHelper {
   [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n);
   [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int m);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int m);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder text, int count);
@@ -720,8 +722,14 @@ foreach ($handle in $handles) {
   $style = [Win32UnhideHelper]::GetWindowLong($handle, -20)
   $style = ($style -band -bnot 0x00000080) -bor 0x00040000
   [Win32UnhideHelper]::SetWindowLong($handle, -20, $style) | Out-Null
-  [Win32UnhideHelper]::SetWindowPos($handle, [IntPtr]::Zero, 80, 80, 1200, 800, 0x0040) | Out-Null
-  [Win32UnhideHelper]::ShowWindowAsync($handle, 9) | Out-Null
+  [Win32UnhideHelper]::ShowWindow($handle, 9) | Out-Null
+  try {
+    $workingArea = [System.Windows.Forms.Screen]::FromHandle($handle).WorkingArea
+    [Win32UnhideHelper]::SetWindowPos($handle, [IntPtr]::Zero, $workingArea.X, $workingArea.Y, $workingArea.Width, $workingArea.Height, 0x0044) | Out-Null
+  } catch {
+    [Win32UnhideHelper]::SetWindowPos($handle, [IntPtr]::Zero, 80, 80, 1200, 800, 0x0040) | Out-Null
+  }
+  [Win32UnhideHelper]::ShowWindow($handle, 3) | Out-Null
   [Win32UnhideHelper]::SetForegroundWindow($handle) | Out-Null
   $processedCount++
 }

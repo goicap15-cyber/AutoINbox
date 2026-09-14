@@ -19,16 +19,41 @@ const png = Buffer.from([
 const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
 const webp = Buffer.from('RIFF1234WEBPVP8 ', 'ascii');
 const pdf = Buffer.from('%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n', 'ascii');
+const mp4 = Buffer.from([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 0, 0]);
 
 test('detectMimeType identifies the initial rich-message formats', () => {
   assert.equal(detectMimeType(jpeg), 'image/jpeg');
   assert.equal(detectMimeType(png), 'image/png');
   assert.equal(detectMimeType(webp), 'image/webp');
   assert.equal(detectMimeType(pdf), 'application/pdf');
+  assert.equal(detectMimeType(mp4), 'video/mp4');
   assert.equal(detectMimeType(Buffer.from('not-media')), null);
   assert.equal(MIME_CAPABILITIES['application/pdf'].mediaType, 'file');
 });
 
+test('validateAttachment identifies an MP4 as video media', () => {
+  const result = validateAttachment({
+    buffer: mp4,
+    originalName: 'clip.mp4',
+    declaredMimeType: 'video/mp4',
+    allowedMimeTypes: ['video/mp4'],
+    enforceExtension: true
+  });
+  assert.equal(result.mimeType, 'video/mp4');
+  assert.equal(result.mediaType, 'video');
+});
+
+test('validateAttachment trusts MP4 bytes and extension when Chromium declares PDF', () => {
+  const result = validateAttachment({
+    buffer: mp4,
+    originalName: 'clip.mp4',
+    declaredMimeType: 'application/pdf',
+    allowedMimeTypes: ['video/mp4'],
+    enforceExtension: true
+  });
+  assert.equal(result.mimeType, 'video/mp4');
+  assert.equal(result.mediaType, 'video');
+});
 test('sanitizeFilename preserves a recognizable safe Vietnamese filename', () => {
   assert.equal(sanitizeFilename('Báo giá tháng 8.pdf'), 'Bao_gia_thang_8.pdf');
   assert.equal(sanitizeFilename('../../evil<script>.pdf'), 'evil_script_.pdf');

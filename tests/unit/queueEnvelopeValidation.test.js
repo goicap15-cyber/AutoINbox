@@ -63,13 +63,13 @@ test('a manifest with one invalid member is rejected, not silently dropped', () 
   );
 });
 
-test('a manifest member with an unsupported media type is rejected', () => {
-  assert.throws(
-    () => validateQueuedEnvelope(basePayload({
-      attachment_manifest: [fileAttachment({ media_type: 'video', mime_type: 'video/mp4' })]
-    })),
-    (error) => error.code === 'CAMPAIGN_CONTRACT_ATTACHMENT_UNSUPPORTED'
-  );
+test('an MP4 video attachment is accepted and unsupported video MIME is rejected', () => {
+  assert.doesNotThrow(() => validateQueuedEnvelope(basePayload({
+    attachment: fileAttachment({ media_type: 'video', mime_type: 'video/mp4', name: 'clip.mp4' })
+  })));
+  assert.throws(() => validateQueuedEnvelope(basePayload({
+    attachment: fileAttachment({ media_type: 'video', mime_type: 'video/x-unknown' })
+  })), (error) => error.code === 'CAMPAIGN_CONTRACT_ATTACHMENT_UNSUPPORTED');
 });
 
 test('a personal_messenger envelope with page_id set is rejected regardless of manifest', () => {

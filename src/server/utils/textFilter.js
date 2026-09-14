@@ -1,6 +1,10 @@
 // AutoChatbot - Text Filter Utility for Backend & Script Cleanup
 const { isKnownPageSystemNotice } = require('./pageSystemNotice');
 
+// Messenger renders relative timestamps as standalone DOM nodes beside real
+// bubbles. They are metadata (for example relative minute labels), never message content.
+const RELATIVE_TIME_METADATA_RE = /^\d+\s*(?:gi\u00e2y|ph\u00fat|gi\u1edd|ng\u00e0y|tu\u1ea7n|th\u00e1ng|n\u0103m|seconds?|minutes?|hours?|days?|weeks?|months?|years?)(?:\s*(?:tr\u01b0\u1edbc|ago))?$/iu;
+
 const SYSTEM_PATTERNS = [
   // E2EE & Security Notices
   /Tin nhắn và cuộc gọi (?:đang )?được bảo mật/i,
@@ -63,6 +67,9 @@ const SYSTEM_PATTERNS = [
   /^\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM))?$/i,
   /^(?:T[2-7]|CN)$/i,
 
+  // Media label placeholders (e.g. [Ảnh], [Video], [File], [Attachment])
+  /^\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment)\]?$/i,
+
   // Full date/time separator header Business Suite renders between message
   // groups (e.g. "13:52 6 Tháng 8, 2026") - not covered by the short
   // standalone-clock-time pattern above. Without this, page_content.js's
@@ -95,6 +102,7 @@ function isSystemOrMetadataText(text) {
   if (!text || typeof text !== 'string') return true;
   const trimmed = text.trim();
   if (!trimmed) return true;
+  if (RELATIVE_TIME_METADATA_RE.test(trimmed)) return true;
   if (isKnownPageSystemNotice(trimmed)) return true;
 
   for (const pat of SYSTEM_PATTERNS) {
@@ -106,6 +114,12 @@ function isSystemOrMetadataText(text) {
 function cleanMessageText(rawText) {
   if (!rawText || typeof rawText !== 'string') return '';
   let text = rawText.trim();
+
+  // Mirror the extension filter for Messenger's flattened accessibility DOM.
+  text = text.replace(/^(?:Tin nh\u1eafn ch\u01b0a \u0111\u1ecdc|Unread messages?):\s*/iu, '').trim();
+
+  // Mirror the extension filter for Messenger's flattened accessibility DOM.
+  text = text.replace(/^(?:Tin nh\u1eafn ch\u01b0a \u0111\u1ecdc|Unread messages?):\s*/iu, '').trim();
   if (!text) return '';
 
   // 1. Strip accessibility prefix (handling 'Tin nhắn do X gửi lúc Thứ Năm 18:00ch:', 'Tin nhắn do X gửi lúc 18:00:', etc.)
@@ -124,6 +138,10 @@ function cleanMessageText(rawText) {
 
   // 2. Strip delivery status ONLY if appended on a separate line or after multi-space metadata (never strip inside normal text like 'Đã gửi hàng rồi')
   text = text.replace(/(?:\n|\r|\s{2,})(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen|Nhấn Enter để gửi)\s*$/i, '').trim();
+  // Messenger occasionally concatenates its delivery badge directly to the
+  // bubble text (`helloĐã gửi`). No natural-language word can end this way
+  // without a separator, so remove only the glued suffix.
+  text = text.replace(/(?<=\S)(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen)$/i, '').trim();
 
   // 3. Strip leading/trailing timestamps ONLY if isolated/standalone on line
   text = text.replace(/^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?\s*$/i, '').replace(/(?:\n|\r)\s*\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i, '').trim();
@@ -138,6 +156,16 @@ function cleanMessageText(rawText) {
   if (isSystemOrMetadataText(text)) return '';
 
   return text;
+}
+
+// Sidebar rows use prose summaries for attachments/calls. They are useful as
+// a signal to fetch the changed thread, but they are not chat-message text.
+function isSidebarActivitySummary(text) {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!value) return false;
+  return /^(?:Bạn đã gửi|You (?:sent|shared))\s+(?:(?:một|1|an?|one)\s+)?(?:ảnh|photo|image|video|tệp|file|sticker|GIF)\.?$/iu.test(value)
+    || /^.{1,80}\s+đã gửi\s+(?:một|1)\s+(?:ảnh|video|tệp|file|sticker|GIF)\.?$/iu.test(value)
+    || /^(?:Cuộc gọi nhỡ|Missed call)\.?$/iu.test(value);
 }
 
 const INVALID_CONTACT_NAME_PATTERNS = [
@@ -181,8 +209,10 @@ function cleanContactName(rawName, fallback = 'Khách hàng') {
 }
 
 module.exports = {
+  isRelativeTimeMetadataText: (text) => RELATIVE_TIME_METADATA_RE.test(String(text || '').trim()),
   isSystemOrMetadataText,
   cleanMessageText,
+  isSidebarActivitySummary,
   isInvalidContactName,
   cleanContactName
 };

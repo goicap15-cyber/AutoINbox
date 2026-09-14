@@ -165,6 +165,14 @@ test('resolveInternalThreadId maps a personal thread\'s bare PSID back to its co
     '100092115712908'
   );
 
+  db.prepare(`
+    INSERT INTO accounts (id, name, profile_dir, status)
+    VALUES ('acct-personal-2', 'Second personal account', '/tmp/autochatbot-thread-resolver-test-2', 'ACTIVE')
+  `).run();
+  assert.equal(
+    resolveInternalThreadId(db, 'acct-personal-2', '100092115712908'),
+    'acct-personal-2:100092115712908'
+  );
   // An id with no matching thread row falls back to itself unchanged, rather
   // than throwing - confirmObservation() will then just find no candidate,
   // identical to today's behavior.

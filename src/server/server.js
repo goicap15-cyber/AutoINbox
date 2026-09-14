@@ -29,6 +29,7 @@ const RichMessageCapabilityService = require('./services/RichMessageCapabilitySe
 const RichMessageService = require('./services/RichMessageService');
 const OutboundConfirmationService = require('./services/OutboundConfirmationService');
 const OutboundDomCorrelationService = require('./services/OutboundDomCorrelationService');
+const InboundMediaHydrationService = require('./services/InboundMediaHydrationService');
 const PhoneCaptureService = require('./services/PhoneCaptureService');
 const CampaignPhoneCaptureService = require('./services/CampaignPhoneCaptureService');
 const GlobalPhoneAutomationService = require('./services/GlobalPhoneAutomationService');
@@ -43,7 +44,7 @@ const db = require('./database/db');
 const { AuthService, AuthError } = require('./services/AuthService');
 const { CentralAuthClient, CentralAuthError } = require('./services/CentralAuthClient');
 const processManager = require('./services/ProcessManager');
-const mediaDownloader = require('./services/MediaDownloader');
+const mediaDownloader = require('./services/RobustMediaDownloader');
 const assignmentManager = require('./services/AssignmentManager');
 const enterpriseAccess = require('./services/EnterpriseAccessService');
 const searchService = require('./services/SearchService');
@@ -53,7 +54,7 @@ const broadcastEngine = require('./services/BroadcastEngine');
 const aiMediator = require('./services/AIMediator');
 const { extractLeadInfo } = require('./utils/leadExtractor');
 const { downloadAvatar, saveAvatarFromBase64OrUrl, serveAvatar } = require('./utils/avatarManager');
-const { isSystemOrMetadataText, cleanMessageText, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
+const { isSystemOrMetadataText, cleanMessageText, isSidebarActivitySummary, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
 const { isKnownPageSystemNotice } = require('./utils/pageSystemNotice');
 const { parsePageIdFromInput } = require('./utils/pageIdParser');
 const ConversationRepository = require('./repositories/ConversationRepository');
@@ -74,6 +75,7 @@ const FollowupService = require('./services/FollowupService');
 const InboxSourceService = require('./services/InboxSourceService');
 const InboxSyncScheduler = require('./services/InboxSyncScheduler');
 const InitialMessageSweepService = require('./services/InitialMessageSweepService');
+const { isChangedIncomingSidebarPreview } = require('./utils/sidebarIncomingDetection');
 const licenseChecker = require('./services/LicenseChecker');
 
 // Remote License Server URL – must match CentralAuthClient / LicenseChecker
@@ -338,11 +340,14 @@ app.get('/api/license/status', async (req, res) => {
     }
 
     const { getMachineId } = require('./utils/machineId');
+    const licenseAbortController = new AbortController();
+    const licenseTimeout = setTimeout(() => licenseAbortController.abort(), 5000);
     const response = await fetch(`${LICENSE_SERVER_BASE_URL}/api/client-auth/license-status`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: user.username, key: savedKey, machineId: getMachineId() })
-    });
-    const result = await response.json();
+      body: JSON.stringify({ username: user.username, key: savedKey, machineId: getMachineId() }),
+      signal: licenseAbortController.signal
+    }).finally(() => clearTimeout(licenseTimeout));
+    const result = await response.json().catch(() => ({}));
     if (result.success && result.data?.valid && result.data?.key && savedKey) {
       if (licenseChecker.getSavedKey() !== result.data.key) {
         licenseChecker.saveKey(result.data.key);
@@ -634,6 +639,19 @@ function withAttachmentAccessUrl(message) {
   };
 }
 
+// History rows can be collapsed from Facebook's temporary _media companion
+// id into the durable parent row before the remote file finishes downloading.
+// Hydrate by the durable SQLite row id so incoming photos/videos cannot lose
+// their local path during that merge.
+const inboundMediaHydration = new InboundMediaHydrationService({
+  database: db,
+  downloader: mediaDownloader,
+  onHydrated: (stored) => io.emit('THREAD_MESSAGES_UPDATED', {
+    thread_id: String(stored.thread_id),
+    messages: [withAttachmentAccessUrl(stored)]
+  })
+});
+
 function sendRichMessageError(res, error) {
   const status = Number(error?.httpStatus) || 400;
   res.status(status).json({
@@ -732,6 +750,8 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
   ).get(thread_id);
   if (!thread) throw new Error(`Thread ${thread_id} không tồn tại`);
 
+  // Match the stable project behaviour: a sleeping MV3 worker is allowed time
+  // to reconnect, but a send operation must never restart its Chrome profile.
   let extWs = extensionConnections.get(thread.account_id);
   if (!extWs || extWs.readyState !== WebSocket.OPEN) {
     const startWait = Date.now();
@@ -950,6 +970,7 @@ function ensureThreadRecord({ threadId, accountId, contactName, pageId, initialL
 // ────────────────────────────────────────────────
 wss.on('connection', (ws, req) => {
   console.log('[WS] Extension connected from:', req.socket.remoteAddress);
+  ws.lastHeartbeatAt = Date.now();
 
   ws.on('message', async (raw) => {
     try {
@@ -957,8 +978,14 @@ wss.on('connection', (ws, req) => {
       console.log('[WS] 📨 Nhận message:', msg.type, '| WS ID:', req.socket.remoteAddress);
 
       switch (msg.type) {
+        case 'HEARTBEAT':
+          // WebSocket traffic keeps the Manifest V3 worker alive. Do not log
+          // or trigger sync work for this lightweight liveness frame.
+          ws.lastHeartbeatAt = Date.now();
+          break;
+
         case 'REGISTER_ACCOUNT': {
-          const { account_id, name, pending_key } = msg.data;
+          const { account_id, name, pending_key, avatar_url } = msg.data;
           // Facebook sets c_user=0 as a placeholder while a page is mid-login;
           // extension-side already guards this (content.js sanitizeUserId), but
           // reject it here too so a stale/unpatched extension can never create
@@ -993,6 +1020,7 @@ wss.on('connection', (ws, req) => {
             previousExtension.close(1000, 'ACCOUNT_CONNECTION_REPLACED');
           }
           extensionConnections.set(account_id, ws);
+          ws.lastHeartbeatAt = Date.now();
           // A pending account is still inside Facebook's interactive login /
           // encrypted-history PIN setup. Do not start background sidebar
           // polling until the operator finishes setup and reconnects it as an
@@ -1021,10 +1049,15 @@ wss.on('connection', (ws, req) => {
           }
 
           const accName = name || `FB Account (${account_id})`;
+          let accountAvatarFilename = null;
+          if (typeof avatar_url === 'string' && avatar_url.startsWith('http')) {
+            const cachedAccountAvatar = await saveAvatarFromBase64OrUrl(avatar_url, `account_${account_id}`);
+            accountAvatarFilename = cachedAccountAvatar ? `/api/avatars/${cachedAccountAvatar}` : null;
+          }
 
           db.prepare(`
-            INSERT INTO accounts (id, name, profile_dir, status, owner_user_id, company_id)
-            VALUES (?, ?, ?, 'ACTIVE', ?, ?)
+            INSERT INTO accounts (id, name, profile_dir, status, owner_user_id, company_id, avatar_url)
+            VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               name = COALESCE(excluded.name, accounts.name),
               profile_dir = CASE
@@ -1034,9 +1067,11 @@ wss.on('connection', (ws, req) => {
               status = 'ACTIVE',
               owner_user_id = COALESCE(excluded.owner_user_id, accounts.owner_user_id),
               company_id = COALESCE(excluded.company_id, accounts.company_id),
+              avatar_url = COALESCE(excluded.avatar_url, accounts.avatar_url),
               last_broadcast_date = DATE('now')
           `).run(account_id, accName, profileDir, ownerUserId || null,
-            ownerUserId ? db.prepare('SELECT company_id FROM users WHERE id=?').get(ownerUserId)?.company_id || ownerUserId : null);
+            ownerUserId ? db.prepare('SELECT company_id FROM users WHERE id=?').get(ownerUserId)?.company_id || ownerUserId : null,
+            accountAvatarFilename);
           if (pending_key) {
             pendingAccountOwners.delete(String(pending_key));
             try {
@@ -1048,7 +1083,7 @@ wss.on('connection', (ws, req) => {
           try {
             InboxSourceService.createPersonalSource(account_id, accName, db);
           } catch (_) {}
-          io.emit('ACCOUNT_STATUS_CHANGED', { account_id, status: 'ACTIVE' });
+          io.emit('ACCOUNT_STATUS_CHANGED', { account_id, status: 'ACTIVE', avatar_url: accountAvatarFilename });
           io.emit('INBOX_SOURCE_ADDED', { id: 'src_personal_' + account_id, source_type: 'personal_messenger', display_name: accName });
           io.emit('EXTENSION_CONNECTION_CHANGED', { account_id, is_connected: true });
 
@@ -1085,25 +1120,9 @@ wss.on('connection', (ws, req) => {
             }
           }
 
-          // Trigger đồng bộ threads ngay sau khi extension đăng ký - nhưng bỏ qua
-          // nếu vừa dispatch gần đây, vì REGISTER_ACCOUNT có thể lặp lại dồn dập
-          // do service worker của extension bị Chrome khởi động lại (spec 042).
-          // Phần rebind extensionConnections/ACK phía trên vẫn luôn chạy bình
-          // thường - chỉ việc quét lại sidebar là được cooldown.
-          const nowMs = Date.now();
-          if (pending_key) {
-            console.log(`[WS] Bỏ qua auto SYNC_THREADS trong phiên thiết lập/PIN: account=${account_id}`);
-          } else if (SidebarSyncCooldown.isInCooldown(account_id, nowMs)) {
-            console.log(`[WS] Bỏ qua auto SYNC_THREADS sau REGISTER_ACCOUNT (còn cooldown ${SidebarSyncCooldown.remainingMs(account_id, nowMs)}ms): account=${account_id}`);
-          } else {
-            SidebarSyncCooldown.markDispatched(account_id, nowMs);
-            setTimeout(() => {
-              if (ws.readyState === ws.OPEN) {
-                ws.send(JSON.stringify({ type: 'SYNC_THREADS', data: { account_id } }));
-                console.log(`[WS] Gửi SYNC_THREADS đến extension tài khoản: ${account_id}`);
-              }
-            }, 1500);
-          }
+          // InboxSyncScheduler.registerAccount() already starts the lightweight
+          // background inbox loop. Do not dispatch a second full SYNC_THREADS
+          // crawl here: it competes with realtime receive and manual sends.
           break;
         }
 
@@ -1114,11 +1133,21 @@ wss.on('connection', (ws, req) => {
             ? client_message_id.slice('queue_'.length)
             : null;
           const richQueueResult = resultQueueId
-            ? db.prepare('SELECT outbound_attempt_id FROM message_queue WHERE id = ?').get(resultQueueId)
+            ? db.prepare('SELECT outbound_attempt_id, campaign_id FROM message_queue WHERE id = ?').get(resultQueueId)
             : null;
           if (richQueueResult?.outbound_attempt_id) {
             // Rich-message delivery is driven by QUEUED_MESSAGE_RESULT plus
             // bounded Facebook observation, never by this legacy result path.
+            break;
+          }
+
+          // Campaign sends are owned by QUEUED_MESSAGE_RESULT. handleSendMessage
+          // also emits this legacy result while probing the rendered bubble;
+          // that probe can be negative after the composer already dispatched.
+          // Keep the pending row so the later DOM observation can correlate it.
+          if (richQueueResult?.campaign_id && !success && error_code !== 'COMPOSER_DISPATCHED') {
+            console.log(`[WS] Ignoring non-authoritative SEND_MESSAGE_RESULT failure for campaign queue ${resultQueueId}`);
+            console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'CAMPAIGN_LEGACY_FAILURE_IGNORED', thread_id: String(thread_id), client_message_id, queue_id: resultQueueId, error_code: error_code || null, at: new Date().toISOString() }));
             break;
           }
           
@@ -1136,7 +1165,7 @@ wss.on('connection', (ws, req) => {
             io.emit('MESSAGE_SENT', { thread_id, client_message_id, success: true, fb_message_id: officialFbId, status: 'sent' });
           } else if (error_code === 'COMPOSER_DISPATCHED') {
             // Check if DOM/network confirmation already arrived before this result
-            const existingRow = db.prepare(`SELECT delivery_status, delivery_error FROM messages WHERE client_message_id = ? OR fb_message_id = ?`).get(client_message_id, `pending_${client_message_id}`);
+            const existingRow = db.prepare(`SELECT id, fb_message_id, media_type, delivery_status, delivery_error FROM messages WHERE client_message_id = ? OR fb_message_id = ?`).get(client_message_id, `pending_${client_message_id}`);
             if (existingRow && existingRow.delivery_status === 'sent') {
               console.log(`[WS] COMPOSER_DISPATCHED arrived but row already sent for ${client_message_id}. No-op.`);
               updateQueueStatusFromClientMessage(client_message_id, 'sent');
@@ -1149,8 +1178,19 @@ wss.on('connection', (ws, req) => {
               console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DISPATCHED_ALREADY_FAILED', thread_id: String(thread_id), client_message_id, at: new Date().toISOString() }));
             } else {
               console.log(`[WS] Composer đã dispatch tin; giữ pending chờ DOM/network confirmation: ${client_message_id}`);
-              // Composer cleared successfully. Stop the first-message spinner,
-              // but keep SQLite pending for late Facebook DOM correlation.
+              // A cleared text composer is a successful transport hand-off.
+              // Persist the provisional sent state so the independent 30s ACK
+              // watchdog cannot turn a real Messenger send into "Retry". The
+              // late DOM observer still upgrades pending_* to the official mid.
+              if (existingRow?.id) {
+                db.prepare(`
+                  UPDATE messages SET delivery_status = 'sent', delivery_error = NULL
+                  WHERE id = ? AND is_outgoing = 1
+                    AND attachment_id IS NULL
+                    AND (media_type IS NULL OR media_type = 'text')
+                `).run(existingRow.id);
+                updateQueueStatusFromClientMessage(client_message_id, 'sent');
+              }
               io.emit('MESSAGE_SENT', {
                 thread_id,
                 client_message_id,
@@ -1160,6 +1200,28 @@ wss.on('connection', (ws, req) => {
               console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_CONFIRMATION_GRACE', thread_id: String(thread_id), client_message_id, at: new Date().toISOString() }));
             }
           } else {
+            // A composer dispatch can be acknowledged provisionally before the
+            // rendered-bubble probe finishes. A late probe may time out although
+            // Messenger already accepted the message. Never downgrade a sent row.
+            const alreadySentRow = db.prepare(`
+              SELECT id, fb_message_id, delivery_status
+              FROM messages
+              WHERE client_message_id = ? OR fb_message_id = ?
+              ORDER BY id DESC
+              LIMIT 1
+            `).get(client_message_id, `pending_${client_message_id}`);
+            if (alreadySentRow && ['sent', 'delivered', 'read'].includes(String(alreadySentRow.delivery_status || '').toLowerCase())) {
+              console.log(`[WS] Ignoring late SEND_MESSAGE_RESULT failure for already-sent message ${client_message_id}`);
+              updateQueueStatusFromClientMessage(client_message_id, 'sent');
+              io.emit('MESSAGE_SENT', {
+                thread_id,
+                client_message_id,
+                fb_message_id: alreadySentRow.fb_message_id || undefined,
+                status: 'sent'
+              });
+              console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_LATE_FAILURE_IGNORED', thread_id: String(thread_id), client_message_id, error_code: error_code || null, at: new Date().toISOString() }));
+              break;
+            }
             console.error('[WS] ❌ SEND_MESSAGE_RESULT failed or missing fb_msg_id:', {
               thread_id,
               client_message_id,
@@ -1534,10 +1596,8 @@ wss.on('connection', (ws, req) => {
           }
 
           // Tải media về local nếu tin mới có đính kèm
-          if (m.media_url && m.media_type && m.media_type !== 'text') {
-            const localPath = await mediaDownloader.downloadNewMessageMedia(m.thread_id, m.media_url, m.media_type);
-            if (localPath) m.local_media_path = localPath;
-          }
+          // Persist/emit remote media immediately. Local hydration is queued
+          // after the row exists so a slow video cannot block later messages.
 
           // FIX FOREIGN KEY: Đảm bảo thread tồn tại/được upsert TRƯỚC KHI insert message
           ConversationRepository.upsertThread({
@@ -1591,7 +1651,8 @@ wss.on('connection', (ws, req) => {
                const existingFbId = db.prepare('SELECT id, is_outgoing, delivery_status FROM messages WHERE fb_message_id = ?').get(m.fb_message_id);
                if (existingFbId && existingFbId.is_outgoing === 1 && existingFbId.delivery_status === 'sent') {
                    console.log(`[WS] DOM observer sent an already known confirmed fb_message_id (${m.fb_message_id}). Bỏ qua event để tránh ghi đè pending.`);
-                   skipPendingCorrelation = true;
+                   // Do not skip yet: a replay of an already-persisted media
+                   // id may still be the confirmation for a pending CRM upload.
                }
             }
 
@@ -1609,7 +1670,7 @@ wss.on('connection', (ws, req) => {
                 isOutgoing: true,
                 mediaType: m.media_type || 'text',
                 content: m.content,
-                observedAt: Date.now(),
+                observedAt: Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now(),
                 confirmationSource: m.source === 'page_dom_observer' ? 'page_dom' : 'personal_dom'
               }, { database: db });
 
@@ -1621,6 +1682,17 @@ wss.on('connection', (ws, req) => {
                 break;
               }
 
+              // Rich recovery had first chance above. If this official id is
+              // still already present, it is now a true duplicate and must
+              // not fall through to another insert.
+              if (m.fb_message_id) {
+                const existingFbId = db.prepare('SELECT id, is_outgoing, delivery_status FROM messages WHERE fb_message_id = ?').get(m.fb_message_id);
+                if (existingFbId && existingFbId.is_outgoing === 1 && existingFbId.delivery_status === 'sent') {
+                  console.log(`[WS] Known confirmed fb_message_id (${m.fb_message_id}); pending recovery found no candidate.`);
+                  break;
+                }
+              }
+
               const isMediaConfirmation = OutboundDomCorrelationService.isMediaConfirmationEvent(m);
               // Spec 039/040: a plain text-content match only proves the caption
               // rendered on Facebook, not that an attachment/manifest riding
@@ -1630,8 +1702,12 @@ wss.on('connection', (ws, req) => {
               // manifest_id here forces such dispatches through the explicit
               // media-confirmation path instead, so they fail safe to
               // 'unknown' on timeout rather than falsely reporting 'sent'.
+              const observedMediaKind = (m.media_type && m.media_type !== 'text')
+                ? (String(m.media_type).startsWith('video') ? 'video' : 'image')
+                : (m.media_url ? 'image' : 'any');
+
               let pending = isMediaConfirmation
-                ? OutboundDomCorrelationService.matchPendingImageOutbound(db, internalThreadId)
+                ? OutboundDomCorrelationService.matchPendingImageOutbound(db, internalThreadId, observedMediaKind)
                 : db.prepare(`
                     SELECT outbound.id, outbound.client_message_id FROM messages outbound
                     LEFT JOIN outbound_attempts attempt ON outbound.latest_attempt_id = attempt.id
@@ -1647,7 +1723,7 @@ wss.on('connection', (ws, req) => {
                   `).get(internalThreadId, m.content);
 
               if (!pending) {
-                pending = OutboundDomCorrelationService.matchPendingImageOutbound(db, internalThreadId);
+                pending = OutboundDomCorrelationService.matchPendingImageOutbound(db, internalThreadId, observedMediaKind);
               }
               if (pending) {
                 const confirmed = OutboundDomCorrelationService.confirmPendingOutbound(db, io, pending, {
@@ -1713,11 +1789,13 @@ wss.on('connection', (ws, req) => {
               }
             }
           }
-          // ===== ANTI-GHOST GUARD (chạy cho MỌI DOM observer, không phân biệt direction) =====
+          // ===== ANTI-GHOST GUARD (chỉ áp dụng cho tin được xác nhận outgoing) =====
           // DOM observer đôi khi bắt lại tin nhắn do CRM gửi (đã có is_outgoing=1 trong DB).
           // Nếu để chạy tiếp sẽ tạo bubble ghost bên trái với is_outgoing=0.
-          // Guard này chạy TRƯỚC insert, bất kể finalIsOutgoing = 0 hay 1.
-          if (m.source === 'dom_observer' || m.source === 'page_dom_observer') {
+          // Không được dùng một media outgoing bất kỳ trong 5 phút để loại một
+          // media customer mới. Điều kiện cũ làm ảnh/video khách gửi biến mất
+          // chỉ vì CRM vừa gửi ảnh/video trong cùng hội thoại.
+          if ((m.source === 'dom_observer' || m.source === 'page_dom_observer') && isOutgoing) {
             const isMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
             let outgoingMatch = null;
 
@@ -1754,12 +1832,53 @@ wss.on('connection', (ws, req) => {
 
 
           // Lưu tin nhắn vào bảng messages
-          const stableMessageId = m.fb_message_id || m.client_message_id || ConversationRepository.fingerprint(m.thread_id, m);
+          let stableMessageId = m.fb_message_id || m.client_message_id || ConversationRepository.fingerprint(m.thread_id, m);
+          if (!isOutgoing && m.fb_message_id) {
+            const promotedPreview = ConversationRepository.promoteSidebarPreview({
+              threadId: m.thread_id,
+              fbMessageId: m.fb_message_id,
+              content: m.content,
+              isOutgoing: false,
+              timestampMs: tsMs
+            }, db);
+            if (promotedPreview) stableMessageId = promotedPreview.fbMessageId;
+          }
+          const existingStableMessage = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(stableMessageId);
           const sequenceRow = db.prepare(`
             SELECT MAX(COALESCE(sequence_order, id)) AS max_sequence
             FROM messages WHERE thread_id = ?
           `).get(m.thread_id);
-          const realtimeSequence = Number(sequenceRow?.max_sequence || 0) + 1;
+          let realtimeSequence = Number(sequenceRow?.max_sequence || 0) + 1;
+          // Mutation callbacks may arrive in a different order from the visual
+          // Messenger rows. Reserve the confirmed DOM slot before inserting so
+          // both the live UI and later database snapshots keep the same order.
+          if (!existingStableMessage && m.dom_position_confirmed) {
+            const previousRow = m.dom_previous_message_id
+              ? db.prepare('SELECT COALESCE(sequence_order, id) AS sequence_order FROM messages WHERE thread_id = ? AND fb_message_id = ?').get(m.thread_id, m.dom_previous_message_id)
+              : null;
+            const nextRow = m.dom_next_message_id
+              ? db.prepare('SELECT COALESCE(sequence_order, id) AS sequence_order FROM messages WHERE thread_id = ? AND fb_message_id = ?').get(m.thread_id, m.dom_next_message_id)
+              : null;
+            let targetSequence = null;
+            if (nextRow && Number.isFinite(Number(nextRow.sequence_order))) {
+              targetSequence = Number(nextRow.sequence_order);
+            } else if (previousRow && Number.isFinite(Number(previousRow.sequence_order))) {
+              const followingRow = db.prepare(`
+                SELECT MIN(COALESCE(sequence_order, id)) AS sequence_order
+                FROM messages WHERE thread_id = ? AND COALESCE(sequence_order, id) > ?
+              `).get(m.thread_id, Number(previousRow.sequence_order));
+              targetSequence = Number.isFinite(Number(followingRow?.sequence_order))
+                ? Number(followingRow.sequence_order)
+                : Number(previousRow.sequence_order) + 1;
+            }
+            if (Number.isFinite(targetSequence) && targetSequence > 0) {
+              db.prepare(`
+                UPDATE messages SET sequence_order = COALESCE(sequence_order, id) + 1
+                WHERE thread_id = ? AND COALESCE(sequence_order, id) >= ?
+              `).run(m.thread_id, targetSequence);
+              realtimeSequence = targetSequence;
+            }
+          }
           const insertMsgResult = db.prepare(`
             INSERT OR IGNORE INTO messages
               (thread_id, fb_message_id, sender_id, content, media_type, media_url, local_media_path, is_outgoing, direction_status, sequence_order, timestamp_ms, timestamp_source, created_at)
@@ -1768,9 +1887,47 @@ wss.on('connection', (ws, req) => {
             m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt);
 
           let wasNewMessage = insertMsgResult.changes > 0;
+          if (wasNewMessage && !String(stableMessageId).endsWith('_media')) {
+            try {
+              // A media companion can be observed before the base native row.
+              // Collapse it immediately once the parent exists.
+              OutboundDomCorrelationService.collapseStoredMediaCompanions(db, m.thread_id);
+            } catch (collapseError) {
+              console.warn('[WS] Deferred media companion collapse:', collapseError.message);
+            }
+          }
           let directionWasUpdated = false;
 
+          let mediaWasUpdated = false;
+
           if (!wasNewMessage) {
+            // Messenger often mounts a video row before its durable URL/poster
+            // is hydrated. Enrich the same native id instead of discarding it.
+            const existingMedia = db.prepare(
+              'SELECT media_type, media_url, local_media_path, content FROM messages WHERE fb_message_id = ?'
+            ).get(stableMessageId);
+            const incomingMediaType = String(m.media_type || 'text');
+            const hasIncomingMedia = incomingMediaType !== 'text';
+            const hasRicherMedia = Boolean(existingMedia && hasIncomingMedia && (
+              !existingMedia.media_type || existingMedia.media_type === 'text' ||
+              (!existingMedia.media_url && m.media_url) ||
+              (!existingMedia.local_media_path && m.local_media_path)
+            ));
+            if (hasRicherMedia) {
+              const mediaUpdate = db.prepare(`
+                UPDATE messages SET
+                  media_type = ?,
+                  media_url = COALESCE(NULLIF(?, ''), media_url),
+                  local_media_path = COALESCE(NULLIF(?, ''), local_media_path),
+                  content = CASE
+                    WHEN COALESCE(content, '') = '' AND COALESCE(?, '') != '' THEN ?
+                    ELSE content
+                  END
+                WHERE fb_message_id = ?
+              `).run(incomingMediaType, m.media_url || null, m.local_media_path || null,
+                m.content || null, m.content || null, stableMessageId);
+              mediaWasUpdated = mediaUpdate.changes > 0;
+            }
             // Tin đã tồn tại: nhờ ConversationRepository quyết định có cần nâng cấp
             // timestamp/is_outgoing không (logic dùng chung, có test riêng).
             const reconcile = ConversationRepository.reconcileExistingMessage(
@@ -1779,6 +1936,7 @@ wss.on('connection', (ws, req) => {
                 source: m.source,
                 isOutgoing: directionStatus === 'pending' ? null : isOutgoing,
                 direction_status: directionStatus,
+            thread_summary: realtimeThread || null,
                 direction_confidence: m.direction_confidence,
                 tsMs,
                 tsSource,
@@ -1789,7 +1947,7 @@ wss.on('connection', (ws, req) => {
             if (reconcile.reason === 'not_found') {
               break; // Duplicate vì client_message_id hoặc lý do khác
             }
-            if (!reconcile.updated) {
+            if (!reconcile.updated && !mediaWasUpdated) {
               console.log(`[WS] Bỏ qua tin nhắn đã tồn tại (fb_message_id: ${m.fb_message_id})`);
               break;
             }
@@ -1841,7 +1999,7 @@ wss.on('connection', (ws, req) => {
             }
           }
 
-          if (!wasNewMessage && !directionWasUpdated) break; // Ignore a replay with no persisted change.
+          if (!wasNewMessage && !directionWasUpdated && !mediaWasUpdated) break; // Ignore a replay with no persisted change.
           if (wasNewMessage) ConversationRepository.touchThread(m.thread_id, m.content);
 
           // Auto Lead Extraction (avatar handled above, applies regardless of wasNewMessage)
@@ -1879,6 +2037,26 @@ wss.on('connection', (ws, req) => {
               });
             }
             if (createdCaptures.length > 0) {
+              // Publish campaign phone statistics immediately after durable
+              // capture. Campaign automation below may wait for Messenger
+              // acknowledgement and must not hold the statistics UI hostage.
+              const capturedMessage = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+              if (capturedMessage?.id) {
+                const immediateCampaignResponse = CampaignResponseStatsService.recordIncomingResponse({
+                  messageId: capturedMessage.id,
+                  threadId: m.thread_id,
+                  accountId: targetAccountId || threadAccountId || null,
+                  observedAtMs: tsMs || Date.parse(createdAt) || Date.now()
+                }, db);
+                if (immediateCampaignResponse) {
+                  io.emit('CAMPAIGN_RESPONSE_UPDATED', {
+                    ...immediateCampaignResponse,
+                    thread_id: m.thread_id,
+                    phone_captured: true
+                  });
+                }
+              }
+
               // Global CRM rule is opt-in and applies to every genuine incoming
               // capture. A configured campaign policy runs immediately after it
               // and is the explicit per-campaign override when it has a target.
@@ -1949,6 +2127,25 @@ wss.on('connection', (ws, req) => {
 
           // Emit payload đầy đủ lên frontend
           const persistedMessage = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+          if (wasNewMessage && isConfirmedIncoming && persistedMessage?.id) {
+            const campaignResponse = CampaignResponseStatsService.recordIncomingResponse({
+              messageId: persistedMessage.id,
+              threadId: m.thread_id,
+              accountId: targetAccountId || threadAccountId || null,
+              observedAtMs: tsMs || Date.parse(createdAt) || Date.now()
+            }, db);
+            if (campaignResponse) {
+              io.emit('CAMPAIGN_RESPONSE_UPDATED', {
+                ...campaignResponse,
+                thread_id: m.thread_id
+              });
+            }
+          }
+          const realtimeThread = db.prepare(`
+            SELECT id, external_thread_id, account_id, contact_name, avatar_url,
+                   last_message, last_activity, is_unread, inbox_folder, source_id
+            FROM threads WHERE id = ?
+          `).get(persistedMessage?.thread_id || canonicalThreadId || m.thread_id);
           const msgPayload = {
             ...m,
             ...(persistedMessage || {}),
@@ -1957,10 +2154,27 @@ wss.on('connection', (ws, req) => {
             timestamp_source: tsSource,
             created_at: createdAt,
             is_outgoing: !!isOutgoing,
-            direction_status: directionStatus
+            direction_status: directionStatus,
+            thread_summary: realtimeThread || null
           };
           console.log(`[WS] Emitting NEW_MESSAGE to Socket.io clients:`, JSON.stringify(msgPayload).substring(0, 200));
           io.emit('NEW_MESSAGE', msgPayload);
+
+          if (persistedMessage?.id && persistedMessage.media_url &&
+              persistedMessage.media_type && persistedMessage.media_type !== 'text' &&
+              !persistedMessage.local_media_path) {
+            inboundMediaHydration.hydrateRow(persistedMessage);
+          }
+
+          // ACK only after SQLite persistence and realtime emission completed.
+          // The extension keeps the durable outbox row until this arrives, so
+          // a socket drop between ws.send() and DB commit cannot lose a message.
+          if (msg.outbox_id && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'BACKEND_OUTBOX_ACK',
+              data: { outbox_id: String(msg.outbox_id) }
+            }));
+          }
 
           // Auto-Reply & AI
           if (wasNewMessage && isConfirmedIncoming) {
@@ -2035,6 +2249,7 @@ wss.on('connection', (ws, req) => {
 
         case 'SYNC_THREADS_RESULT': {
           const { account_id, threads, partial, sync_status, checkpoint } = msg.data;
+          const isRealtimeSidebarHint = sync_status === 'realtime_hint' || sync_status === 'realtime_requests';
           console.log(`[WS] Nhận ${threads?.length || 0} threads từ extension tài khoản: ${account_id}`);
           // Progressive UI batches are not the end of the combined Inbox +
           // Requests scan. Only its final aggregate frame releases inFlight.
@@ -2045,8 +2260,10 @@ wss.on('connection', (ws, req) => {
           if (partial === true && (sync_status === 'paused' || sync_status === 'cancelled')) {
             InboxSyncScheduler.markSidebarResult(account_id, threads?.length || 0);
           }
-          io.emit('FACEBOOK_SYNC_STATUS', { account_id, status: sync_status || (partial ? 'running' : 'completed'), checkpoint: checkpoint || [], count: threads?.length || 0 });
-          domReplaySuppressUntil.set(account_id, Date.now() + 5000);
+          if (!isRealtimeSidebarHint) {
+            io.emit('FACEBOOK_SYNC_STATUS', { account_id, status: sync_status || (partial ? 'running' : 'completed'), checkpoint: checkpoint || [], count: threads?.length || 0 });
+            domReplaySuppressUntil.set(account_id, Date.now() + 5000);
+          }
           if (threads?.length) {
             // Keep a small list of already-known conversations whose unread
             // sidebar preview actually changed.  The existing sidebar sync is
@@ -2056,21 +2273,24 @@ wss.on('connection', (ws, req) => {
             const changedUnreadThreads = [];
             const txn = db.transaction((account_id, threads) => {
               for (const t of threads) {
-                const threadId = String(t.id || t.thread_id || '');
                 const { isBlacklistedThreadId } = require('./utils/threadGuard');
                 if (!threadId || isBlacklistedThreadId(threadId)) continue;
+                // The repository may namespace a Facebook thread id when the
+                // same participant exists under another connected account.
+                // Resolve that durable CRM id before reading previews/messages.
+                const existingInternalThreadId = resolveInternalThreadId(db, account_id, threadId) || threadId;
                 const previousThread = db.prepare(`
                   SELECT last_message, is_unread, thread_url, contact_name
                   FROM threads WHERE id = ?
-                `).get(threadId);
+                `).get(existingInternalThreadId);
                 let name = cleanContactName(t.name || t.contact_name, null);
-                const existing = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(threadId);
+                const existing = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(existingInternalThreadId);
                 let existingName = existing?.contact_name;
                 if (isInvalidContactName(existingName)) existingName = null;
 
                 // Chống tráo đổi tên: nếu thread đã có tên hợp lệ và tên mới bị trùng với thread khác, giữ tên hiện tại
                 if (existingName && existingName !== 'Khách hàng') {
-                  const isDuplicated = db.prepare('SELECT id FROM threads WHERE account_id = ? AND id != ? AND contact_name = ?').get(account_id, threadId, name);
+                  const isDuplicated = db.prepare('SELECT id FROM threads WHERE account_id = ? AND id != ? AND contact_name = ?').get(account_id, existingInternalThreadId, name);
                   if (isDuplicated) {
                     name = existingName;
                   }
@@ -2086,7 +2306,7 @@ wss.on('connection', (ws, req) => {
                     WHERE thread_id = ?
                     ORDER BY timestamp_ms DESC, created_at DESC, id DESC
                     LIMIT 10
-                  `).all(threadId);
+                  `).all(existingInternalThreadId);
 
                   // A media message with no caption is a valid "last message" too -
                   // preview it as [Ảnh] instead of falling through to an older text
@@ -2102,33 +2322,39 @@ wss.on('connection', (ws, req) => {
                     : 'Chưa có tin nhắn';
                 }
 
-                const incomingPreviewChanged = Boolean(
-                  previousThread
-                  && Number(t.is_unread) === 1
-                  && cleanLastMsg
-                  && cleanLastMsg !== 'Chưa có tin nhắn'
-                  && cleanMessageText(previousThread.last_message) !== cleanLastMsg
-                );
-                if (incomingPreviewChanged) {
-                  changedUnreadThreads.push({
-                    account_id,
-                    thread_id: threadId,
-                    external_thread_id: t.external_thread_id || threadId,
-                    thread_url: t.thread_url || previousThread.thread_url || null,
-                    page_id: t.source_type === 'page_messenger' ? (t.page_id || null) : null,
-                    contact_name: name || previousThread.contact_name || null
-                  });
-                }
-
-                ConversationRepository.upsertThread({
+                const incomingPreviewChanged = isChangedIncomingSidebarPreview({
+                  previousThread: previousThread
+                    ? { ...previousThread, last_message: cleanMessageText(previousThread.last_message) }
+                    : null,
+                  incomingThread: t,
+                  cleanLastMessage: cleanLastMsg,
+                  isActivitySummary: isSidebarActivitySummary(t.last_message)
+                });
+                const storedThread = ConversationRepository.upsertThread({
                   id: threadId,
+                  external_thread_id: t.external_thread_id || threadId,
                   account_id: account_id,
                   thread_url: t.thread_url || null,
                   contact_name: name,
                   last_message: cleanLastMsg,
                   is_unread: t.is_unread,
-                  inbox_folder: t.inbox_folder || null
+                  inbox_folder: t.inbox_folder || null,
+                  inbox_folder_verified: t.inbox_folder_verified === true
                 });
+                const canonicalThreadId = String(storedThread?.id || existingInternalThreadId);
+
+                if (incomingPreviewChanged) {
+                  changedUnreadThreads.push({
+                    account_id,
+                    thread_id: canonicalThreadId,
+                    external_thread_id: t.external_thread_id || threadId,
+                    thread_url: t.thread_url || previousThread?.thread_url || null,
+                    page_id: t.source_type === 'page_messenger' ? (t.page_id || null) : null,
+                    contact_name: name || previousThread?.contact_name || null,
+                    preview_content: cleanLastMsg,
+                    preview_is_like: t.is_like === true
+                  });
+                }
 
                 // Auto-bind Page source nếu thread đến từ Business Suite
                 if (t.page_id || t.source_type === 'page_messenger') {
@@ -2136,7 +2362,7 @@ wss.on('connection', (ws, req) => {
                     InboxSourceService.ensurePageSource({
                       pageId: String(t.page_id || ''),
                       accountId: account_id,
-                      threadId,
+                      canonicalThreadId,
                       pageName: t.page_name || null
                     }, db);
                   } catch (psErr) {
@@ -2144,7 +2370,7 @@ wss.on('connection', (ws, req) => {
                   }
                 }
                 
-                const currentContact = db.prepare('SELECT avatar_url FROM contacts WHERE thread_id = ?').get(threadId);
+                const currentContact = db.prepare('SELECT avatar_url FROM contacts WHERE thread_id = ?').get(canonicalThreadId);
                 let initialAvatar = currentContact?.avatar_url || null;
                 if (t.avatar_url && !t.avatar_url.startsWith('http')) {
                   initialAvatar = t.avatar_url;
@@ -2155,20 +2381,83 @@ wss.on('connection', (ws, req) => {
                   ON CONFLICT(thread_id) DO UPDATE SET
                     name = excluded.name,
                     avatar_url = COALESCE(excluded.avatar_url, contacts.avatar_url)
-                `).run(threadId, name, initialAvatar);
+                `).run(canonicalThreadId, name, initialAvatar);
               }
             });
             txn(account_id, threads);
 
-            // Fetch only the changed tail. Jobs remain serialized by the
-            // existing scheduler so they cannot make several hidden tabs race
-            // each other or interrupt an explicit CRM navigation request.
+            // Render the trusted unread/sidebar-Like preview immediately.
+            // The repository later promotes this sidebar_preview_* row to
+            // Facebook's native id when history sync confirms the same text.
             for (const changed of changedUnreadThreads) {
+              const previewContent = cleanMessageText(changed.preview_content);
+              const canonicalThreadId = resolveInternalThreadId(db, changed.account_id, changed.thread_id) || changed.thread_id;
+              if (previewContent) {
+                const previewTimestamp = Date.now();
+                const previewHash = crypto.createHash('sha1')
+                  .update(String(changed.account_id) + '|' + String(canonicalThreadId) + '|' + previewContent)
+                  .digest('hex').slice(0, 16);
+                // Stable per thread+content: repeated sidebar scans cannot
+                // manufacture duplicate provisional bubbles from old previews.
+                const previewId = 'sidebar_preview_' + previewHash;
+                const previewPersistence = ConversationRepository.saveMessagesTransaction(canonicalThreadId, [{
+                  fb_message_id: previewId,
+                  content: previewContent,
+                  media_type: 'text',
+                  timestamp_ms: previewTimestamp,
+                  timestamp_source: 'realtime_fallback',
+                  created_at: new Date(previewTimestamp).toISOString(),
+                  is_outgoing: false,
+                  sender_role: 'customer',
+                  direction_status: 'confirmed',
+                  source: 'sidebar_preview'
+                }], db);
+                if (previewPersistence.insertedIds.includes(previewId)) {
+                  const previewRow = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(previewId);
+                  if (previewRow) {
+                    io.emit('NEW_MESSAGE', { ...previewRow, account_id: changed.account_id, provisional: true });
+                    io.emit('THREAD_MESSAGES_UPDATED', { thread_id: canonicalThreadId, account_id: changed.account_id });
+                    const { threadId: capturedThreadId, createdCaptures } = PhoneCaptureService.processIncomingMessage({
+                      threadId: canonicalThreadId,
+                      accountId: changed.account_id,
+                      messageId: previewId,
+                      content: previewContent,
+                      messageTimestampMs: previewTimestamp
+                    }, { database: db });
+                    if (createdCaptures.length > 0) {
+                      const phoneView = PhoneCaptureService.getContactPhoneView(capturedThreadId, db);
+                      io.emit('PHONE_CAPTURED', {
+                        thread_id: capturedThreadId,
+                        captures: createdCaptures,
+                        phone: phoneView.phone,
+                        phone_source: phoneView.phone_source,
+                        phone_captured_at: phoneView.phone_captured_at,
+                        phone_capture: phoneView.phone_capture,
+                        phone_candidates: phoneView.phone_candidates
+                      });
+                    }
+                    const campaignResponse = CampaignResponseStatsService.recordIncomingResponse({
+                      messageId: previewRow.id,
+                      threadId: canonicalThreadId,
+                      accountId: changed.account_id,
+                      observedAtMs: previewTimestamp
+                    }, db);
+                    if (campaignResponse) io.emit('CAMPAIGN_RESPONSE_UPDATED', {
+                      ...campaignResponse,
+                      thread_id: canonicalThreadId,
+                      provisional: true,
+                      phone_captured: createdCaptures.length > 0
+                    });
+                  }
+                }
+              }
+
               InboxSyncScheduler.enqueueThreadSync({
                 ...changed,
+                thread_id: canonicalThreadId,
                 reason: 'sidebar_incoming',
                 allow_navigation: true,
-                priority: 'normal',
+                priority: 'high',
                 sync_mode: 'incremental'
               });
             }
@@ -2176,12 +2465,13 @@ wss.on('connection', (ws, req) => {
             for (const t of threads) {
               const threadId = String(t.id || t.thread_id || '');
               if (!threadId) continue;
+              const canonicalThreadId = resolveInternalThreadId(db, account_id, threadId) || threadId;
               const avatarData = t.avatar_base64 || t.avatar_url;
               if (avatarData) {
-                saveAvatarFromBase64OrUrl(avatarData, threadId).then(localFilename => {
+                saveAvatarFromBase64OrUrl(avatarData, canonicalThreadId).then(localFilename => {
                   if (localFilename) {
-                    db.prepare('UPDATE contacts SET avatar_url = ? WHERE thread_id = ?').run(localFilename, threadId);
-                    io.emit('CONTACT_UPDATED', { thread_id: threadId, avatar_url: localFilename });
+                    db.prepare('UPDATE contacts SET avatar_url = ? WHERE thread_id = ?').run(localFilename, canonicalThreadId);
+                    io.emit('CONTACT_UPDATED', { thread_id: canonicalThreadId, avatar_url: localFilename });
                   }
                 }).catch(() => {});
               }
@@ -2200,9 +2490,22 @@ wss.on('connection', (ws, req) => {
             LEFT JOIN conversation_reminders r ON r.thread_id = t.id AND r.status = 'active'
             LEFT JOIN inbox_sources s ON s.id = t.source_id
             WHERE t.account_id = ?
-            ORDER BY t.last_activity DESC
+            ORDER BY julianday(t.last_activity) DESC, t.id DESC
           `).all(account_id);
-          io.emit('THREADS_SYNCED', { account_id, threads: allThreads });
+          // Realtime jobs used to emit every stored conversation every 350ms.
+          // That forced the entire chat view (including videos) to rerender
+          // and visibly blink. Full/manual sync keeps the legacy full payload;
+          // lightweight jobs emit only rows involved in this result.
+          const syncedExternalIds = new Set((threads || []).map((thread) =>
+            String(thread.external_thread_id || thread.thread_id || thread.id || '')
+          ).filter(Boolean));
+          const emittedThreads = isRealtimeSidebarHint
+            ? allThreads.filter((thread) =>
+                syncedExternalIds.has(String(thread.external_thread_id || thread.id || ''))
+                || syncedExternalIds.has(String(thread.id || ''))
+              )
+            : allThreads;
+          io.emit('THREADS_SYNCED', { account_id, threads: emittedThreads });
           console.log(`[WS] Đã emit THREADS_SYNCED lên frontend: ${allThreads.length} threads`);
           // Keep the existing full sweep available as an opt-in fallback.
           // Normal operation synchronizes history only when CRM opens/scrolls a thread.
@@ -2236,12 +2539,10 @@ wss.on('connection', (ws, req) => {
               sync_status: 'FAILED',
               sync_error: reason
             });
-            return;
-
             // marker_mismatch/sidebar_mismatch/no_rows/no_main_container are DOM-timing
             // flukes that usually clear up on their own; error_screen means Facebook
             // itself is blocking the content, which is permanent and must not retry.
-            const TRANSIENT_REASONS = new Set(['marker_mismatch', 'sidebar_mismatch', 'no_rows', 'no_main_container']);
+            const TRANSIENT_REASONS = new Set(['marker_mismatch', 'sidebar_mismatch', 'no_rows', 'no_main_container', 'url_mismatch']);
             if (TRANSIENT_REASONS.has(reason)) {
               const scheduled = HistorySyncRetryPolicy.scheduleRetry(account_id, thread_id, () => {
                 // A retry also performs tab navigation - if the operator has since
@@ -2264,7 +2565,9 @@ wss.on('connection', (ws, req) => {
                     page_id: pageSource?.pageId || null,
                     mode,
                     cursor,
-                    contact_name: threadRow?.contact_name || null
+                    contact_name: threadRow?.contact_name || null,
+                    reason: 'history_retry',
+                    allow_navigation: true
                   }
                 }));
                 console.log(`[WS] Retry sync tin nhắn cho thread ${thread_id} (account ${account_id}) mode=${mode}`);
@@ -2284,9 +2587,58 @@ wss.on('connection', (ws, req) => {
           let resolvedSyncStatus = null;
           
           if (Array.isArray(messages) && messages.length > 0) {
-            const validMessages = messages.map(m => ({ ...m, content: cleanMessageText(m.content) }))
+            let validMessages = messages.map(m => ({ ...m, content: cleanMessageText(m.content) }))
               .filter(m => String(m.thread_id || thread_id) === String(thread_id)
-                && (m.media_url || (m.content && !isSystemOrMetadataText(m.content))));
+                && (m.media_url
+                  || (m.media_type && m.media_type !== 'text')
+                  || (m.content && !isSystemOrMetadataText(m.content))));
+
+            // A successful image/video send may first return through the
+            // on-demand history scraper instead of the realtime observer.
+            // Confirm the CRM-owned pending row here and do not persist a
+            // second Facebook echo row; otherwise the timeout marks it failed
+            // and a manual retry sends the same media again.
+            validMessages = validMessages.filter((historyMessage) => {
+              const mediaType = String(historyMessage.media_type || 'text').toLowerCase();
+              if (!historyMessage.is_outgoing || !['image', 'video'].includes(mediaType) || !historyMessage.fb_message_id) {
+                return true;
+              }
+              const observationTime = Number(historyMessage.timestamp_ms)
+                || Date.parse(historyMessage.created_at || '')
+                || Date.now();
+              const confirmation = OutboundConfirmationService.confirmObservation({
+                threadId: thread_id,
+                fbMessageId: historyMessage.fb_message_id,
+                isOutgoing: true,
+                mediaType,
+                content: historyMessage.content || '',
+                observedAt: observationTime,
+                confirmationSource: 'personal_dom'
+              }, { database: db });
+              if (confirmation.matched) {
+                const confirmedMessage = db.prepare('SELECT * FROM messages WHERE id = ?').get(confirmation.message_id);
+                io.emit('MESSAGE_SENT', {
+                  thread_id,
+                  client_message_id: confirmation.client_message_id,
+                  fb_message_id: confirmation.fb_message_id,
+                  status: 'sent'
+                });
+                if (confirmedMessage) io.emit('NEW_MESSAGE', withAttachmentAccessUrl({
+                  ...confirmedMessage,
+                  status: 'sent'
+                }));
+                console.log('[OUTBOUND_TRACE]', JSON.stringify({
+                  stage: 'BACKEND_HISTORY_MEDIA_CONFIRMED',
+                  thread_id: String(thread_id),
+                  client_message_id: confirmation.client_message_id,
+                  fb_message_id: confirmation.fb_message_id,
+                  media_type: mediaType,
+                  at: new Date().toISOString()
+                }));
+                return false;
+              }
+              return true;
+            });
 
             const threadRow = db.prepare('SELECT id, account_id FROM threads WHERE id = ?').get(thread_id);
             if (!threadRow) {
@@ -2359,22 +2711,77 @@ wss.on('connection', (ws, req) => {
               };
             });
             const persistence = ConversationRepository.saveMessagesTransaction(thread_id, sequencedMessages);
+            // History may arrive after realtime already confirmed the local
+            // attachment row. Collapse the late Facebook base/_media echo in
+            // the same sync window so the UI never renders two copies until
+            // the next REST reload.
+            // History is also the recovery path when the realtime observer is
+            // starved during a campaign. Attribute each newly persisted
+            // incoming row first; only an attributed current-campaign reply is
+            // allowed to capture a phone, so old history cannot pollute CRM.
+            const historyInsertedRows = persistence.insertedIds.length
+              ? db.prepare(`
+                  SELECT * FROM messages
+                  WHERE thread_id = ? AND fb_message_id IN (${persistence.insertedIds.map(() => '?').join(',')})
+                    AND is_outgoing = 0
+                `).all(thread_id, ...persistence.insertedIds)
+              : [];
+            for (const incomingRow of historyInsertedRows) {
+              const observedAtMs = Number(incomingRow.timestamp_ms) || Date.parse(incomingRow.created_at || '') || Date.now();
+              const campaignResponse = CampaignResponseStatsService.recordIncomingResponse({
+                messageId: incomingRow.id,
+                threadId: thread_id,
+                accountId: account_id,
+                observedAtMs
+              }, db);
+              if (!campaignResponse) continue;
+              const { threadId: capturedThreadId, createdCaptures } = PhoneCaptureService.processIncomingMessage({
+                threadId: thread_id,
+                accountId: account_id,
+                messageId: incomingRow.fb_message_id,
+                content: incomingRow.content,
+                messageTimestampMs: observedAtMs
+              }, { database: db });
+              if (createdCaptures.length > 0) {
+                const phoneView = PhoneCaptureService.getContactPhoneView(capturedThreadId, db);
+                io.emit('PHONE_CAPTURED', {
+                  thread_id: capturedThreadId,
+                  captures: createdCaptures,
+                  phone: phoneView.phone,
+                  phone_source: phoneView.phone_source,
+                  phone_captured_at: phoneView.phone_captured_at,
+                  phone_capture: phoneView.phone_capture,
+                  phone_candidates: phoneView.phone_candidates
+                });
+              }
+              io.emit('CAMPAIGN_RESPONSE_UPDATED', {
+                ...campaignResponse,
+                thread_id,
+                phone_captured: createdCaptures.length > 0,
+                recovered_from_history: true
+              });
+            }
+            const collapsedMediaCompanions = OutboundDomCorrelationService.collapseStoredMediaCompanions(db, thread_id);
+            const collapsedTemporaryIds = OutboundDomCorrelationService.collapseStoredTemporaryIdUpgrades(db, thread_id);
+            const reconciledDomRows = ConversationRepository.reconcileObservedDomSequence(thread_id, sequencedMessages, db);
             // A DOM page numbers its rows locally from zero. Merging multiple
             // pages and realtime rows otherwise leaves duplicate/gapped ranks,
             // which makes old messages appear below newer ones in the CRM.
             ConversationRepository.normalizeMessageSequence(thread_id, db);
-            for (const mediaMessage of validMessages.filter((message) => message.media_url && ['image', 'video', 'voice', 'file'].includes(message.media_type))) {
-              mediaDownloader.downloadNewMessageMedia(thread_id, mediaMessage.media_url, mediaMessage.media_type)
-                .then((localPath) => {
-                  if (!localPath) return;
-                  db.prepare('UPDATE messages SET local_media_path = ? WHERE thread_id = ? AND fb_message_id = ?')
-                    .run(localPath, thread_id, mediaMessage.fb_message_id);
-                  const stored = db.prepare('SELECT * FROM messages WHERE thread_id = ? AND fb_message_id = ?')
-                    .get(thread_id, mediaMessage.fb_message_id);
-                  if (stored) io.emit('THREAD_MESSAGES_UPDATED', { thread_id, messages: [stored] });
-                })
-                .catch((error) => console.warn('[HISTORY_MEDIA] Download failed:', error.message));
+            if (collapsedMediaCompanions || collapsedTemporaryIds) {
+              console.log('[OUTBOUND_TRACE]', JSON.stringify({
+                stage: 'BACKEND_HISTORY_MEDIA_ECHO_COLLAPSED',
+                thread_id: String(thread_id),
+                  media_companions: collapsedMediaCompanions,
+                  temporary_ids: collapsedTemporaryIds,
+                  reordered_dom_rows: reconciledDomRows,
+                at: new Date().toISOString()
+              }));
             }
+            // Publish the snapshot immediately. Persisting Facebook media is
+            // background work; a large or expired video URL must not block
+            // history sync or the outbound composer.
+            inboundMediaHydration.hydrateThread(thread_id);
             const deltaIds = [...persistence.insertedIds, ...persistence.updatedIds];
             const fetchedTotal = Number.isFinite(Number(fetched_count)) ? Number(fetched_count) : messages.length;
             const skippedTotal = Math.max(0, fetchedTotal - deltaIds.length);
@@ -2413,7 +2820,9 @@ wss.on('connection', (ws, req) => {
             const cleanMsgs = syncedRows.map(m => {
               const cleaned = cleanMessageText(m.content);
               return { ...m, cleaned };
-            }).filter(m => m.media_url || (m.cleaned && !isSystemOrMetadataText(m.cleaned) && m.cleaned !== 'Đang tải...')).map(m => withAttachmentAccessUrl({
+            }).filter(m => m.media_url
+              || (m.media_type && m.media_type !== 'text')
+              || (m.cleaned && !isSystemOrMetadataText(m.cleaned) && m.cleaned !== 'Đang tải...')).map(m => withAttachmentAccessUrl({
               ...m,
               content: m.cleaned
             }));
@@ -2679,6 +3088,7 @@ wss.on('connection', (ws, req) => {
           // failure left the CRM bubble hung in "Đang gửi" with no way to
           // ever learn it failed.
           const { queue_id, success, error, client_message_id, outcome } = msg.data;
+          queueWorker.acknowledgeDispatch(queue_id);
           console.log(`[WS] QUEUED_MESSAGE_RESULT: queue_id=${queue_id} success=${success} error=${error || 'none'}`);
           const richQueue = db.prepare(
             'SELECT * FROM message_queue WHERE id = ? AND outbound_attempt_id IS NOT NULL'
@@ -2719,6 +3129,58 @@ wss.on('connection', (ws, req) => {
                   updated_at: new Date().toISOString()
                 });
               }
+
+              // Auto-fail watchdog: if this attachment attempt is still stuck
+              // in awaiting_confirmation after 3 minutes, fail it so the queue
+              // is not blocked and the next text/image send can proceed.
+              if (richQueue.attachment_id) {
+                const watchdogAttemptId = richQueue.outbound_attempt_id;
+                const watchdogQueueId = queue_id;
+                const ATTACHMENT_CONFIRMATION_TIMEOUT_MS = 3 * 60 * 1000;
+                setTimeout(() => {
+                  try {
+                    const liveAttempt = OutboundAttemptRepository.getById(watchdogAttemptId, db);
+                    if (!liveAttempt || liveAttempt.status !== 'awaiting_confirmation') return;
+                    console.warn(`[WS] Attachment confirmation watchdog: attempt ${watchdogAttemptId} still awaiting after 3min, failing.`);
+                    const didFail = OutboundAttemptRepository.transition(
+                      watchdogAttemptId,
+                      ['awaiting_confirmation'],
+                      'failed',
+                      { error_code: 'CONFIRMATION_TIMEOUT', error_message: 'No Facebook message id received within 3 minutes' },
+                      db
+                    );
+                    if (!didFail) return; // already resolved by DOM observation
+                    OutboundAttachmentRepository.transition(
+                      richQueue.attachment_id,
+                      ['queued', 'sending'],
+                      'failed',
+                      { validation_error: 'CONFIRMATION_TIMEOUT' },
+                      db
+                    );
+                    MessageQueueRepository.updateStatus(watchdogQueueId, 'failed', 'CONFIRMATION_TIMEOUT', db);
+                    const timedOutMessage = liveAttempt.message_id
+                      ? db.prepare('SELECT * FROM messages WHERE id = ?').get(liveAttempt.message_id)
+                      : null;
+                    if (timedOutMessage) {
+                      db.prepare(`UPDATE messages SET delivery_status = 'failed', delivery_error = 'CONFIRMATION_TIMEOUT' WHERE id = ?`)
+                        .run(timedOutMessage.id);
+                      io.emit('MESSAGE_SEND_STATUS', {
+                        thread_id: timedOutMessage.thread_id,
+                        client_message_id: timedOutMessage.client_message_id,
+                        message_id: timedOutMessage.id,
+                        attempt_id: watchdogAttemptId,
+                        status: 'failed',
+                        fb_message_id: null,
+                        error: { code: 'CONFIRMATION_TIMEOUT', message: 'Không nhận được xác nhận từ Facebook sau 3 phút' },
+                        updated_at: new Date().toISOString()
+                      });
+                    }
+                  } catch (watchdogError) {
+                    console.error('[WS] Attachment confirmation watchdog error:', watchdogError.message);
+                  }
+                }, ATTACHMENT_CONFIRMATION_TIMEOUT_MS);
+              }
+
               break;
             }
 
@@ -2858,6 +3320,10 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     if (ws.accountId) {
+      // REGISTER_ACCOUNT replaces an older socket before asking that old
+      // socket to close. Its delayed close event must not delete the newer,
+      // healthy connection that is already stored for the same account.
+      if (extensionConnections.get(ws.accountId) !== ws) return;
       extensionConnections.delete(ws.accountId);
       InboxSyncScheduler.unregisterAccount(ws.accountId);
       domReplaySuppressUntil.delete(ws.accountId);
@@ -2919,6 +3385,12 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('REQUEST_SYNC_MESSAGE_REQUESTS', ({ account_id } = {}) => {
+    const accountId = String(account_id || '');
+    if (!accountId || !enterpriseAccess.canAccessAccount(socket.user, accountId)) return;
+    InboxSyncScheduler.requestMessageRequestsSync(accountId, 'crm_waiting_tab');
+  });
+
   socket.on('MESSAGE_REQUEST_ACTION', ({ request_id, thread_id, action } = {}) => {
     const requestId = String(request_id || '');
     const threadId = String(thread_id || '');
@@ -2978,7 +3450,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('REQUEST_SYNC_THREAD_MESSAGES', ({ thread_id, direction = 'initial', scroll_delta = 0 } = {}) => {
+  socket.on('REQUEST_SYNC_THREAD_MESSAGES', async ({ thread_id, direction = 'initial', scroll_delta = 0 } = {}) => {
     const threadId = String(thread_id || '');
     if (!threadId || !enterpriseAccess.canAccessThread(socket.user, threadId)) return;
     const thread = db.prepare(`
@@ -2989,6 +3461,20 @@ io.on('connection', (socket) => {
       WHERE t.id = ?
     `).get(threadId);
     if (!thread?.account_id) return;
+
+    const interactionExtension = extensionConnections.get(String(thread.account_id));
+    if (interactionExtension?.readyState === WebSocket.OPEN && thread.source_type !== 'page_messenger') {
+      interactionExtension.send(JSON.stringify({
+        type: 'PREPARE_CHAT_THREAD',
+        data: {
+          account_id: thread.account_id,
+          thread_id: thread.id,
+          external_thread_id: thread.external_thread_id || thread.id,
+          thread_url: thread.thread_url,
+          contact_name: thread.contact_name
+        }
+      }));
+    }
     HistorySyncRetryPolicy.noteManualRequest(thread.account_id, threadId);
     InitialMessageSweepService.noteUserActivity(thread.account_id);
     InboxSyncScheduler.clearQueuedThreadSyncs(thread.account_id, (job) => String(job.reason || '').startsWith('initial_sweep'));
@@ -3025,7 +3511,10 @@ io.on('connection', (socket) => {
       // Opening/switching user must never scroll Messenger. A saved PARTIAL
       // checkpoint is consumed only after an explicit CRM scroll-to-top event.
       sync_mode: (direction === 'older' || (direction === 'viewport' && Number(scroll_delta) < 0)) ? 'ondemand_older' : (direction === 'viewport' ? 'ondemand_viewport' : 'ondemand_initial'),
-      scroll_delta: direction === 'viewport' ? Number(scroll_delta) || 0 : 0
+      // Preserve the operator's real upward wheel distance for older-page
+      // requests. Dropping it here made the extension fall back to -1px,
+      // which is too small to move Messenger's virtualized history scroller.
+      scroll_delta: ['viewport', 'older'].includes(direction) ? Number(scroll_delta) || 0 : 0
     });
   });
 
@@ -3114,6 +3603,10 @@ io.on('connection', (socket) => {
             400
           );
         }
+        const richThread = db.prepare('SELECT account_id FROM threads WHERE id = ?').get(thread_id);
+        if (!richThread?.account_id) {
+          throw new RichMessageService.Error('THREAD_NOT_FOUND', 'Conversation was not found.', 404);
+        }
         const accepted = RichMessageService.submit({
           threadId: thread_id,
           clientMessageId: client_message_id,
@@ -3138,6 +3631,20 @@ io.on('connection', (socket) => {
       await sendViaExtension(thread_id, content, client_message_id);
     } catch (err) {
       console.error('[Socket] Lỗi gửi tin nhắn:', err.message);
+      try {
+        fs.appendFileSync(
+          path.join(APP_DATA_ROOT, 'composer-debug.log'),
+          JSON.stringify({
+            at: new Date().toISOString(),
+            stage: 'socket_send_error',
+            thread_id: String(thread_id || ''),
+            client_message_id: client_message_id || null,
+            attachment_id: attachment_id || null,
+            error_code: err.code || 'SEND_FAILED',
+            error: err.message || String(err)
+          }) + '\n'
+        );
+      } catch (_) { }
       socket.emit('SEND_ERROR', {
         error: err.message,
         code: err.code || 'SEND_FAILED',
@@ -3472,12 +3979,20 @@ app.delete('/api/accounts/:id', (req, res) => {
 // Threads
 app.get('/api/threads/waiting-count', (req, res) => {
   try {
+    // Count only Facebook accounts that this signed-in user can access. This
+    // keeps the badge identical to the WAITING conversation list and ignores
+    // stale or unassigned account data.
+    const accessibleAccountIds = enterpriseAccess.listAccounts(req.user).map((account) => String(account.id));
+    res.setHeader('Cache-Control', 'no-store');
+    if (accessibleAccountIds.length === 0) return res.json({ count: 0 });
+    const placeholders = accessibleAccountIds.map(() => '?').join(',');
     const row = db.prepare(`
       SELECT COUNT(*) as count FROM threads t
       JOIN accounts a ON a.id = t.account_id
       WHERE COALESCE(t.inbox_folder, 'INBOX') IN ('MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')
       AND t.archived_at IS NULL
-    `).get();
+      AND t.account_id IN (${placeholders})
+    `).get(...accessibleAccountIds);
     res.json({ count: row?.count || 0 });
   } catch (error) {
     res.json({ count: 0 });
@@ -4242,10 +4757,19 @@ app.get('/api/ollama/health', async (req, res) => {
 });
 
 // Messages REST API - With UI Guard Filter
-app.get('/api/threads/:id/messages', (req, res) => {
+app.get('/api/threads/:id/messages', async (req, res) => {
   if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
-  OutboundDomCorrelationService.collapseStoredMediaCompanions(db, req.params.id);
-  OutboundDomCorrelationService.collapseStoredTemporaryIdUpgrades(db, req.params.id);
+  try {
+    OutboundDomCorrelationService.collapseStoredMediaCompanions(db, req.params.id);
+    OutboundDomCorrelationService.collapseStoredTemporaryIdUpgrades(db, req.params.id);
+  } catch (error) {
+    console.warn('[MESSAGE_READ_REPAIR] Skipped unsafe legacy collapse:', error.message);
+  }
+  // Return Facebook media URLs immediately and persist them in the background.
+  // Waiting for every old video here blocked polling and outbound file staging.
+  inboundMediaHydration.hydrateThread(req.params.id);
+  // A failed outbound attempt is terminal. Remove it before reading so an old
+  // pending row can never reappear as a retry bubble after app startup.
   deleteOutboundMessageRows({ threadId: req.params.id, failedOnly: true });
 
   // Cleanup stale pending/temporary rows that were already confirmed via DOM / FB mid
@@ -4265,7 +4789,9 @@ app.get('/api/threads/:id/messages', (req, res) => {
   // Same exemption as the WS ingest guard (server.js NEW_MESSAGE_RECEIVED handler):
   // a media message (photo/sticker) can legitimately have no caption at all -
   // empty content there doesn't mean "junk", so it must not be dropped from history.
-  }).filter(m => m.media_url || (m.cleaned && !isSystemOrMetadataText(m.cleaned) && m.cleaned !== 'Đang tải...')).map(m => withAttachmentAccessUrl({
+  }).filter(m => m.media_url
+    || (m.media_type && m.media_type !== 'text')
+    || (m.cleaned && !isSystemOrMetadataText(m.cleaned) && m.cleaned !== 'Đang tải...')).map(m => withAttachmentAccessUrl({
     ...m,
     content: m.cleaned
   }));
@@ -4356,6 +4882,7 @@ function startServer() {
   // connection. Was never wired up here before feature 015, so queued messages
   // had nothing to pop them.
   queueWorker.configure({
+    database: db,
     getConnection: (accountId) => extensionConnections.get(accountId),
     campaignEnabled: () => CampaignService.getConfig().enabled,
     onQueueFail: (message, reason) => {
@@ -4390,6 +4917,10 @@ function startServer() {
       io.emit('MESSAGE_SEND_FAILED', { thread_id: message.thread_id, client_message_id: clientMessageId, success: false, status: 'failed', error: reason });
     }
   });
+  const staleRichRecovery = queueWorker.recoverStaleRichDispatches();
+  if (staleRichRecovery.dispatching || staleRichRecovery.awaiting_confirmation) {
+    console.warn('[QueueWorker] Recovered stale rich-message sends:', staleRichRecovery);
+  }
   campaignRunner.configure({
     enqueueMessage: enqueueCampaignMessage,
     emit: (campaign, recipient) => CampaignEventService.emit(io, campaign, recipient)
@@ -4400,6 +4931,7 @@ function startServer() {
   if (CampaignService.getConfig().enabled) {
     setTimeout(() => campaignRunner.recover(), 1500);
   }
+
   return listenPromise;
 }
 
@@ -4482,6 +5014,10 @@ InboxSyncScheduler.configure({
 });
 
 function stopManagedProcesses() {
+  if (extensionHealthMonitor) {
+    clearInterval(extensionHealthMonitor);
+    extensionHealthMonitor = null;
+  }
   return processManager.stopAllAccountProcesses();
 }
 

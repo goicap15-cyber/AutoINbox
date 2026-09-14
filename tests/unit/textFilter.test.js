@@ -8,6 +8,24 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync('src/extension/textFilter.js', 'utf8'), context);
 const clean = context.FbCrmTextFilter.cleanMessageText;
 
+test('strips an unread divider concatenated with the first real message', () => {
+  assert.equal(clean('Tin nh\u1eafn ch\u01b0a \u0111\u1ecdc:Oo'), 'Oo');
+  assert.equal(clean('Unread messages: hello'), 'hello');
+});
+
+test('rejects relative-time metadata mounted beside Messenger bubbles', () => {
+  assert.equal(clean('2 ph\u00fat'), '');
+  assert.equal(clean('27 ph\u00fat tr\u01b0\u1edbc'), '');
+  assert.equal(clean('4 minutes'), '');
+  assert.equal(clean('1 hour ago'), '');
+});
+
+test('strips a Messenger delivery badge glued directly to message text', () => {
+  assert.equal(clean('vfffffĐã gửi'), 'vfffff');
+  assert.equal(clean('helloSent'), 'hello');
+  assert.equal(clean('Tôi đã gửi hàng rồi'), 'Tôi đã gửi hàng rồi');
+});
+
 test('strips Vietnamese accessibility label without losing message content', () => {
   assert.equal(clean('Tin nhắn do Bảo Khánh gửi lúc Thứ Sáu 10:09 sáng: 👍'), '👍');
 });

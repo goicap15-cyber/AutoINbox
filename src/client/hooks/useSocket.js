@@ -16,8 +16,10 @@ export function useSocket(enabled = true) {
     const newSocket = io(SOCKET_URL, {
       transports: ['websocket', 'polling'],
       withCredentials: true,
-      reconnectionAttempts: 10,
-      reconnectionDelay: 2000
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 10000,
+      randomizationFactor: 0.25
     });
 
     newSocket.on('connect', () => {

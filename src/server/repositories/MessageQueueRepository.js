@@ -16,7 +16,10 @@ class MessageQueueRepository {
     }
     const id = crypto.randomUUID();
     try {
-      // contract_version=2 whenever there's an attachment (or manifest) to
+      // Preserve the declared media type. Video is a first-class v2 attachment
+      // (the envelope validator and Messenger adapter support video); coercing
+      // it to "file" prevents the server from applying media dispatch
+      // confirmation and leaves the CRM bubble in "Thử lại".      // contract_version=2 whenever there's an attachment (or manifest) to
       // verify, so QueueWorker.buildAttachment()/buildAttachmentManifest()
       // actually run their byte-size/checksum integrity check before dispatch
       // (they gate on this column) - matters for campaign image/file sends
@@ -42,7 +45,7 @@ class MessageQueueRepository {
         messageData.attachment_path || null,
         messageData.attachment_mime_type || null,
         messageData.attachment_name || null,
-        messageData.attachment_media_type || null,
+        (messageData.attachment_media_type || null),
         messageData.attachment_byte_size || null,
         messageData.attachment_checksum || null,
         messageData.manifest_id || null,
@@ -129,7 +132,7 @@ class MessageQueueRepository {
       messageData.attachment_mime_type || null,
       messageData.attachment_name || null,
       messageData.outbound_attempt_id,
-      messageData.attachment_media_type || null,
+      (messageData.attachment_media_type || null),
       messageData.attachment_byte_size || null,
       messageData.attachment_checksum || null
     );
@@ -140,13 +143,18 @@ class MessageQueueRepository {
     const transaction = database.transaction(() => {
       const row = database.prepare(`
         SELECT m.id, m.thread_id, m.account_id, m.content, m.status,
+               t.external_thread_id AS recipient_thread_id,
                t.thread_url, t.contact_name AS expected_contact_name,
                CASE WHEN m.campaign_id IS NOT NULL THEN m.source_id
                     ELSE COALESCE(m.source_id, t.source_id) END AS source_id,
                CASE WHEN m.campaign_id IS NOT NULL THEN m.source_type
                     ELSE COALESCE(m.source_type, s.source_type) END AS source_type,
-               CASE WHEN m.campaign_id IS NOT NULL THEN m.page_id
-                    ELSE COALESCE(m.page_id, s.external_id) END AS page_id,
+               CASE
+                    WHEN m.campaign_id IS NOT NULL THEN m.page_id
+                    WHEN COALESCE(m.source_type, s.source_type) = 'page_messenger'
+                      THEN COALESCE(m.page_id, s.external_id)
+                    ELSE NULL
+               END AS page_id,
                m.attachment_id, m.attachment_path, m.attachment_mime_type, m.attachment_name,
                m.outbound_attempt_id, m.attachment_media_type, m.attachment_byte_size,
                m.attachment_checksum, m.manifest_id, m.contract_version,
@@ -173,6 +181,38 @@ class MessageQueueRepository {
     return database.prepare(`
       UPDATE message_queue SET status = ?, error_reason = ? WHERE id = ?
     `).run(status, errorReason, id).changes > 0;
+  }
+
+  static confirmCampaignComposerDispatch(id, database = getDefaultDb()) {
+    const transaction = database.transaction(() => {
+      const queue = database.prepare(`
+        SELECT id, thread_id, campaign_id, status
+        FROM message_queue
+        WHERE id = ? AND campaign_id IS NOT NULL
+      `).get(id);
+      if (!queue || !['processing', 'sent'].includes(queue.status)) return null;
+
+      database.prepare(`
+        UPDATE message_queue
+        SET status = 'sent', error_reason = NULL, processed_at = COALESCE(processed_at, CURRENT_TIMESTAMP)
+        WHERE id = ?
+      `).run(id);
+
+      const clientMessageId = `queue_${id}`;
+      database.prepare(`
+        UPDATE messages
+        SET delivery_status = 'sent', delivery_error = NULL
+        WHERE client_message_id = ? AND is_outgoing = 1
+      `).run(clientMessageId);
+
+      const message = database.prepare(`
+        SELECT id, thread_id, client_message_id, fb_message_id
+        FROM messages WHERE client_message_id = ? AND is_outgoing = 1
+        ORDER BY id DESC LIMIT 1
+      `).get(clientMessageId);
+      return { ...queue, ...(message || {}), client_message_id: clientMessageId };
+    });
+    return transaction();
   }
 
   static getStatus(id, database = getDefaultDb()) {

@@ -1,7 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { AlertTriangle, Check, CheckCheck, RefreshCw, Loader2, Phone, Video, PhoneMissed, PhoneCall, PhoneIncoming } from 'lucide-react';
 import MediaViewer from './MediaViewer.jsx';
-
 import { getMessageDisplayTime, isConfirmedOutgoing } from '../utils/messageTimestampPresentation.js';
 
 const AVATAR_COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#ec4899', '#f97316', '#14b8a6', '#6366f1', '#ef4444'];
@@ -12,64 +11,87 @@ function pickAvatarColor(value) {
   return AVATAR_COLORS[total % AVATAR_COLORS.length];
 }
 
+function IncomingAvatar({ url, initial, color, threadId }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [url, threadId]);
+
+  if (url && !failed) {
+    const source = String(url).startsWith('/api/') || /^https?:/i.test(String(url))
+      ? String(url)
+      : `/api/avatars/${String(url)}`;
+    return (
+      <img
+        key={`${threadId || ''}:${source}`}
+        src={source}
+        alt=""
+        className="w-8 h-8 rounded-full object-cover border border-[var(--color-border)] shadow-sm"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+
+  return (
+    <div
+      className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--color-text-on-accent)] text-xs font-semibold shadow-sm"
+      style={{ backgroundColor: color }}
+    >
+      {initial}
+    </div>
+  );
+}
+
 export default function MessageBubble({ msg, activeThread, onRetry }) {
   const [isTimePinned, setIsTimePinned] = useState(false);
   const isPendingDirection = msg.direction_status === 'pending';
-  const isOutgoing = isConfirmedOutgoing(msg) || (!isPendingDirection && Boolean(msg.from === 'me' || msg.sender_type === 'staff' || msg.sender_type === 'ai'));
+  const isOutgoing = isConfirmedOutgoing(msg) || (!isPendingDirection && Boolean(msg.is_outgoing || msg.from === 'me' || msg.sender_type === 'staff' || msg.sender_type === 'ai'));
   const isUnsent = Boolean(msg.is_unsent || msg.unsent);
   const content = msg.content || msg.text || msg.message || '';
   const senderName = msg.sender_name || (isOutgoing ? (msg.is_ai || msg.sender_type === 'ai' ? 'AI' : 'Bạn') : activeThread?.contact_name || 'Khách hàng');
-  const status = msg.status || msg.delivery_status || (msg.is_failed ? 'failed' : msg.is_sending ? 'sending' : 'sent');
+  // Persisted delivery_status is authoritative. A stale optimistic status can
+  // remain 'pending' after the backend has confirmed the Messenger media.
+  const status = msg.delivery_status || msg.status || (msg.is_failed ? 'failed' : msg.is_sending ? 'sending' : 'sent');
   const displayTime = getMessageDisplayTime(msg);
-  const avatarUrl = msg.sender_avatar || activeThread?.avatar_url;
-  const avatarInitial = (senderName || activeThread?.contact_name || 'K').charAt(0).toUpperCase();
+  const avatarUrl = activeThread?.avatar_url || msg.sender_avatar_url || msg.sender_avatar || msg.avatar_url;
+  const avatarSeed = String(senderName || activeThread?.contact_name || '').trim();
+  const avatarInitial = (Array.from(avatarSeed)[0] || 'K').toUpperCase();
   const avatarColor = pickAvatarColor(activeThread?.id || senderName);
 
   const lowerContent = content.toLowerCase();
+  const mediaUrl = msg.media_url || msg.attachment?.preview_url || msg.attachment?.media_url || null;
+  const mediaType = msg.media_type || msg.attachment?.media_type || null;
+  const hasRenderableMedia = Boolean(
+    msg.local_media_path || mediaUrl || msg.attachment_id || msg.attachment ||
+    (mediaType && mediaType !== 'text' && mediaType !== 'call')
+  );
+  const hasCallText = /(?:cuộc gọi|gọi thoại|bỏ lỡ cuộc gọi|nhỡ cuộc|audio call|video call|missed call|missed audio|missed video|call ended)/i.test(content);
   const isCallMessage = Boolean(
     msg.media_type === 'call' ||
-    (msg.fb_message_id && String(msg.fb_message_id).startsWith('call_')) ||
-    lowerContent.includes('cuộc gọi') ||
-    lowerContent.includes('gọi thoại') ||
-    lowerContent.includes('bỏ lỡ cuộc gọi') ||
-    lowerContent.includes('nhỡ cuộc') ||
-    lowerContent.includes('audio call') ||
-    lowerContent.includes('video call') ||
-    lowerContent.includes('missed call') ||
-    lowerContent.includes('missed audio') ||
-    lowerContent.includes('missed video') ||
-    lowerContent.includes('call ended') ||
-    /\bcall\b/.test(lowerContent)
+    (!hasRenderableMedia && (
+      (msg.fb_message_id && String(msg.fb_message_id).startsWith('call_')) || hasCallText
+    ))
   );
   const isMissedCall = lowerContent.includes('bỏ lỡ') || lowerContent.includes('nhỡ') || lowerContent.includes('missed');
   const isVideoCall = lowerContent.includes('video');
 
-  const hasMedia = Boolean(msg.local_media_path || msg.media_url);
-  const visibleContent = content;
+  const hasMedia = hasRenderableMedia;
+  const visibleContent = isOutgoing && hasMedia && mediaType === 'image' ? '' : content;
   const isQuickLike = !isCallMessage && !isUnsent && !hasMedia && (visibleContent?.trim() === '👍' || /^(?:thích|like)$/i.test(visibleContent?.trim() || ''));
+
   if (!content && !hasMedia && !isUnsent) return null;
 
   return (
     <div
-      onClick={() => setIsTimePinned(prev => !prev)}
+      onClick={() => setIsTimePinned((current) => !current)}
       className={`group flex ${isOutgoing ? 'justify-end' : 'justify-start'} items-end gap-2 cursor-pointer select-none`}
     >
       {!isOutgoing && (
         <div className="relative flex-shrink-0">
-          {avatarUrl ? (
-            <img
-              src={avatarUrl.startsWith?.('/api/') || avatarUrl.startsWith?.('http') ? avatarUrl : `/api/avatars/${avatarUrl}`}
-              alt=""
-              className="w-8 h-8 rounded-full object-cover border border-[var(--color-border)] shadow-sm"
-            />
-          ) : (
-            <div
-              className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--color-text-on-accent)] text-xs font-semibold shadow-sm"
-              style={{ backgroundColor: avatarColor }}
-            >
-              {avatarInitial}
-            </div>
-          )}
+          <IncomingAvatar
+            url={avatarUrl}
+            initial={avatarInitial}
+            color={avatarColor}
+            threadId={activeThread?.id || msg.thread_id}
+          />
         </div>
       )}
 
@@ -96,7 +118,7 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
             >
               <svg
                 viewBox="0 0 24 24"
-                className="w-9 h-9 fill-[#0084ff] stroke-[#0084ff] stroke-1 drop-shadow-sm"
+                className={`w-9 h-9 ${isOutgoing ? 'fill-[#f7b125] stroke-[#f7b125]' : 'fill-[#0084ff] stroke-[#0084ff]'} stroke-1 drop-shadow-sm`}
               >
                 <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
               </svg>
@@ -120,7 +142,7 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
                 </div>
               ) : (
                 <>
-                  <MediaViewer mediaType={msg.media_type} mediaUrl={msg.media_url} localMediaPath={msg.local_media_path} />
+                  <MediaViewer mediaType={mediaType} mediaUrl={mediaUrl} localMediaPath={msg.local_media_path} />
                   {visibleContent && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words select-text ${hasMedia ? 'mt-1.5' : ''}`}>{visibleContent}</p>}
                 </>
               )}
@@ -139,7 +161,8 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
           {displayTime ? (
             <time
               className="font-mono"
-              title={new Date(Number(msg.timestamp_ms) || 0).toLocaleString('vi-VN')}
+              dateTime={msg.created_at || undefined}
+              title={new Date(Number(msg.timestamp_ms) || msg.created_at || msg.time || 0).toLocaleString('vi-VN')}
             >
               {displayTime}
             </time>
@@ -149,7 +172,7 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
           {isOutgoing && (status === 'sending' || status === 'pending') && (
             <span className="inline-flex items-center gap-1">
               <Loader2 size={12} className="animate-spin text-[var(--color-accent)]" />
-              Đang gửi
+              {hasMedia ? 'Đang gửi ảnh...' : 'Đang gửi'}
             </span>
           )}
           {isOutgoing && status === 'failed' && (

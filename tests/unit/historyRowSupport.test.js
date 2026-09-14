@@ -8,6 +8,78 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync('src/extension/historyRowSupport.js', 'utf8'), context);
 const { resolveDirectionFromLabel } = context.FbCrmHistoryRowSupport;
 
+test('history scraper guards an image timestamp minute from becoming a caption', () => {
+  const background = fs.readFileSync('src/extension/background.js', 'utf8');
+  assert.match(background, /\(mediaUrl \|\| isVideoMessage\).*\^\\d\{2\}\$/s);
+  assert.match(background, /Number\(cleaned\) === \(Number\(clockMinutes\) % 60\)/);
+});
+
+test('older-history loader detects a virtual page swap with unchanged scroll geometry', () => {
+  const background = fs.readFileSync('src/extension/background.js', 'utf8');
+  assert.match(background, /const beforeViewportIdentity = historyViewportIdentity\(container\)/);
+  assert.match(background, /afterViewportIdentity !== beforeViewportIdentity/);
+  assert.match(background, /afterViewportIdentity === lastViewportIdentity/);
+});
+
+test('personal Messenger history reads emoji image labels before timestamp minute fragments', () => {
+  const background = fs.readFileSync('src/extension/background.js', 'utf8');
+  assert.match(background, /function extractHistoryBubbleEmoji\(container\)/);
+  assert.match(background, /rawEmojiContent = extractHistoryBubbleEmoji\(leafBubble\)/);
+  assert.match(background, /emojiContent && \(!textContent \|\| minuteFragment\)/);
+});
+
+test('personal Messenger keeps icon-only likes and semantic-only videos', () => {
+  const content = fs.readFileSync('src/extension/content.js', 'utf8');
+  const background = fs.readFileSync('src/extension/background.js', 'utf8');
+  assert.match(content, /rowEmojiContent && \(finalBubbles\.length === 0 \|\| hasOnlyClockFragments\)/);
+  assert.match(content, /const semanticVideo = Array\.from/);
+  assert.match(background, /rowEmojiContent && \(leafBubbles\.length === 0 \|\| hasOnlyClockFragments\)/);
+  assert.match(background, /videoElement \|\| semanticVideoElement/);
+  assert.match(background, /mediaElement \|\| mediaAnchor \|\| semanticVideoElement \|\| row/);
+});
+
+test('personal Messenger treats glued minute suffixes as timestamp chrome', () => {
+  const content = fs.readFileSync('src/extension/content.js', 'utf8');
+  const background = fs.readFileSync('src/extension/background.js', 'utf8');
+  assert.match(content, /\(\?:sáng\|chiều\|tối\|am\|pm\|sa\|ch\)\?/i);
+  assert.match(background, /\(\?:sáng\|chiều\|tối\|am\|pm\|sa\|ch\)\?/i);
+});
+
+test('personal Messenger accepts the exact received-like SVG title inside a clickable bubble', () => {
+  const content = fs.readFileSync('src/extension/content.js', 'utf8');
+  const background = fs.readFileSync('src/extension/background.js', 'utf8');
+  assert.match(content, /exactReceivedLikeTitle/);
+  assert.match(background, /exactReceivedLikeTitle/);
+});
+
+test('realtime sidebar recognizes icon-only Like without relying on unread dot', () => {
+  const background = fs.readFileSync('src/extension/background.js', 'utf8');
+  assert.match(background, /const sidebarLike = Array\.from/);
+  assert.match(background, /if \(sidebarLike\) last_message = '👍'/);
+});
+
+test('personal Messenger replaces a timestamp-only SVG row with a Like glyph', () => {
+  const content = fs.readFileSync('src/extension/content.js', 'utf8');
+  const background = fs.readFileSync('src/extension/background.js', 'utf8');
+  assert.match(content, /hasOnlyClockFragments && messageRow\.querySelector\?\.\('svg'\).*rowEmojiContent = '👍'/);
+  assert.match(background, /hasOnlyClockFragments && row\.querySelector\('svg'\).*rowEmojiContent = '👍'/);
+});
+
+test('history sync rejects DOM results when the tab changes user during parsing', () => {
+  const background = fs.readFileSync('src/extension/background.js', 'utf8');
+  assert.match(background, /thread_changed_during_parse/);
+  assert.match(background, /verifiedThreadAfterParse/);
+});
+
+test('a blank first-open conversation activates history and remains scroll-recoverable', () => {
+  const background = fs.readFileSync('src/extension/background.js', 'utf8');
+  const app = fs.readFileSync('src/client/App.jsx', 'utf8');
+  assert.match(background, /\['ondemand_initial', 'ondemand_viewport', 'ondemand_older'\]\.includes\(mode\)/);
+  assert.match(background, /emptyConfirmationMs = mode === 'ondemand_initial' \? 4000 : 1200/);
+  assert.match(background, /domReadyStatus\.empty && mode === 'ondemand_older'[\s\S]+?loadOlderMessages\(mainContainer, mode\)/);
+  assert.match(app, /onSyncThread=\{\(\) => requestThreadMessageSync\(activeThreadId, 'initial'\)\}/);
+});
+
 test('old label format: "Tin nhắn do Bạn gửi lúc..." -> outgoing (no regression)', () => {
   const r = resolveDirectionFromLabel('Tin nhắn do Bạn gửi lúc 10:09 sáng: xin chào', 'Người dùng Facebook');
   assert.equal(r.matched, true);

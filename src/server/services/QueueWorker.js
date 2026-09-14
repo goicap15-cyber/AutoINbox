@@ -11,6 +11,8 @@ class QueueWorker {
     this.isCampaignEnabled = () => false;
     this.onQueueFail = null;
     this.database = null;
+    this.dispatchTimeoutMs = 3 * 60 * 1000;
+    this.dispatchWatchdogs = new Map();
   }
 
   configure(config) {
@@ -18,6 +20,9 @@ class QueueWorker {
     if (config.onQueueFail) this.onQueueFail = config.onQueueFail;
     if (config.campaignEnabled) this.isCampaignEnabled = config.campaignEnabled;
     if (config.database) this.database = config.database;
+    if (Number.isFinite(config.dispatchTimeoutMs)) {
+      this.dispatchTimeoutMs = Math.max(1, Number(config.dispatchTimeoutMs));
+    }
   }
 
   getDatabaseArgument() {
@@ -33,10 +38,87 @@ class QueueWorker {
 
   stop() {
     this.isRunning = false;
+    for (const timer of this.dispatchWatchdogs.values()) clearTimeout(timer);
+    this.dispatchWatchdogs.clear();
     console.log('[QueueWorker] Stopped.');
   }
 
+  clearDispatchWatchdog(queueId) {
+    const key = String(queueId || '');
+    const timer = this.dispatchWatchdogs.get(key);
+    if (timer) clearTimeout(timer);
+    this.dispatchWatchdogs.delete(key);
+  }
+
+  acknowledgeDispatch(queueId) {
+    this.clearDispatchWatchdog(queueId);
+  }
+
+  scheduleDispatchWatchdog(message) {
+    if (!message?.outbound_attempt_id) return;
+    this.clearDispatchWatchdog(message.id);
+    const timer = setTimeout(() => {
+      this.dispatchWatchdogs.delete(String(message.id));
+      try {
+        const database = this.getDatabaseArgument();
+        const queue = MessageQueueRepository.getStatus(message.id, database);
+        const attempt = OutboundAttemptRepository.getById(message.outbound_attempt_id, database);
+        if (queue?.status !== 'processing' || attempt?.status !== 'dispatching') return;
+        console.warn('[QueueWorker] Dispatch acknowledgement timed out for message ' + message.id + '.');
+        this.fail(message, 'EXTENSION_DISPATCH_TIMEOUT');
+      } catch (error) {
+        console.error('[QueueWorker] Dispatch watchdog failed:', error.message);
+      }
+    }, this.dispatchTimeoutMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.dispatchWatchdogs.set(String(message.id), timer);
+  }
+
+  recoverStaleRichDispatches(options = {}) {
+    const database = this.database || require('../database/db');
+    const dispatchTimeoutMs = Number.isFinite(options.dispatchTimeoutMs)
+      ? Number(options.dispatchTimeoutMs)
+      : this.dispatchTimeoutMs;
+    const confirmationTimeoutMs = Number.isFinite(options.confirmationTimeoutMs)
+      ? Number(options.confirmationTimeoutMs)
+      : 3 * 60 * 1000;
+    const rows = database.prepare(`
+      SELECT queue.*, attempt.status AS attempt_status,
+             attempt.dispatched_at AS attempt_dispatched_at,
+             attempt.updated_at AS attempt_updated_at
+      FROM message_queue queue
+      JOIN outbound_attempts attempt ON attempt.id = queue.outbound_attempt_id
+      WHERE queue.status = 'processing'
+        AND attempt.status IN ('dispatching', 'awaiting_confirmation')
+    `).all();
+    const recovered = { dispatching: 0, awaiting_confirmation: 0 };
+    const now = Date.now();
+    const parseTimestamp = (value) => {
+      if (!value) return NaN;
+      const raw = String(value);
+      return Date.parse(raw.includes('T') ? raw : raw.replace(' ', 'T') + 'Z');
+    };
+
+    for (const row of rows) {
+      const timestamp = parseTimestamp(
+        row.attempt_dispatched_at || row.attempt_updated_at || row.processed_at || row.created_at
+      );
+      if (!Number.isFinite(timestamp)) continue;
+      const timeoutMs = row.attempt_status === 'dispatching'
+        ? dispatchTimeoutMs
+        : confirmationTimeoutMs;
+      if (now - timestamp < timeoutMs) continue;
+      const reason = row.attempt_status === 'dispatching'
+        ? 'EXTENSION_DISPATCH_TIMEOUT'
+        : 'CONFIRMATION_TIMEOUT';
+      this.fail(row, reason);
+      recovered[row.attempt_status] += 1;
+    }
+    return recovered;
+  }
+
   fail(message, reason) {
+    this.clearDispatchWatchdog(message.id);
     const database = this.getDatabaseArgument();
     MessageQueueRepository.updateStatus(message.id, 'failed', reason, database);
     if (message.outbound_attempt_id) {
@@ -77,7 +159,9 @@ class QueueWorker {
     }
     return {
       id: message.attachment_id,
-      media_type: message.attachment_media_type || 'image',
+      media_type: String(message.attachment_mime_type || '').startsWith('video/')
+        ? 'video'
+        : (message.attachment_media_type || 'image'),
       mime_type: message.attachment_mime_type,
       name: message.attachment_name,
       byte_size: bytes.length,
@@ -164,6 +248,14 @@ class QueueWorker {
       return { message, outcome: 'failed' };
     }
 
+    const ws = this.getExtensionConnection ? this.getExtensionConnection(message.account_id) : null;
+    if (!ws || ws.readyState !== 1) {
+      console.warn('[QueueWorker] Extension not connected for account ' + message.account_id + '.');
+      this.fail(message, 'EXTENSION_NOT_CONNECTED');
+      return { message, outcome: 'failed' };
+    }
+
+    // Move into dispatching only after an existing extension socket is ready.
     if (isRich) {
       const transitioned = OutboundAttemptRepository.transition(
         message.outbound_attempt_id,
@@ -187,13 +279,6 @@ class QueueWorker {
       }
     }
 
-    const ws = this.getExtensionConnection ? this.getExtensionConnection(message.account_id) : null;
-    if (!ws || ws.readyState !== 1) {
-      console.warn('[QueueWorker] Extension not connected for account ' + message.account_id + '.');
-      this.fail(message, 'EXTENSION_NOT_CONNECTED');
-      return { message, outcome: 'failed' };
-    }
-
     const resolvedContactName = message.expected_contact_name || (() => {
       try {
         const db = database || require('../database/db');
@@ -205,7 +290,6 @@ class QueueWorker {
         return null;
       }
     })();
-
     const envelope = {
       type: 'SEND_QUEUED_MESSAGE',
       data: {
@@ -213,6 +297,7 @@ class QueueWorker {
         queue_id: message.id,
         outbound_attempt_id: message.outbound_attempt_id || null,
         thread_id: message.thread_id,
+        recipient_thread_id: message.recipient_thread_id || null,
         thread_url: message.thread_url || null,
         expected_contact_name: resolvedContactName || null,
         account_id: message.account_id,
@@ -236,6 +321,7 @@ class QueueWorker {
       this.fail(message, 'EXTENSION_DISPATCH_FAILED');
       return { message, outcome: 'failed' };
     }
+    this.scheduleDispatchWatchdog(message);
     return { message, envelope, outcome: 'dispatched' };
   }
 

@@ -48,10 +48,128 @@ function shouldCommitDirectionFlip(stableMessageId, existingIsOutgoing, proposed
 }
 
 class ConversationRepository {
+  static bubbleFamilyId(messageId) {
+    return String(messageId || '').replace(/__bubble_\d+$/, '');
+  }
+
+  // Facebook may group several real, consecutive bubbles under one native
+  // message wrapper. The suffix is an occurrence identity, not a duplicate
+  // marker: mid.x, mid.x__bubble_1, ... must remain distinct even when their
+  // text or media payload is identical.
+  static bubbleOccurrenceId(messageId) {
+    const value = String(messageId || '');
+    const match = value.match(/__bubble_(\d+)$/);
+    return match ? Number(match[1]) : 0;
+  }
+
+  static findEquivalentBubbleMessage({ threadId, fbMessageId, content, isOutgoing, timestampMs }, database = getDefaultDb()) {
+    const messageId = String(fbMessageId || '');
+    if (!messageId) return null;
+    const familyId = this.bubbleFamilyId(messageId);
+    const rows = database.prepare(`
+      SELECT id, fb_message_id, client_message_id, timestamp_ms
+      FROM messages
+      WHERE thread_id = ? AND COALESCE(content, '') = COALESCE(?, '') AND is_outgoing = ?
+        AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 2000)
+      ORDER BY id DESC LIMIT 30
+    `).all(threadId, content ?? '', isOutgoing ? 1 : 0, Number(timestampMs) || 0, Number(timestampMs) || 0);
+    const occurrenceId = this.bubbleOccurrenceId(messageId);
+    return rows.find((row) => this.bubbleFamilyId(row.fb_message_id) === familyId
+      && this.bubbleOccurrenceId(row.fb_message_id) === occurrenceId) || null;
+  }
+
+  static findEquivalentCrossSourceMessage({ threadId, fbMessageId, content, mediaUrl, isOutgoing, timestampMs }, database = getDefaultDb()) {
+    const incomingId = String(fbMessageId || '');
+    if (!threadId || !incomingId) return null;
+    const isSynthetic = (value) => /^(?:dom_|sidebar_preview_)/.test(String(value || ''));
+    const observedTimestamp = Number(timestampMs) || 0;
+    const rows = database.prepare(`
+      SELECT id, fb_message_id, client_message_id, timestamp_ms
+      FROM messages
+      WHERE thread_id = ? AND is_outgoing = ?
+        AND (
+          (? IS NOT NULL AND ? <> '' AND media_url = ?)
+          OR ((? IS NULL OR ? = '') AND COALESCE(content, '') = COALESCE(?, ''))
+        )
+        AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 90000)
+      ORDER BY id DESC LIMIT 10
+    `).all(threadId, isOutgoing ? 1 : 0,
+      mediaUrl || null, mediaUrl || null, mediaUrl || null,
+      mediaUrl || null, mediaUrl || null, content ?? '',
+      observedTimestamp, observedTimestamp);
+    return rows.find((row) => isSynthetic(incomingId) !== isSynthetic(row.fb_message_id)) || null;
+  }
+
+  static dedupeBubbleFamilyMessages(messages = []) {
+    const result = [];
+    const indexes = new Map();
+    for (const message of messages) {
+      const key = [
+        this.bubbleFamilyId(message.fb_message_id),
+        this.bubbleOccurrenceId(message.fb_message_id),
+        message.is_outgoing ? 1 : 0,
+        String(message.content || ''),
+        String(message.media_type || 'text')
+      ].join('\u0000');
+      const existingIndex = indexes.get(key);
+      if (existingIndex === undefined) {
+        indexes.set(key, result.length);
+        result.push(message);
+        continue;
+      }
+      const existing = result[existingIndex];
+      const existingIsBase = this.bubbleFamilyId(existing.fb_message_id) === String(existing.fb_message_id || '');
+      const currentIsBase = this.bubbleFamilyId(message.fb_message_id) === String(message.fb_message_id || '');
+      if ((!existing.client_message_id && message.client_message_id) || (!existingIsBase && currentIsBase)) {
+        result[existingIndex] = message;
+      }
+    }
+    return result;
+  }
+
+  static promoteSidebarPreview({ threadId, fbMessageId, content, isOutgoing, timestampMs }, database = getDefaultDb()) {
+    if (!threadId || !fbMessageId || isOutgoing || !content || String(fbMessageId).startsWith('sidebar_preview_')) return null;
+    const observedTimestamp = Number(timestampMs) || 0;
+    const candidates = database.prepare(`
+      SELECT id, fb_message_id FROM messages
+      WHERE thread_id = ? AND fb_message_id LIKE 'sidebar_preview_%'
+        AND is_outgoing = 0 AND COALESCE(content, '') = COALESCE(?, '')
+        AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 120000)
+      ORDER BY id DESC LIMIT 2
+    `).all(threadId, content, observedTimestamp, observedTimestamp);
+    if (candidates.length !== 1) return null;
+    try {
+      database.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?').run(String(fbMessageId), candidates[0].id);
+      return { id: candidates[0].id, previousFbMessageId: candidates[0].fb_message_id, fbMessageId: String(fbMessageId) };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static hasNewerOutgoingAfterMatchingIncoming(threadId, content, database = getDefaultDb()) {
+    if (!threadId || !content) return false;
+    return Boolean(database.prepare(`
+      SELECT 1
+      FROM messages incoming
+      WHERE incoming.thread_id = ? AND incoming.is_outgoing = 0
+        AND incoming.fb_message_id NOT LIKE 'sidebar_preview_%'
+        AND COALESCE(incoming.content, '') = COALESCE(?, '')
+        AND EXISTS (
+          SELECT 1 FROM messages outgoing
+          WHERE outgoing.thread_id = incoming.thread_id AND outgoing.is_outgoing = 1
+            AND (
+              COALESCE(outgoing.timestamp_ms, 0) > COALESCE(incoming.timestamp_ms, 0)
+              OR (COALESCE(outgoing.timestamp_ms, 0) = COALESCE(incoming.timestamp_ms, 0) AND outgoing.id > incoming.id)
+            )
+        )
+      ORDER BY incoming.id DESC LIMIT 1
+    `).get(threadId, content));
+  }
+
   static upsertThread(threadData, database = getDefaultDb()) {
     const { id, account_id, thread_url, contact_name, last_message, is_unread, source_id, inbox_folder } = threadData;
     const external_thread_id = String(threadData.external_thread_id || threadData.thread_id || id);
-    const preferredId = String(id || external_thread_id);
+    let preferredId = String(id || external_thread_id);
     if (isBlacklistedThreadId(preferredId) || isBlacklistedThreadId(external_thread_id)) {
       return null;
     }
@@ -59,6 +177,7 @@ class ConversationRepository {
     const normalizedInboxFolder = ['INBOX', 'MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(String(inbox_folder || '').trim())
       ? String(inbox_folder).trim()
       : null;
+    const inboxFolderVerified = threadData.inbox_folder_verified === true ? 1 : 0;
 
     let existing = null;
     if (source_id && external_thread_id) {
@@ -74,7 +193,19 @@ class ConversationRepository {
       `).get(account_id, external_thread_id);
     }
     if (!existing) {
-      existing = database.prepare('SELECT id, contact_name FROM threads WHERE id = ?').get(preferredId);
+      const idCollision = database.prepare('SELECT id, contact_name, account_id FROM threads WHERE id = ?').get(preferredId);
+      if (idCollision && account_id && String(idCollision.account_id) !== String(account_id)) {
+        // Facebook participant/thread ids are global and can appear under
+        // several connected accounts. Never reuse another account's CRM row.
+        preferredId = preferredId.startsWith(`${account_id}:`)
+          ? preferredId
+          : `${account_id}:${external_thread_id}`;
+        existing = database.prepare(
+          'SELECT id, contact_name, account_id FROM threads WHERE id = ? AND account_id = ?'
+        ).get(preferredId, account_id);
+      } else {
+        existing = idCollision;
+      }
     }
 
     if (existing) {
@@ -95,7 +226,10 @@ class ConversationRepository {
             last_message = COALESCE(?, last_message),
             is_unread = COALESCE(?, is_unread),
             inbox_folder = CASE
-              WHEN inbox_folder = 'INBOX' AND ? IN ('MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE') THEN inbox_folder
+              WHEN inbox_folder = 'INBOX'
+                AND ? IN ('MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')
+                AND ? = 0
+              THEN inbox_folder
               ELSE COALESCE(?, inbox_folder)
             END
         WHERE id = ?
@@ -107,6 +241,7 @@ class ConversationRepository {
           last_message, 
           is_unread === undefined ? null : (is_unread ? 1 : 0), 
           normalizedInboxFolder,
+          inboxFolderVerified,
           normalizedInboxFolder,
           existing.id
       );
@@ -212,7 +347,10 @@ class ConversationRepository {
         created_at = excluded.created_at,
         is_outgoing = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.is_outgoing ELSE messages.is_outgoing END,
         sender_role = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.sender_role ELSE messages.sender_role END,
-        sequence_order = CASE WHEN excluded.sequence_order IS NOT NULL THEN excluded.sequence_order ELSE messages.sequence_order END,
+        -- Once a bubble is stored its visible position is immutable. A later
+        -- partial DOM/history scan may have a different local index and must
+        -- not move that existing text.
+        sequence_order = messages.sequence_order,
         direction_status = CASE WHEN excluded.direction_status = 'confirmed' THEN 'confirmed' ELSE messages.direction_status END
     `);
     const transaction = database.transaction((msgs) => {
@@ -235,6 +373,41 @@ class ConversationRepository {
         const mediaUrl = msg.media_url || null;
         const observedCreatedAt = msg.created_at || (observedTimestampMs > 0 ? new Date(observedTimestampMs).toISOString() : new Date().toISOString());
         let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+        let promotedSidebarPreview = false;
+        if (!existing && msg.fb_message_id) {
+          const promoted = ConversationRepository.promoteSidebarPreview({
+            threadId, fbMessageId: msg.fb_message_id, content, isOutgoing,
+            timestampMs: observedTimestampMs
+          }, database);
+          if (promoted) {
+            stableId = promoted.fbMessageId;
+            promotedSidebarPreview = true;
+            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+          }
+        }
+        if (!existing && msg.fb_message_id) {
+          const crossSource = ConversationRepository.findEquivalentCrossSourceMessage({
+            threadId, fbMessageId: msg.fb_message_id, content, mediaUrl,
+            isOutgoing, timestampMs: observedTimestampMs
+          }, database);
+          if (crossSource) {
+            stableId = crossSource.fb_message_id;
+            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+          }
+        }
+        if (!existing && msg.fb_message_id) {
+          const equivalentBubble = ConversationRepository.findEquivalentBubbleMessage({
+            threadId,
+            fbMessageId: msg.fb_message_id,
+            content,
+            isOutgoing,
+            timestampMs: observedTimestampMs
+          }, database);
+          if (equivalentBubble) {
+            stableId = equivalentBubble.fb_message_id;
+            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+          }
+        }
         // Facebook sometimes omits data-message-id during a partial/reloaded DOM
         // render. The extension then generates an occurrence-based dom_* id,
         // whose suffix can change when fewer older rows are mounted. Reuse one
@@ -282,12 +455,15 @@ class ConversationRepository {
           const timestampChanged = shouldUpgradeTimestamp && (
             timestampMs !== (existing.timestamp_ms || 0) || timestampSource !== existing.timestamp_source
           );
-          const sequenceChanged = observedSequence !== null
-            && observedSequence !== Number(existing.sequence_order);
+          const sequenceChanged = false;
           const roleChanged = existing.sender_role !== senderRole;
           const mediaChanged = (mediaUrl && existing.media_url !== mediaUrl) || (mediaType !== 'text' && existing.media_type !== mediaType);
           const changed = existing.content !== content || mediaChanged || timestampChanged || directionChanged || sequenceChanged || roleChanged;
-          if (!changed) { result.skippedCount += 1; continue; }
+          if (!changed) {
+            if (promotedSidebarPreview) result.updatedIds.push(stableId);
+            else result.skippedCount += 1;
+            continue;
+          }
           insertMsg.run(threadId, stableId, senderId, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
           result.updatedIds.push(stableId);
           continue;
@@ -305,20 +481,15 @@ class ConversationRepository {
       SELECT id, timestamp_ms, sequence_order
       FROM messages
       WHERE thread_id = ?
+      ORDER BY
+        CASE WHEN COALESCE(timestamp_ms, 0) > 0 THEN 0 ELSE 1 END ASC,
+        -- Facebook labels are minute-precision. Millisecond suffixes are DOM
+        -- offsets/optimistic send times, not chronology. Within one minute the
+        -- authoritative DOM sequence must win.
+        CAST(COALESCE(NULLIF(timestamp_ms, 0), CAST(strftime('%s', created_at) AS INTEGER) * 1000, id) / 60000 AS INTEGER) ASC,
+        COALESCE(sequence_order, id) ASC,
+        id ASC
     `).all(threadId);
-
-    // Sort by timestamp_ms when valid and distinct, fallback to sequence_order then id
-    rows.sort((a, b) => {
-      const timeA = Number(a.timestamp_ms) || 0;
-      const timeB = Number(b.timestamp_ms) || 0;
-      if (timeA > 0 && timeB > 0 && timeA !== timeB) {
-        return timeA - timeB;
-      }
-      const seqA = a.sequence_order !== null && a.sequence_order !== undefined ? Number(a.sequence_order) : Number(a.id);
-      const seqB = b.sequence_order !== null && b.sequence_order !== undefined ? Number(b.sequence_order) : Number(b.id);
-      if (seqA !== seqB) return seqA - seqB;
-      return Number(a.id) - Number(b.id);
-    });
 
     const update = database.prepare('UPDATE messages SET sequence_order = ? WHERE id = ?');
     const normalize = database.transaction((orderedRows) => {
@@ -326,6 +497,60 @@ class ConversationRepository {
     });
     normalize(rows);
     return rows.length;
+  }
+
+  // Reconcile only the rows that Messenger has just exposed in one DOM
+  // window. Their relative visual order is authoritative, while rows outside
+  // that window keep their current slots. This repairs stale realtime/
+  // optimistic ranks without moving unrelated older history around.
+  static reconcileObservedDomSequence(threadId, observedMessages = [], database = getDefaultDb()) {
+    const rows = database.prepare(`
+      SELECT id, fb_message_id, COALESCE(sequence_order, id) AS sequence_order
+      FROM messages
+      WHERE thread_id = ?
+      ORDER BY COALESCE(sequence_order, id) ASC, id ASC
+    `).all(threadId);
+    if (rows.length < 2 || !Array.isArray(observedMessages) || observedMessages.length < 2) return 0;
+
+    const byFacebookId = new Map(rows
+      .filter((row) => row.fb_message_id)
+      .map((row) => [String(row.fb_message_id), row]));
+    const seenRowIds = new Set();
+    const observedRows = [];
+    for (const message of observedMessages) {
+      const observedId = String(message?.fb_message_id || '');
+      if (!observedId) continue;
+      let row = byFacebookId.get(observedId);
+      // Media companions can be collapsed into their native parent before
+      // this pass. Resolve that durable row while retaining the media's DOM
+      // position in the observed sequence.
+      if (!row && observedId.endsWith('_media')) {
+        row = byFacebookId.get(observedId.slice(0, -'_media'.length));
+      }
+      if (!row || seenRowIds.has(row.id)) continue;
+      seenRowIds.add(row.id);
+      observedRows.push(row);
+    }
+    if (observedRows.length < 2) return 0;
+
+    const observedRowIds = new Set(observedRows.map((row) => row.id));
+    const slots = [];
+    rows.forEach((row, index) => {
+      if (observedRowIds.has(row.id)) slots.push(index);
+    });
+    if (slots.length !== observedRows.length) return 0;
+
+    const alreadyOrdered = slots.every((slot, index) => rows[slot].id === observedRows[index].id);
+    if (alreadyOrdered) return 0;
+
+    const reconciled = [...rows];
+    slots.forEach((slot, index) => { reconciled[slot] = observedRows[index]; });
+    const update = database.prepare('UPDATE messages SET sequence_order = ? WHERE id = ?');
+    const apply = database.transaction((orderedRows) => {
+      orderedRows.forEach((row, index) => update.run(index + 1, row.id));
+    });
+    apply(reconciled);
+    return observedRows.length;
   }
   // Test-only: clears direction-flip hysteresis state between test cases so
   // one test's pending candidate can't leak into another's assertions.

@@ -35,10 +35,13 @@ export default function AttachmentPreview({
   }
 
   const isImage = attachment.media_type === 'image';
+  const isVideo = attachment.media_type === 'video';
   return (
     <div className="mb-2.5 flex items-center gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-2.5 shadow-sm">
       <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-[var(--color-bg-hover)] text-[var(--color-accent)]">
-        {isImage && attachment.preview_url
+        {isVideo && attachment.preview_url
+          ? React.createElement('video', { src: attachment.preview_url, muted: true, preload: 'metadata', className: 'h-full w-full object-cover' })
+          : isImage && attachment.preview_url
           ? (
               <img
                 src={attachment.preview_url}

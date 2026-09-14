@@ -8,6 +8,7 @@
 })(typeof self !== 'undefined' ? self : globalThis, () => {
   const SUPPORTED_SOURCE_TYPES = new Set(['personal_messenger', 'page_messenger']);
   const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+  const SUPPORTED_VIDEO_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/x-msvideo']);
   const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
   function fail(code, message) {
@@ -61,8 +62,9 @@
 
   function validateAttachmentItem(attachment, prefix) {
     const isImage = attachment.media_type === 'image' && SUPPORTED_IMAGE_TYPES.has(attachment.mime_type);
+    const isVideo = attachment.media_type === 'video' && SUPPORTED_VIDEO_TYPES.has(attachment.mime_type);
     const isGenericFile = attachment.media_type === 'file' && typeof attachment.mime_type === 'string' && attachment.mime_type.length > 0;
-    if (!isImage && !isGenericFile) {
+    if (!isImage && !isVideo && !isGenericFile) {
       fail(`${prefix}_ATTACHMENT_UNSUPPORTED`, 'Attachment chưa được hỗ trợ cho nguồn gửi này.');
     }
     if (

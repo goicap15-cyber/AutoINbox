@@ -2,6 +2,7 @@ import React from 'react';
 import { BellRing, Clock3, Archive } from 'lucide-react';
 import { getStatusBadgeStyle } from '../utils/color.js';
 import { getReminderDueAriaLabel, getReminderDueState } from '../utils/reminderPresentation.js';
+import { normalizeThreadTimestamp } from '../utils/threadActivity.js';
 
 const AVATAR_COLORS = ['#2684ff', '#a855f7', '#0fbd74', '#ec4899', '#ff6b2c', '#00b8a9', '#6366f1', '#ff3b4f', '#f5b51b', '#06b6d4'];
 
@@ -13,7 +14,7 @@ function pickAvatarColor(id) {
 
 function formatTime(value) {
   if (!value) return '';
-  const parsed = new Date(value);
+  const parsed = new Date(normalizeThreadTimestamp(value));
   if (Number.isNaN(parsed.getTime())) return String(value);
   return parsed.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
 }
@@ -30,7 +31,11 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
   const accountName = account ? (account.name || account.id) : (thread.account_id || 'Facebook');
   const sourceType = thread.source_type || source?.source_type || 'personal_messenger';
   const sourceName = thread.source_name || source?.display_name || accountName;
-  const sourceLabel = sourceType === 'page_messenger' ? 'Page · ' + sourceName : 'Messenger · ' + sourceName;
+  const sourceLabel = sourceType === 'page_messenger' ? 'Gửi bằng Page: ' + sourceName : 'Gửi bằng: ' + accountName;
+  const accountColor = pickAvatarColor(thread.account_id || thread.source_id || sourceName);
+  const senderAccountId = sourceType === 'page_messenger' ? (source?.external_id || thread.source_external_id || thread.source_id) : thread.account_id;
+  const senderAccountSuffix = String(senderAccountId || '').slice(-4);
+  const senderAccountAvatarUrl = sourceType === 'page_messenger' ? source?.avatar_url : (account?.avatar_url || source?.avatar_url);
   const sourceClass = sourceType === 'page_messenger'
     ? 'bg-violet-500/10 text-violet-500 border border-violet-500/20'
     : 'bg-sky-500/10 text-sky-500 border border-sky-500/20';
@@ -106,7 +111,16 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
             )}
             {thread.archived_at && (<span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium bg-[var(--color-bg-surface)] text-[var(--color-text-muted)]" title="Đã lưu trữ"><Archive size={11} /> Lưu</span>)}
             {thread.status_name && (<span className="text-xs px-2 py-0.5 rounded-full font-medium truncate max-w-[100px]" style={getStatusBadgeStyle(thread.status_color)} title={thread.status_name}>{thread.status_name}</span>)}
-            {(showAccountName || thread.source_id) && (<span className={'text-[11px] px-1.5 py-0.5 rounded-full truncate max-w-[145px] ' + sourceClass} title={sourceLabel}>{sourceLabel}</span>)}
+            {(showAccountName || thread.source_id) && (
+              <span className={'inline-flex max-w-[210px] items-center gap-1.5 truncate rounded-full px-2 py-0.5 text-[11px] font-bold ' + sourceClass} title={`${sourceLabel} · ID ${thread.account_id || source?.external_id || ''}`}>
+                <span className="relative flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full text-[9px] font-extrabold text-white" style={{ backgroundColor: accountColor }}>
+                  {String(sourceName || accountName || 'F').charAt(0).toUpperCase()}
+                  {senderAccountAvatarUrl && <img src={senderAccountAvatarUrl} alt="" className="absolute inset-0 h-full w-full object-cover" onError={(event) => { event.currentTarget.style.display = 'none'; }} />}
+                </span>
+                <span className="truncate">{sourceLabel}</span>
+                {senderAccountSuffix && <span className="shrink-0 font-mono text-[9px] opacity-75">#{senderAccountSuffix}</span>}
+              </span>
+            )}
           </div>
           {unreadCount > 0 && (
             <span className="bg-[var(--color-accent)] text-[var(--color-text-on-accent)] text-xs rounded-full min-w-5 h-5 px-1.5 flex items-center justify-center font-bold shadow-sm animate-pulse">

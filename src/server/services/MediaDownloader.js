@@ -15,6 +15,7 @@ class MediaDownloader {
   // Tải media đính kèm về ổ cứng local (chỉ dành cho tin nhắn MỚI)
   async downloadNewMessageMedia(threadId, mediaUrl, mediaType) {
     if (!mediaUrl) return null;
+    if (!/^https?:\/\//i.test(String(mediaUrl))) return null;
 
     try {
       const threadMediaDir = path.join(this.mediaBaseDir, threadId);
@@ -23,7 +24,12 @@ class MediaDownloader {
       }
 
       const extMap = { image: '.jpg', video: '.mp4', voice: '.mp3', file: '.dat' };
-      const ext = extMap[mediaType] || '.bin';
+      const videoPosterMatch = mediaType === 'video'
+        ? String(mediaUrl).match(/\.(jpe?g|png|webp|gif)(?:\?|$)/i)
+        : null;
+      const ext = videoPosterMatch
+        ? '.' + videoPosterMatch[1].toLowerCase().replace('jpeg', 'jpg')
+        : (extMap[mediaType] || '.bin');
       const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}${ext}`;
       const localFilePath = path.join(threadMediaDir, fileName);
 

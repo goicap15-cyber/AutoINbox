@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const CampaignAttachmentService = require('./CampaignAttachmentService');
 const RichMessageCapabilityService = require('./RichMessageCapabilityService');
 const OutboundAttachmentRepository = require('../repositories/OutboundAttachmentRepository');
 const {
@@ -40,6 +39,60 @@ function mapValidationError(error) {
   );
 }
 
+function readRichMessageFilePart(buffer, headerStart, headerEnd, bodyStart, bodyEnd) {
+  const headers = buffer.subarray(headerStart, headerEnd).toString('latin1');
+  const marker = 'filename=';
+  const nameStart = headers.indexOf(marker);
+  if (nameStart < 0) return null;
+  const quote = String.fromCharCode(34);
+  const valueStart = nameStart + marker.length + 1;
+  const nameEnd = headers.indexOf(quote, valueStart);
+  if (nameEnd < 0) return null;
+  const originalName = headers.slice(valueStart, nameEnd);
+  const lines = headers.split(String.fromCharCode(13, 10));
+  const typeLine = lines.find((line) => line.toLowerCase().startsWith('content-type:'));
+  const declaredMimeType = typeLine
+    ? typeLine.slice(typeLine.indexOf(':') + 1).trim()
+    : 'application/octet-stream';
+  const file = {
+    originalName,
+    declaredMimeType,
+    buffer: buffer.subarray(bodyStart, bodyEnd)
+  };
+  return { fields: {}, file, files: [file] };
+}
+
+function parseRichMessageFilePart(buffer, boundary) {
+  const first = Buffer.from('--' + boundary, 'latin1');
+  const next = Buffer.from('\r\n--' + boundary, 'latin1');
+  const separator = Buffer.from('\r\n\r\n', 'latin1');
+  let cursor = buffer.indexOf(first);
+  while (cursor >= 0) {
+    const headerStart = cursor + first.length + 2;
+    const headerEnd = buffer.indexOf(separator, headerStart);
+    if (headerEnd < 0) break;
+    const bodyStart = headerEnd + separator.length;
+    const bodyEnd = buffer.indexOf(next, bodyStart);
+    if (bodyEnd < 0) break;
+    const result = readRichMessageFilePart(buffer, headerStart, headerEnd, bodyStart, bodyEnd);
+    if (result) return result;
+    cursor = bodyEnd + 2;
+  }
+  throw new Error('Missing upload file');
+}
+
+// Zero-copy multipart path for large rich-message videos.
+function parseRichMessageMultipart(buffer, contentType) {
+  if (!Buffer.isBuffer(buffer)) throw new Error('Invalid multipart body');
+  const token = String(contentType || '').split('boundary=')[1];
+  let boundary = token ? token.split(';')[0].trim() : '';
+  if (boundary.startsWith(String.fromCharCode(34)) && boundary.endsWith(String.fromCharCode(34))) {
+    boundary = boundary.slice(1, -1);
+  }
+  if (!boundary) throw new Error('Missing multipart boundary');
+  return parseRichMessageFilePart(buffer, boundary);
+}
+
 class OutboundAttachmentService {
   static getDefaultStorageDir() {
     return path.join(APP_DATA_ROOT, 'outbound-attachments');
@@ -47,7 +100,7 @@ class OutboundAttachmentService {
 
   static parseMultipartBody(buffer, contentType) {
     try {
-      return CampaignAttachmentService.parseMultipartBody(buffer, contentType);
+      return parseRichMessageMultipart(buffer, contentType);
     } catch (error) {
       throw new OutboundAttachmentError(
         error.code || 'ATTACHMENT_INVALID_MULTIPART',
@@ -84,7 +137,7 @@ class OutboundAttachmentService {
         originalName,
         declaredMimeType,
         allowedMimeTypes,
-        maxBytes: Math.min(capability.image.max_bytes, capability.file.max_bytes),
+        maxBytes: Math.min(capability.image.max_bytes, capability.video?.max_bytes || capability.file.max_bytes, capability.file.max_bytes),
         enforceExtension: true
       });
     } catch (error) {

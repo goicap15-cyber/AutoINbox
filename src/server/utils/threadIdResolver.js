@@ -12,12 +12,19 @@ function resolveInternalThreadId(database, accountId, rawThreadId) {
     row = database.prepare(
       'SELECT id FROM threads WHERE account_id = ? AND (id = ? OR COALESCE(external_thread_id, id) = ? OR id LIKE ?)'
     ).get(accountId, rawStr, rawStr, `%:${rawStr}`);
-  }
-  if (!row) {
-    row = database.prepare(
-      'SELECT id FROM threads WHERE id = ? OR COALESCE(external_thread_id, id) = ? OR id LIKE ?'
+    if (row) return row.id;
+
+    const crossAccountCollision = database.prepare(
+      'SELECT id, account_id FROM threads WHERE id = ? OR COALESCE(external_thread_id, id) = ? OR id LIKE ? LIMIT 1'
     ).get(rawStr, rawStr, `%:${rawStr}`);
+    if (crossAccountCollision && String(crossAccountCollision.account_id) !== String(accountId)) {
+      return rawStr.startsWith(`${accountId}:`) ? rawStr : `${accountId}:${rawStr}`;
+    }
+    return rawStr;
   }
+  row = database.prepare(
+    'SELECT id FROM threads WHERE id = ? OR COALESCE(external_thread_id, id) = ? OR id LIKE ?'
+  ).get(rawStr, rawStr, `%:${rawStr}`);
   return row ? row.id : rawStr;
 }
 
