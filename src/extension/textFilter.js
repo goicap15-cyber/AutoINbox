@@ -1,6 +1,7 @@
 // AutoChatbot - Extension Text Filter Utility
 
 (function () {
+  const RELATIVE_TIME_METADATA_RE = /^\d+\s*(?:gi\u00e2y|ph\u00fat|gi\u1edd|ng\u00e0y|tu\u1ea7n|th\u00e1ng|n\u0103m|seconds?|minutes?|hours?|days?|weeks?|months?|years?)(?:\s*(?:tr\u01b0\u1edbc|ago))?$/iu;
   const SYSTEM_PATTERNS = [
     // E2EE & Security Notices
     /Tin nhắn và cuộc gọi (?:đang )?được bảo mật/i,
@@ -66,6 +67,9 @@
     /^\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM))?$/i,
     /^(?:T[2-7]|CN)$/i,
 
+    // Media label placeholders (e.g. [Ảnh], [Video], [File], [Attachment])
+    /^\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment)\]?$/i,
+
     // Full date/time separator header Business Suite renders between message
     // groups (e.g. "13:52 6 Tháng 8, 2026") - mirrors the same addition in
     // src/server/utils/textFilter.js (keep both copies in sync).
@@ -81,6 +85,7 @@
     if (!text || typeof text !== 'string') return true;
     const trimmed = text.trim();
     if (!trimmed) return true;
+    if (RELATIVE_TIME_METADATA_RE.test(trimmed)) return true;
 
     for (const pat of SYSTEM_PATTERNS) {
       if (pat.test(trimmed)) return true;
@@ -91,6 +96,12 @@
   function cleanMessageText(rawText) {
     if (!rawText || typeof rawText !== 'string') return '';
     let text = rawText.trim();
+
+    // Messenger can prepend its unread divider to the first visible bubble.
+    text = text.replace(/^(?:Tin nh\u1eafn ch\u01b0a \u0111\u1ecdc|Unread messages?):\s*/iu, '').trim();
+
+    // Messenger can prepend its unread divider to the first visible bubble.
+    text = text.replace(/^(?:Tin nh\u1eafn ch\u01b0a \u0111\u1ecdc|Unread messages?):\s*/iu, '').trim();
     if (!text) return '';
 
     // 1. Strip accessibility prefix (handling 'Tin nhắn do X gửi lúc Thứ Năm 18:00ch:', 'Tin nhắn do X gửi lúc 18:00:', etc.)
@@ -109,6 +120,7 @@
 
     // 2. Strip delivery status ONLY if appended on a separate line or after multi-space metadata (never strip inside normal text like 'Đã gửi hàng rồi')
     text = text.replace(/(?:\n|\r|\s{2,})(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen|Nhấn Enter để gửi)\s*$/i, '').trim();
+    text = text.replace(/(?<=\S)(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen)$/i, '').trim();
 
     // 3. Strip leading/trailing timestamps ONLY if isolated/standalone on line
     text = text.replace(/^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?\s*$/i, '').replace(/(?:\n|\r)\s*\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i, '').trim();

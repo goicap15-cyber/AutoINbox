@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { PhoneCall, PhoneOff, Check, X } from 'lucide-react';
 
-export default function IncomingCallModal({ callInfo, onClose, onSelectThread, onAnswerCall }) {
+export default function IncomingCallModal({ callInfo, onClose, onSelectThread, onAnswerCall, selectThreadOnAnswer = false }) {
   const [pendingAction, setPendingAction] = useState(null);
   const [actionError, setActionError] = useState('');
 
@@ -20,7 +20,9 @@ export default function IncomingCallModal({ callInfo, onClose, onSelectThread, o
 
   const answer = (action) => {
     if (pendingAction) return;
-    if (callInfo.thread_id) onSelectThread?.(callInfo.thread_id);
+    // Do not steal the operator's current conversation when handling a call.
+    // The previous behavior remains available through an explicit opt-in.
+    if (selectThreadOnAnswer && callInfo.thread_id) onSelectThread?.(callInfo.thread_id);
     setPendingAction(action);
     setActionError('');
     onAnswerCall?.(

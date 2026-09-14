@@ -4,8 +4,15 @@ const MessageQueueRepository = require('../repositories/MessageQueueRepository')
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const RETRYABLE_ERRORS = new Set([
   'EXTENSION_NOT_CONNECTED',
+  'EXTENSION_DISPATCH_FAILED',
+  'EXTENSION_ACK_TIMEOUT',
   'QUEUE_CONFIRMATION_TIMEOUT',
   'FACEBOOK_SEND_EXCEPTION',
+  'PAGE_SEND_FAILED',
+  'PERSONAL_SEND_FAILED',
+  'SEND_FAILED',
+  'COMPOSER_NOT_FOUND',
+  'COMPOSER_UNAVAILABLE',
   'COMPOSER_NOT_READY',
   'CDP_ENTER_FAILED',
   'CDP_INSERT_TEXT_FAILED'
@@ -289,6 +296,10 @@ class CampaignRunner {
         updatedRecipient?.status === 'failed' &&
         this.shouldRetry(updated, updatedRecipient, updatedRecipient.last_error_code)
       ) {
+        // Give Chrome time to recover from a service-worker restart, tab reload,
+        // or composer remount instead of burning every retry in the same tick.
+        const retryDelayMs = Math.max(1000, Math.min(5000, Number(updated.pacing_ms) || 2000));
+        await this.sleep(retryDelayMs);
         this.repositoryCall('resetRecipientForRetry', updatedRecipient.id);
         this.repositoryCall(
           'addAudit',

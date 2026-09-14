@@ -22,6 +22,7 @@ import AuthScreen from './components/AuthScreen.jsx';
 import EmployeeManagementModal from './components/EmployeeManagementModal.jsx';
 import { useSocket } from './hooks/useSocket.js';
 import { MessageSquare } from 'lucide-react';
+import { sortThreadsByActivity } from './utils/threadActivity.js';
 
 const THEME_VERSION = 'chat-redesign-v1';
 
@@ -37,6 +38,200 @@ function getVerifiedContactName(contact) {
   const name = String(contact?.name || contact?.contact_name || '').trim();
   return isPlaceholderContactName(name) ? '' : name;
 }
+
+const messageTime = (message) => {
+  // Local outgoing placeholders keep this anchor for their whole lifetime.
+  // Delivery confirmation may arrive later, but it must not move the bubble.
+  const anchor = Number(message?.order_anchor_ms);
+  if (Number.isFinite(anchor) && anchor > 0) return anchor;
+  const numeric = Number(message?.timestamp_ms);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsed = Date.parse(message?.created_at || '');
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const sortMessagesChronologically = (items = []) => items
+  .map((message, originalIndex) => ({ message, originalIndex }))
+  .sort((left, right) => {
+    const sequenceA = Number(left.message?.sequence_order ?? left.message?.id);
+    const sequenceB = Number(right.message?.sequence_order ?? right.message?.id);
+    // Persisted backend order is authoritative. A local placeholder without a
+    // backend sequence keeps its existing array position; timestamps never
+    // participate in chat ordering.
+    if (Number.isFinite(sequenceA) && Number.isFinite(sequenceB) && sequenceA !== sequenceB) {
+      return sequenceA - sequenceB;
+    }
+    return left.originalIndex - right.originalIndex;
+  })
+  .map(({ message }) => message);
+const preserveOrderAnchors = (incoming = [], existing = []) => {
+  const byClientId = new Map(existing.filter((m) => m?.client_message_id).map((m) => [String(m.client_message_id), m]));
+  const byFacebookId = new Map(existing.filter((m) => m?.fb_message_id).map((m) => [String(m.fb_message_id), m]));
+  return incoming.map((message) => {
+    const previous = (message.client_message_id && byClientId.get(String(message.client_message_id)))
+      || (message.fb_message_id && byFacebookId.get(String(message.fb_message_id)));
+    return previous?.order_anchor_ms
+      ? { ...message, order_anchor_ms: previous.order_anchor_ms }
+      : message;
+  });
+};
+
+// Live chat is append-only. Database/history snapshots are completeness
+// updates, not a reason to rebuild and sort the visible conversation. Keep
+// every bubble already on screen at its exact array position, patch it only
+// when the same durable identity is observed, then append genuinely unseen
+// rows in the order supplied by the backend.
+const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
+  if (!existing.length) return sortMessagesChronologically(incoming);
+  const result = [...existing];
+  let newestVisibleSequence = existing.reduce((maximum, message) => {
+    const sequence = Number(message?.sequence_order ?? message?.id);
+    return Number.isFinite(sequence) ? Math.max(maximum, sequence) : maximum;
+  }, Number.NEGATIVE_INFINITY);
+  const identities = (message) => [
+    message?.client_message_id ? `client:${message.client_message_id}` : null,
+    message?.attachment_id ? `attachment:${message.attachment_id}` : null,
+    message?.fb_message_id ? `fb:${message.fb_message_id}` : null,
+    message?.id != null ? `id:${message.id}` : null
+  ].filter(Boolean);
+  const indexByIdentity = new Map();
+  result.forEach((message, index) => identities(message).forEach((key) => indexByIdentity.set(key, index)));
+
+  incoming.forEach((message) => {
+    const matchedIndex = identities(message)
+      .map((key) => indexByIdentity.get(key))
+      .find((index) => index !== undefined);
+    if (matchedIndex === undefined) {
+      const incomingSequence = Number(message?.sequence_order ?? message?.id);
+      const previousId = String(message?.dom_previous_message_id || '');
+      const nextId = String(message?.dom_next_message_id || '');
+      const previousIndex = message?.dom_position_confirmed && previousId
+        ? result.findIndex((candidate) => String(candidate?.fb_message_id || '') === previousId)
+        : -1;
+      const nextIndex = message?.dom_position_confirmed && nextId
+        ? result.findIndex((candidate) => String(candidate?.fb_message_id || '') === nextId)
+        : -1;
+      if (previousIndex >= 0 || nextIndex >= 0) {
+        const insertAt = previousIndex >= 0 ? previousIndex + 1 : nextIndex;
+        result.splice(insertAt, 0, message);
+        indexByIdentity.clear();
+        result.forEach((candidate, index) => identities(candidate)
+          .forEach((key) => indexByIdentity.set(key, index)));
+        if (Number.isFinite(incomingSequence)) newestVisibleSequence = Math.max(newestVisibleSequence, incomingSequence);
+        return;
+      }
+      // Missing incoming media is a completeness backfill, not a new arrival.
+      // Insert it at its durable sequence without rebuilding/re-sorting the
+      // rest of the live chat. Previously this guard silently discarded every
+      // customer photo/video discovered after newer text was already visible.
+      if (Number.isFinite(newestVisibleSequence) && Number.isFinite(incomingSequence)
+        && incomingSequence <= newestVisibleSequence) {
+        const isIncomingMedia = !message?.is_outgoing
+          && ['image', 'video', 'voice', 'file'].includes(String(message?.media_type || '').toLowerCase());
+        if (!isIncomingMedia) return;
+        const insertAt = result.findIndex((candidate) => {
+          const candidateSequence = Number(candidate?.sequence_order ?? candidate?.id);
+          return Number.isFinite(candidateSequence) && candidateSequence > incomingSequence;
+        });
+        result.splice(insertAt >= 0 ? insertAt : result.length, 0, message);
+        indexByIdentity.clear();
+        result.forEach((candidate, index) => identities(candidate)
+          .forEach((key) => indexByIdentity.set(key, index)));
+        return;
+      }
+      const appendedIndex = result.length;
+      result.push(message);
+      if (Number.isFinite(incomingSequence)) newestVisibleSequence = Math.max(newestVisibleSequence, incomingSequence);
+      identities(message).forEach((key) => indexByIdentity.set(key, appendedIndex));
+      return;
+    }
+    const previous = result[matchedIndex];
+    const incomingStatus = String(message?.delivery_status || message?.status || '').toLowerCase();
+    const incomingIsTerminalSuccess = ['sent', 'delivered', 'read'].includes(incomingStatus);
+    result[matchedIndex] = {
+      ...previous,
+      ...message,
+      status: incomingIsTerminalSuccess
+        ? incomingStatus
+        : (message.status || message.delivery_status || previous.status),
+      delivery_status: incomingIsTerminalSuccess
+        ? incomingStatus
+        : (message.delivery_status || message.status || previous.delivery_status),
+      error: incomingIsTerminalSuccess ? null : (message.error ?? previous.error),
+      ui_render_key: previous.ui_render_key || message.ui_render_key,
+      ui_position_locked: previous.ui_position_locked || message.ui_position_locked,
+      order_anchor_ms: previous.order_anchor_ms,
+      sequence_order: previous.sequence_order ?? message.sequence_order
+    };
+    identities(result[matchedIndex]).forEach((key) => indexByIdentity.set(key, matchedIndex));
+  });
+  return result;
+};
+// A CRM text send can briefly arrive twice: once as the local/client row and
+// once as Messenger's DOM row carrying only an fb_message_id. Merge only that
+// asymmetric pair. Two real sends both have their own client_message_id, so
+// repeated identical messages are intentionally preserved.
+const reconcileOutgoingTextEchoes = (items = []) => {
+  const result = [];
+  const normalizedText = (message) => String(message?.content || '').replace(/\s+/g, ' ').trim();
+  const isPlainText = (message) => !(
+    message?.attachment_id || message?.media_url || message?.local_media_path
+    || (message?.media_type && message.media_type !== 'text')
+  );
+  const isSyntheticFacebookId = (message) => {
+    const id = String(message?.fb_message_id || '');
+    return Boolean(id) && !id.startsWith('mid.');
+  };
+
+  items.forEach((message) => {
+    if (!message?.is_outgoing || !isPlainText(message) || !normalizedText(message)) {
+      result.push(message);
+      return;
+    }
+    const messageAt = messageTime(message);
+    const matchIndex = result.findIndex((candidate) => {
+      if (!candidate?.is_outgoing || !isPlainText(candidate)) return false;
+      if (normalizedText(candidate) !== normalizedText(message)) return false;
+      // Collapse the whole CRM -> synthetic DOM -> official Messenger chain.
+      // Two durable official ids remain two intentional sends.
+      const asymmetricClientEcho = Boolean(candidate.client_message_id) !== Boolean(message.client_message_id);
+      const syntheticDomEcho = isSyntheticFacebookId(candidate) || isSyntheticFacebookId(message);
+      if (!asymmetricClientEcho && !syntheticDomEcho) return false;
+      const candidateAt = messageTime(candidate);
+      return !candidateAt || !messageAt || Math.abs(candidateAt - messageAt) <= 120000;
+    });
+    if (matchIndex < 0) {
+      result.push(message);
+      return;
+    }
+
+    const previous = result[matchIndex];
+    const clientRow = previous.client_message_id ? previous : message;
+    const observedRow = previous.client_message_id ? message : previous;
+    const clientFbId = String(clientRow.fb_message_id || '');
+    const observedFbId = String(observedRow.fb_message_id || '');
+    const clientIsTemporary = !clientFbId || clientFbId.startsWith('pending_') || !clientFbId.startsWith('mid.');
+    // Distinct permanent Facebook ids are distinct sends, even when the user
+    // intentionally sends the exact same text several times in one minute.
+    if (!clientIsTemporary && observedFbId && clientFbId !== observedFbId
+      && !isSyntheticFacebookId(previous) && !isSyntheticFacebookId(message)) {
+      result.push(message);
+      return;
+    }
+    const officialRow = [previous, message].find((row) => String(row?.fb_message_id || '').startsWith('mid.'));
+    result[matchIndex] = {
+      ...clientRow,
+      ...observedRow,
+      client_message_id: clientRow.client_message_id,
+      fb_message_id: officialRow?.fb_message_id || observedRow.fb_message_id || clientRow.fb_message_id,
+      order_anchor_ms: clientRow.order_anchor_ms,
+      sequence_order: previous.sequence_order ?? message.sequence_order,
+      status: observedRow.status || observedRow.delivery_status || clientRow.status || 'sent',
+      delivery_status: observedRow.delivery_status || clientRow.delivery_status || 'sent'
+    };
+  });
+  return result;
+};
 
 export default function App() {
   const [theme, setTheme] = useState(() => {
@@ -85,7 +280,10 @@ export default function App() {
   const [inboxSources, setInboxSources] = useState([]);
   const [leadStatuses, setLeadStatuses] = useState([]);
   const [activeThreadId, setActiveThreadId] = useState(null);
+  const activeThreadIdRef = useRef(null);
   const [activeTab, setActiveTab] = useState('ALL');
+  const activeTabRef = useRef('ALL');
+  const threadListRequestVersionRef = useRef(0);
   const [waitingCount, setWaitingCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [messages, setMessages] = useState({});
@@ -145,14 +343,34 @@ export default function App() {
   }, [sessionUser?.id]);
 
   const checkLicenseStatus = useCallback(async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
     try {
-      const res = await fetch('/api/license/status');
-      const json = await res.json();
-      if (json.success) {
+      const res = await fetch('/api/license/status', { signal: controller.signal });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json.success && json.data) {
         setLicenseStatus(json.data);
+      } else {
+        setLicenseStatus({
+          isLicensed: false,
+          reason: json.code || 'LICENSE_CHECK_FAILED',
+          message: json.message || 'Không thể kiểm tra bản quyền.'
+        });
       }
     } catch (e) {
       console.warn('Failed to check license status:', e);
+      // Never leave the desktop shell on an infinite loading screen. This
+      // does not bypass licensing: the existing lock screen still prevents
+      // CRM use until a valid status is returned.
+      setLicenseStatus({
+        isLicensed: false,
+        reason: e?.name === 'AbortError' ? 'LICENSE_CHECK_TIMEOUT' : 'LICENSE_CHECK_FAILED',
+        message: e?.name === 'AbortError'
+          ? 'Máy chủ bản quyền phản hồi quá lâu. Vui lòng thử lại.'
+          : 'Không thể kết nối để kiểm tra bản quyền.'
+      });
+    } finally {
+      clearTimeout(timeout);
     }
   }, []);
 
@@ -240,14 +458,18 @@ export default function App() {
   const loadThreads = useCallback(async () => {
     if (!sessionUser) return;
     const requestedUserId = sessionUser.id;
+    const requestedTab = activeTab;
+    const requestVersion = ++threadListRequestVersionRef.current;
     try {
-      const res = await fetch(`/api/threads?tab=${activeTab}`);
+      const res = await fetch(`/api/threads?tab=${requestedTab}`);
       const data = await res.json();
-      if (sessionUserIdRef.current !== requestedUserId) return;
+      if (sessionUserIdRef.current !== requestedUserId
+        || activeTabRef.current !== requestedTab
+        || threadListRequestVersionRef.current !== requestVersion) return;
       const threadList = Array.isArray(data) ? data : [];
-      setThreads(threadList.map(t => ({ ...t, thread_key: t.thread_key || (t.account_id ? `${t.account_id}:${t.id}` : String(t.id)) })));
+      setThreads(sortThreadsByActivity(threadList.map(t => ({ ...t, thread_key: t.thread_key || (t.account_id ? `${t.account_id}:${t.id}` : String(t.id)) }))));
     } catch {
-      setThreads([]);
+      if (activeTabRef.current === requestedTab && threadListRequestVersionRef.current === requestVersion) setThreads([]);
     }
   }, [activeTab, sessionUser]);
 
@@ -280,11 +502,32 @@ export default function App() {
 
   const threadsRef = useRef(threads);
   useEffect(() => { threadsRef.current = threads; }, [threads]);
+  useEffect(() => { activeThreadIdRef.current = activeThreadId; }, [activeThreadId]);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
 
   const requestThreadNavigation = useCallback((thread) => {
     if (!thread) return;
     setActiveThreadId(thread.id);
   }, []);
+
+  const handleConversationTabChange = useCallback((nextTab) => {
+    const normalizedTab = nextTab === 'WAITING' ? 'WAITING' : 'ALL';
+    if (activeTabRef.current === normalizedTab) return;
+    // Clear the previous tab's selected chat in the same render as the list
+    // switch. Keeping that stale row while async WAITING data arrived made
+    // the old chat alternate between mounted/unmounted on realtime updates.
+    activeTabRef.current = normalizedTab;
+    threadListRequestVersionRef.current += 1;
+    setActiveThreadId(null);
+    setThreads([]);
+    setActiveTab(normalizedTab);
+    if (normalizedTab === 'WAITING' && socket && isConnected) {
+      for (const account of accountsRef.current) {
+        if (!account?.id) continue;
+        socket.emit('REQUEST_SYNC_MESSAGE_REQUESTS', { account_id: account.id });
+      }
+    }
+  }, [socket, isConnected]);
 
   const requestThreadMessageSync = useCallback((threadId, direction = 'initial', scrollDelta = 0) => {
     if (!socket || !isConnected || !threadId) return;
@@ -297,7 +540,7 @@ export default function App() {
     socket.emit('REQUEST_SYNC_THREAD_MESSAGES', {
       thread_id: String(threadId),
       direction,
-      scroll_delta: direction === 'viewport' ? Number(scrollDelta) || 0 : 0
+      scroll_delta: ['viewport', 'older'].includes(direction) ? Number(scrollDelta) || 0 : 0
     });
   }, [socket, isConnected]);
 
@@ -308,11 +551,34 @@ export default function App() {
       .then(r => r.json())
       .then(data => {
         if (Array.isArray(data)) {
-          setMessages(prev => ({ ...prev, [threadIdStr]: data }));
+          setMessages(prev => ({ ...prev, [threadIdStr]: reconcileOutgoingTextEchoes(mergeMessagesWithoutReordering(prev[threadIdStr] || [], preserveOrderAnchors(data, prev[threadIdStr] || []))) }));
         }
       })
       .catch(() => {});
 
+  }, [activeThreadId]);
+
+  // Socket events are the fast path; this local REST reconciliation is the
+  // completeness path. History persistence can finish just after the last
+  // socket burst, so refresh the open conversation cheaply once per second.
+  useEffect(() => {
+    if (!activeThreadId) return undefined;
+    const threadIdStr = String(activeThreadId);
+    let stopped = false;
+    const reconcileFromDatabase = () => {
+      fetch(`/api/threads/${encodeURIComponent(threadIdStr)}/messages`)
+        .then((response) => response.json())
+        .then((data) => {
+          if (stopped || !Array.isArray(data)) return;
+          setMessages((previous) => ({
+            ...previous,
+            [threadIdStr]: reconcileOutgoingTextEchoes(mergeMessagesWithoutReordering(previous[threadIdStr] || [], preserveOrderAnchors(data, previous[threadIdStr] || [])))
+          }));
+        })
+        .catch(() => {});
+    };
+    const timer = setInterval(reconcileFromDatabase, 350);
+    return () => { stopped = true; clearInterval(timer); };
   }, [activeThreadId]);
 
   useEffect(() => {
@@ -330,6 +596,16 @@ export default function App() {
       .then(data => {
         if (contactRequestVersionRef.current.get(threadIdStr) !== requestVersion) return;
         setContacts(prev => ({ ...prev, [threadIdStr]: { thread_id: threadIdStr, ...data } }));
+        // The thread list can arrive before the contact/avatar lookup. Promote
+        // the durable contact avatar into the active thread as soon as it is
+        // available so ChatHeader/MessageBubble do not fall back to a letter.
+        if (data?.avatar_url) {
+          setThreads(prev => prev.map((thread) => (
+            String(thread.id) === threadIdStr
+              ? { ...thread, avatar_url: data.avatar_url }
+              : thread
+          )));
+        }
         const verifiedName = getVerifiedContactName(data);
         if (verifiedName) {
           setThreads(prev => prev.map((thread) => {
@@ -408,9 +684,18 @@ export default function App() {
           const localCreatedAt = Date.parse(message.created_at || '') || 0;
           const isRecentLocal = localCreatedAt > 0 && Date.now() - localCreatedAt <= 120000;
           if (!isRecentLocal) return false;
+          const localFbId = String(message.fb_message_id || '');
+          const incomingFbId = String(newMsg.fb_message_id || '');
+          if (incomingFbId.startsWith('mid.') && localFbId.startsWith('mid.') && incomingFbId !== localFbId) return false;
           const existingIsMedia = !!(message.attachment_id || message.media_url || (message.media_type && message.media_type !== 'text'));
+          const incomingMediaType = String(newMsg.media_type || '').toLowerCase();
+          const existingMediaType = String(message.media_type || '').toLowerCase();
+          const sameAttachment = Boolean(newMsg.attachment_id && message.attachment_id)
+            ? String(newMsg.attachment_id) === String(message.attachment_id)
+            : true;
+          const sameMediaType = !incomingMediaType || !existingMediaType || incomingMediaType === existingMediaType;
           return newIsMedia
-            ? existingIsMedia
+            ? existingIsMedia && sameAttachment && sameMediaType
             : !existingIsMedia && String(message.content || '') === String(newMsg.content || '');
         });
         if (newMsg.client_message_id) {
@@ -434,6 +719,10 @@ export default function App() {
               media_url: newMsg.media_url || currentMsgs[existsIdx].media_url,
               media_type: newMsg.media_type || currentMsgs[existsIdx].media_type,
               client_message_id: newMsg.client_message_id,
+              ui_render_key: currentMsgs[existsIdx]?.ui_render_key,
+              ui_position_locked: currentMsgs[existsIdx]?.ui_position_locked,
+              order_anchor_ms: currentMsgs[existsIdx]?.order_anchor_ms,
+              sequence_order: currentMsgs[existsIdx]?.sequence_order ?? newMsg.sequence_order,
               status: newMsg.status || newMsg.delivery_status || 'sent'
             };
           } else if (optimisticIdx >= 0) {
@@ -441,15 +730,23 @@ export default function App() {
             updated[optimisticIdx] = {
               ...currentMsgs[optimisticIdx],
               ...newMsg,
+              ui_render_key: currentMsgs[optimisticIdx]?.ui_render_key,
+              ui_position_locked: currentMsgs[optimisticIdx]?.ui_position_locked,
+              order_anchor_ms: currentMsgs[optimisticIdx]?.order_anchor_ms,
+              sequence_order: currentMsgs[optimisticIdx]?.sequence_order ?? newMsg.sequence_order,
               status: newMsg.status || newMsg.delivery_status || 'sent'
             };
           } else {
-            updated = [...currentMsgs, { ...newMsg, status: newMsg.status || newMsg.delivery_status || 'sent' }];
+            updated = mergeMessagesWithoutReordering(currentMsgs, [{ ...newMsg,
+              status: newMsg.status || newMsg.delivery_status || 'sent' }]);
           }
         } else {
           const existsIdx = currentMsgs.findIndex((message) => (
             (newMsg.fb_message_id && message.fb_message_id === newMsg.fb_message_id) ||
-            (newMsg.id != null && message.id === newMsg.id)
+            (newMsg.id != null && message.id === newMsg.id) ||
+            (!newMsg.is_outgoing && !message.is_outgoing &&
+              (String(message.fb_message_id || '').startsWith('sidebar_preview_') || newMsg.provisional_incoming) &&
+              String(message.content || '') === String(newMsg.content || ''))
           ));
           const mergeIdx = existsIdx >= 0 ? existsIdx : optimisticIdx;
           if (mergeIdx >= 0) {
@@ -457,22 +754,24 @@ export default function App() {
             updated[mergeIdx] = {
               ...currentMsgs[mergeIdx],
               ...newMsg,
+              ui_render_key: currentMsgs[mergeIdx]?.ui_render_key,
+              ui_position_locked: currentMsgs[mergeIdx]?.ui_position_locked,
+              order_anchor_ms: currentMsgs[mergeIdx]?.order_anchor_ms,
+              sequence_order: currentMsgs[mergeIdx]?.sequence_order ?? newMsg.sequence_order,
               status: newMsg.status || newMsg.delivery_status || 'sent'
             };
           } else {
-            updated = [...currentMsgs, { ...newMsg, status: newMsg.status || newMsg.delivery_status || 'sent' }];
+            updated = mergeMessagesWithoutReordering(currentMsgs, [{ ...newMsg,
+              status: newMsg.status || newMsg.delivery_status || 'sent' }]);
           }
         }
         
         // Database insertion order is the canonical chat sequence. Direction
         // is stored separately in is_outgoing (0 = customer, 1 = operator),
         // so timestamps are display metadata only and never move a bubble.
-        updated.sort((a, b) => {
-          const sequenceA = Number(a.sequence_order ?? a.id);
-          const sequenceB = Number(b.sequence_order ?? b.id);
-          if (!Number.isFinite(sequenceA) || !Number.isFinite(sequenceB)) return 0;
-          return sequenceA - sequenceB || Number(a.id || 0) - Number(b.id || 0);
-        });
+        // NEW_MESSAGE is an arrival event. Never sort the whole live list:
+        // append the new text, or patch its existing bubble in place.
+        updated = reconcileOutgoingTextEchoes(updated);
 
         return { ...prev, [tidStr]: updated };
       });
@@ -487,15 +786,24 @@ export default function App() {
         if (idx >= 0) {
           const updated = [...prev];
           updated[idx] = { ...updated[idx], ...(['source_id','source_type','source_name','source_status'].reduce((acc, key) => (newMsg[key] ? { ...acc, [key]: newMsg[key] } : acc), {})), thread_key: msgThreadKey || updated[idx].thread_key, last_message: newMsg.content, last_activity: newMsg.created_at || new Date().toISOString(), is_unread: true };
-          return updated.sort((a, b) => {
-            const timeA = new Date(a.last_activity || a.updated_at || a.created_at || 0).getTime();
-            const timeB = new Date(b.last_activity || b.updated_at || b.created_at || 0).getTime();
-            return timeB - timeA;
-          });
+          return sortThreadsByActivity(updated);
+        }
+        const summary = newMsg.thread_summary;
+        if (summary?.id) {
+          return sortThreadsByActivity([{
+            ...summary,
+            id: String(summary.id),
+            thread_key: newMsg.thread_key || (summary.account_id ? `${summary.account_id}:${summary.id}` : String(summary.id)),
+            last_message: newMsg.content ?? summary.last_message,
+            last_activity: newMsg.created_at || summary.last_activity || new Date().toISOString(),
+            is_unread: !newMsg.is_outgoing
+          }, ...prev]);
         }
         return prev;
       });
-      loadThreadsRef.current();
+      // Existing rows are patched synchronously above. Only fetch the complete
+      // list when a legacy event lacks the new summary payload.
+      if (!newMsg.thread_summary?.id) loadThreadsRef.current();
 
       // Media URLs are already included in NEW_MESSAGE/THREAD_MESSAGES_UPDATED.
       // Do not replace the live state with a delayed REST response: that response
@@ -513,18 +821,19 @@ export default function App() {
       });
       // Keep the optimistic sent state while Facebook's late DOM confirmation
       // attaches the official id. An immediate refetch would restore pending.
-      if (provisional) return;
-      // Auto-refetch after message is marked sent to load full database row with media URL
+      // Auto-refetch even after a provisional composer acknowledgement. A
+      // burst of sends can make Socket.IO coalesce/miss one UI event, while
+      // the durable database already contains every message.
       setTimeout(() => {
         fetch(`/api/threads/${tidStr}/messages`)
           .then(r => r.json())
           .then(data => {
             if (Array.isArray(data)) {
-              setMessages(prev => ({ ...prev, [tidStr]: data }));
+              setMessages(prev => ({ ...prev, [tidStr]: mergeMessagesWithoutReordering(prev[tidStr] || [], preserveOrderAnchors(data, prev[tidStr] || [])) }));
             }
           })
           .catch(() => {});
-      }, 300);
+      }, provisional ? 700 : 300);
     });
 
     socket.on('THREAD_INBOX_FOLDER_CHANGED', ({ thread_id, inbox_folder }) => {
@@ -550,7 +859,21 @@ export default function App() {
         const currentMsgs = prev[tidStr] || [];
         return {
           ...prev,
-          [tidStr]: currentMsgs.filter(m => m.client_message_id !== client_message_id)
+          [tidStr]: currentMsgs.flatMap((message) => {
+            if (message.client_message_id !== client_message_id) return [message];
+            if (['sent', 'delivered', 'read'].includes(String(message.delivery_status || message.status).toLowerCase())) return [message];
+            const isAttachment = Boolean(message.attachment_id || message.attachment
+              || message.media_url || message.local_media_path
+              || (message.media_type && message.media_type !== 'text'));
+            // The CRM owns an attachment bubble once the user submits it.
+            // A transport failure must never erase that bubble from history.
+            return [{
+              ...message,
+              status: 'failed',
+              delivery_status: 'failed',
+              error: typeof error === 'object' ? error : { message: error || (isAttachment ? 'Không gửi được ảnh.' : 'Không gửi được tin nhắn.') }
+            }];
+          })
         };
       });
     });
@@ -578,8 +901,8 @@ export default function App() {
                 attempt_id: accepted.attempt_id,
                 latest_attempt_id: accepted.attempt_id,
                 queue_id: accepted.queue_id,
-                status: accepted.status,
-                delivery_status: 'pending',
+                status: ['sent', 'delivered', 'read'].includes(String(message.delivery_status || message.status || '').toLowerCase()) ? (message.status || message.delivery_status) : accepted.status,
+                delivery_status: ['sent', 'delivered', 'read'].includes(String(message.delivery_status || message.status || '').toLowerCase()) ? (message.delivery_status || message.status) : 'pending',
                 attachment: accepted.attachment || message.attachment
               }
             : message
@@ -591,37 +914,51 @@ export default function App() {
       const tidStr = String(statusEvent.thread_id);
       setMessages((prev) => ({
         ...prev,
-        [tidStr]: (prev[tidStr] || []).map((message) => (
-          message.client_message_id === statusEvent.client_message_id ||
-          (statusEvent.message_id && Number(message.id) === Number(statusEvent.message_id))
-            ? statusEvent.status === 'failed' ? null : {
-                ...message,
-                attempt_id: statusEvent.attempt_id || message.attempt_id,
-                latest_attempt_id: statusEvent.attempt_id || message.latest_attempt_id,
-                status: statusEvent.status,
-                delivery_status: statusEvent.status === 'sent'
-                  ? 'sent'
-                  : statusEvent.status === 'failed'
-                    ? 'failed'
-                    : 'pending',
-                fb_message_id: statusEvent.fb_message_id || message.fb_message_id,
-                error: statusEvent.error || null
-              }
-            : message
-        )).filter(Boolean)
+        [tidStr]: (prev[tidStr] || []).map((message) => {
+          const matches = message.client_message_id === statusEvent.client_message_id ||
+            (statusEvent.message_id && Number(message.id) === Number(statusEvent.message_id));
+          if (!matches) return message;
+          const currentStatus = String(message.delivery_status || message.status || '').toLowerCase();
+          const incomingStatus = String(statusEvent.status || '').toLowerCase();
+          if (['sent', 'delivered', 'read'].includes(currentStatus)
+            && !['sent', 'delivered', 'read'].includes(incomingStatus)) {
+            return {
+              ...message,
+              attempt_id: statusEvent.attempt_id || message.attempt_id,
+              latest_attempt_id: statusEvent.attempt_id || message.latest_attempt_id,
+              fb_message_id: statusEvent.fb_message_id || message.fb_message_id
+            };
+          }
+          if (statusEvent.status === 'failed' && ['sent', 'delivered', 'read'].includes(currentStatus)) {
+            return message;
+          }
+          return statusEvent.status === 'failed' ? {
+            ...message,
+            status: 'failed',
+            delivery_status: 'failed',
+            error: statusEvent.error || { message: 'Không gửi được ảnh.' }
+          } : {
+            ...message,
+            attempt_id: statusEvent.attempt_id || message.attempt_id,
+            latest_attempt_id: statusEvent.attempt_id || message.latest_attempt_id,
+            status: statusEvent.status,
+            delivery_status: statusEvent.status === 'sent' ? 'sent' : 'pending',
+            fb_message_id: statusEvent.fb_message_id || message.fb_message_id,
+            error: statusEvent.error || null
+          };
+        })
       }));
     });
-
-    socket.on('SEND_ERROR', ({ client_message_id, error, code }) => {
-      if (!client_message_id) return;
+    socket.on('SEND_ERROR', ({ client_message_id, error, code, message_id }) => {
+      if (!client_message_id && !message_id) return;
       setMessages((prev) => {
         const next = { ...prev };
         Object.keys(next).forEach((threadId) => {
-          next[threadId] = next[threadId].map((message) => (
-            message.client_message_id === client_message_id
-              ? null
-              : message
-          )).filter(Boolean);
+          next[threadId] = next[threadId].map((message) => {
+            const matches = (client_message_id && message.client_message_id === client_message_id) || (message_id && Number(message.id) === Number(message_id));
+            if (!matches || ['sent', 'delivered', 'read'].includes(String(message.delivery_status || message.status).toLowerCase())) return message;
+            return { ...message, status: 'failed', delivery_status: 'failed', error: { code: code || 'SEND_ERROR', message: error || 'Không gửi được tin nhắn.' } };
+          });
         });
         return next;
       });
@@ -637,6 +974,7 @@ export default function App() {
       setMessages(prev => {
         const existing = prev[tidStr] || [];
         const mergedMap = new Map();
+        const reconciledOptimisticClients = new Set();
 
         const messageKey = (message) => {
           if (message.fb_message_id) return `fb_${message.fb_message_id}`;
@@ -647,8 +985,57 @@ export default function App() {
 
         // Nạp tin nhắn vừa sync
         (syncedMsgs || []).forEach(m => {
-          const key = messageKey(m);
-          mergedMap.set(key, { ...m, thread_key: m.thread_key || thread_key, account_id: m.account_id || account_id, status: 'sent' });
+          let key = messageKey(m);
+          let reconciledMessage = m;
+
+          // Messenger and the optimistic CRM image have different ids/URLs.
+          // Fold the official observation into the recent pending bubble.
+          if (m.is_outgoing) {
+            const syncedIsMedia = !!(m.attachment_id || m.media_url || (m.media_type && m.media_type !== 'text'));
+            const syncedAt = Number(m.timestamp_ms) || Date.parse(m.created_at || '') || 0;
+            const optimistic = existing
+              .filter((candidate) => {
+              if (!candidate.is_outgoing || !candidate.client_message_id) return false;
+              const candidatePending = candidate.status === 'sending' || candidate.delivery_status === 'pending' || String(candidate.fb_message_id || '').startsWith('pending_');
+              const candidateUsesTemporaryId = !String(candidate.fb_message_id || '').startsWith('mid.');
+              // Composer dispatch can mark the durable CRM attachment as sent
+              // before Facebook exposes its permanent mid.$ id. It is still
+              // the same optimistic bubble and must be eligible for folding.
+              if (!candidatePending && !candidateUsesTemporaryId) return false;
+              if (reconciledOptimisticClients.has(String(candidate.client_message_id))) return false;
+              const candidateIsMedia = !!(candidate.attachment_id || candidate.media_url || candidate.local_media_path || (candidate.media_type && candidate.media_type !== 'text'));
+              if (candidateIsMedia !== syncedIsMedia) return false;
+              const candidateAt = Number(candidate.timestamp_ms) || Date.parse(candidate.created_at || '') || 0;
+              if (syncedAt && candidateAt && Math.abs(syncedAt - candidateAt) > 120000) return false;
+              return syncedIsMedia || String(candidate.content || '') === String(m.content || '');
+              })
+              .sort((left, right) => {
+                const leftAt = Number(left.timestamp_ms) || Date.parse(left.created_at || '') || 0;
+                const rightAt = Number(right.timestamp_ms) || Date.parse(right.created_at || '') || 0;
+                return Math.abs(syncedAt - leftAt) - Math.abs(syncedAt - rightAt);
+              })[0];
+            if (optimistic) {
+              key = `client_${optimistic.client_message_id}`;
+              reconciledOptimisticClients.add(String(optimistic.client_message_id));
+              reconciledMessage = {
+                ...optimistic,
+                ...m,
+                client_message_id: optimistic.client_message_id,
+                local_media_path: m.local_media_path || optimistic.local_media_path,
+                media_url: m.media_url || optimistic.media_url,
+                // An authoritative history snapshot owns the final Messenger
+                // DOM position. Live confirmations still keep the optimistic
+                // bubble stationary until that canonical snapshot arrives.
+                sequence_order: authoritative ? m.sequence_order : (optimistic.sequence_order ?? m.sequence_order),
+                timestamp_ms: authoritative ? m.timestamp_ms : (optimistic.timestamp_ms || m.timestamp_ms),
+                created_at: authoritative ? m.created_at : (optimistic.created_at || m.created_at),
+                order_anchor_ms: optimistic.order_anchor_ms,
+                delivery_status: 'sent',
+                status: 'sent'
+              };
+            }
+          }
+          mergedMap.set(key, { ...reconciledMessage, thread_key: m.thread_key || thread_key, account_id: m.account_id || account_id, status: 'sent' });
         });
 
         // Giữ lại các tin nhắn pending/failed/realtime chưa có trong bản sync
@@ -657,18 +1044,24 @@ export default function App() {
           const keepOptimistic = m.status === 'sending' || m.status === 'failed' || m.delivery_status === 'pending';
           if (!mergedMap.has(key) && (!authoritative || keepOptimistic)) {
             mergedMap.set(key, m);
-          } else if (m.status === 'sending' || m.status === 'failed') {
-            mergedMap.set(key, { ...mergedMap.get(key), status: m.status, error: m.error });
+          } else if ((m.status === 'sending' || m.status === 'failed') && !reconciledOptimisticClients.has(String(m.client_message_id || ''))) {
+            const durable = mergedMap.get(key);
+            const durableStatus = String(durable?.delivery_status || durable?.status || '').toLowerCase();
+            if (!['sent', 'delivered', 'read'].includes(durableStatus)) {
+              mergedMap.set(key, { ...durable, status: m.status, error: m.error });
+            }
           }
         });
 
-        const mergedArray = Array.from(mergedMap.values());
-        mergedArray.sort((a, b) => {
-          const sequenceA = Number(a.sequence_order ?? a.id);
-          const sequenceB = Number(b.sequence_order ?? b.id);
-          if (!Number.isFinite(sequenceA) || !Number.isFinite(sequenceB)) return 0;
-          return sequenceA - sequenceB || Number(a.id || 0) - Number(b.id || 0);
-        });
+        const authoritativeSnapshot = reconcileOutgoingTextEchoes(Array.from(mergedMap.values()));
+        // A user-requested older-history page is an authoritative DB snapshot.
+        // The append-only merge below intentionally rejects rows older than the
+        // visible tail to protect realtime replay, but that also hid every
+        // valid historical message just fetched after CRM was scrolled up.
+        // Render this complete snapshot in its durable server sequence instead.
+        const mergedArray = authoritative
+          ? sortMessagesChronologically(preserveOrderAnchors(authoritativeSnapshot, existing))
+          : mergeMessagesWithoutReordering(existing, authoritativeSnapshot);
 
         return {
           ...prev,
@@ -686,7 +1079,7 @@ export default function App() {
           fetch(`/api/threads/${threadId}/messages`)
             .then((response) => response.json())
             .then((data) => {
-              if (Array.isArray(data)) setMessages((previous) => ({ ...previous, [threadId]: data }));
+              if (Array.isArray(data)) setMessages((previous) => ({ ...previous, [threadId]: mergeMessagesWithoutReordering(previous[threadId] || [], preserveOrderAnchors(data, previous[threadId] || [])) }));
             })
             .catch(() => {});
         }
@@ -695,6 +1088,21 @@ export default function App() {
 
     socket.on('EXTENSION_CONNECTION_CHANGED', ({ account_id, is_connected }) => {
       setAccounts(prev => prev.map(a => String(a.id) === String(account_id) ? { ...a, is_extension_connected: is_connected } : a));
+      if (!is_connected) return;
+      loadThreadsRef.current();
+      setTimeout(() => {
+        const currentThreadId = activeThreadIdRef.current;
+        if (!currentThreadId) return;
+        const currentThread = threadsRef.current.find((thread) => String(thread.id) === String(currentThreadId));
+        if (currentThread && String(currentThread.account_id || '') !== String(account_id || '')) return;
+        fetch(`/api/threads/${encodeURIComponent(String(currentThreadId))}/messages`)
+          .then((response) => response.json())
+          .then((data) => {
+            if (!Array.isArray(data)) return;
+            setMessages((previous) => ({ ...previous, [String(currentThreadId)]: mergeMessagesWithoutReordering(previous[String(currentThreadId)] || [], preserveOrderAnchors(data, previous[String(currentThreadId)] || [])) }));
+          })
+          .catch(() => {});
+      }, 750);
     });
 
     socket.on('CONTACT_UPDATED', (contactUpdate = {}) => {
@@ -811,10 +1219,21 @@ export default function App() {
       if (!accountsRef.current.some((account) => String(account.id) === String(account_id))) return;
       loadWaitingCount();
       setThreads(prev => {
+        const waitingTabActive = activeTabRef.current === 'WAITING';
+        const belongsToCurrentTab = (thread) => {
+          const isRequest = ['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE']
+            .includes(String(thread?.inbox_folder || 'INBOX'));
+          return waitingTabActive ? isRequest : !isRequest;
+        };
+        const relevantSyncedThreads = syncedThreads.filter(belongsToCurrentTab);
+        const currentTabThreads = prev.filter(belongsToCurrentTab);
+        if (relevantSyncedThreads.length === 0) {
+          return currentTabThreads.length === prev.length ? prev : currentTabThreads;
+        }
         const accIdStr = String(account_id || '');
-        const updatedThreads = [...prev];
+        const updatedThreads = [...currentTabThreads];
 
-        for (const synced of syncedThreads) {
+        for (const synced of relevantSyncedThreads) {
           const syncedIdStr = String(synced.id || synced.thread_id || '');
           const syncedAccStr = String(synced.account_id || account_id || '');
 
@@ -841,11 +1260,7 @@ export default function App() {
           }
         }
 
-        return updatedThreads.sort((a, b) => {
-          const timeA = new Date(a.last_activity || a.updated_at || a.created_at || 0).getTime();
-          const timeB = new Date(b.last_activity || b.updated_at || b.created_at || 0).getTime();
-          return timeB - timeA;
-        });
+        return sortThreadsByActivity(updatedThreads);
       });
     });
 
@@ -953,6 +1368,13 @@ export default function App() {
       media_size: payload.attachment?.byte_size || null,
       is_outgoing: true,
       direction_status: 'confirmed',
+      // Attachment transport runs independently in the extension. This key
+      // and lock belong only to the CRM view and are never replaced by queue,
+      // database or Messenger confirmation identifiers.
+      ui_render_key: `crm_${payload.client_message_id}`,
+      ui_position_locked: Boolean(payload.attachment_id || payload.attachment),
+      // Stable UI position assigned before the upload starts.
+      order_anchor_ms: Date.now(),
       created_at: new Date().toISOString(),
       status: 'sending',
       delivery_status: 'pending'
@@ -963,7 +1385,12 @@ export default function App() {
       [threadIdStr]: [...(prev[threadIdStr] || []), newMsg]
     }));
 
-    if (socket && isConnected) {
+    // Socket.IO buffers outbound events during a short reconnect. The
+    // extension worker is deliberately refreshed after desktop startup, and
+    // treating that small window as a hard failure drops the operator text
+    // before it ever reaches the backend. Emit whenever the socket instance
+    // exists and let its reconnect queue preserve the message.
+    if (socket) {
       socket.emit('SEND_MESSAGE', {
         // Plain text uses the low-latency direct Messenger path. Rich-message
         // queueing is reserved for attachments, which need integrity tracking.
@@ -992,9 +1419,12 @@ export default function App() {
   };
 
   const handleRetryMessage = (msg) => {
-    if (msg?.content) {
-      handleSendMessage(msg.content, `retry_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    if (!msg) return;
+    if (msg.attachment_id && socket) {
+      socket.emit('RETRY_MESSAGE', { thread_id: String(activeThreadId), message_id: msg.id, expected_latest_attempt_id: msg.latest_attempt_id || msg.attempt_id || null });
+      return;
     }
+    if (msg.content) handleSendMessage(msg.content, 'retry_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8));
   };
 
   const handleAssignStaff = async (threadId) => {
@@ -1127,11 +1557,31 @@ export default function App() {
     selectedCampaignThreadIds.some((threadId) => String(threadId) === String(thread.id))
   ));
 
-  const selectedThread = activeThreadId ? (
+  const selectedThreadFromList = activeThreadId ? (
     threads.find(t => String(t.id) === String(activeThreadId)) || threads.find(t => t.id === activeThreadId)
   ) : null;
+  const selectedThreadContact = activeThreadId ? contacts[String(activeThreadId)] : null;
+  // Contact data is the durable avatar source. A later sidebar/thread refresh
+  // must never replace it with an empty value and make the UI fall back to L.
+  const selectedThread = selectedThreadFromList ? {
+    ...selectedThreadFromList,
+    ...(selectedThreadContact?.avatar_url ? { avatar_url: selectedThreadContact.avatar_url } : {})
+  } : null;
   const activeMessages = activeThreadId ? (messages[String(activeThreadId)] || []) : [];
   const currentAccount = selectedThread ? accounts.find(a => String(a.id) === String(selectedThread.account_id)) : null;
+  const currentInboxSource = selectedThread ? inboxSources.find((source) => String(source.id) === String(selectedThread.source_id)) : null;
+  const currentSenderIdentity = selectedThread ? {
+    name: selectedThread.source_type === 'page_messenger'
+      ? (selectedThread.source_name || currentInboxSource?.display_name || selectedThread.source_external_id || 'Facebook Page')
+      : (currentAccount?.name || selectedThread.source_name || selectedThread.account_id || 'Tài khoản Facebook'),
+    id: selectedThread.source_type === 'page_messenger'
+      ? (selectedThread.source_external_id || currentInboxSource?.external_id || selectedThread.source_id)
+      : selectedThread.account_id,
+    type: selectedThread.source_type || 'personal_messenger',
+    avatar_url: selectedThread.source_type === 'page_messenger'
+      ? (currentInboxSource?.avatar_url || null)
+      : (currentAccount?.avatar_url || currentInboxSource?.avatar_url || null)
+  } : null;
   const activeContact = activeThreadId && selectedThread ? {
     thread_id: String(activeThreadId),
     name: selectedThread.contact_name || selectedThread.name || 'Khách hàng',
@@ -1199,27 +1649,6 @@ export default function App() {
 
   return (
     <div className={gridClass}>
-      {accountSyncing && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-lg"
-          style={{
-            position: 'fixed',
-            top: '12px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 10000,
-            width: 'max-content',
-            height: 'auto',
-            maxWidth: 'calc(100vw - 32px)',
-          }}
-        >
-          {accountSyncing.tabCount == null
-            ? 'Đang khởi động đồng bộ Facebook, vui lòng chờ...'
-            : `Đang đồng bộ Facebook trên ${accountSyncing.tabCount} tab, vui lòng chờ...`}
-        </div>
-      )}
       {/* Column 1: Sidebar Navigation - 48px */}
       <AppSidebar
         activeView={activeView}
@@ -1243,7 +1672,7 @@ export default function App() {
           const clickedThread = threads.find((thread) => String(thread.id) === String(threadId));
           requestThreadNavigation(clickedThread);
         }}
-        activeTab={activeTab} onTabChange={setActiveTab}
+        activeTab={activeTab} onTabChange={handleConversationTabChange}
         waitingCount={waitingCount}
         searchQuery={searchQuery} onSearchChange={setSearchQuery}
         isConnected={isConnected} onOpenSearch={() => setActiveModal('search')}
@@ -1263,7 +1692,11 @@ export default function App() {
       {/* Column 3: Chat Area */}
       <div className="chat-area bg-[var(--color-bg-app)] flex flex-col h-full">
         {activeThreadId && selectedThread ? (
-          <div className="chat-thread flex flex-col h-full flex-1 min-h-0 relative">
+          <div
+            key={'chat-thread-' + String(activeThreadId)}
+            className="chat-thread flex flex-col h-full flex-1 min-h-0 relative"
+            data-active-thread-id={String(activeThreadId)}
+          >
             <ChatHeader
               activeThread={selectedThread}
               accounts={accounts}
@@ -1277,14 +1710,25 @@ export default function App() {
               onGoBack={() => { setActiveThreadId(null); }}
             />
             <MessageList
+              // Reset scroll/debounce/in-flight state for every conversation.
+              // Without a React key, a prior thread can leave its older-page
+              // request locked and the next clicked user cannot mirror scroll.
+              key={String(activeThreadId)}
               messages={activeMessages}
               activeThread={selectedThread}
-              onSyncThread={undefined}
+              // Keep automatic first-open sync as the primary path, and expose
+              // the existing manual retry control when Facebook confirms an
+              // actually empty viewport.
+              onSyncThread={() => requestThreadMessageSync(activeThreadId, 'initial')}
               onRetryMessage={handleRetryMessage}
               historySyncing={String(historySyncingThreadId || '') === String(activeThreadId)}
               onViewportScroll={(scrollDelta) => {
                 if (selectedThread.source_type === 'page_messenger') return;
-                requestThreadMessageSync(activeThreadId, 'viewport', scrollDelta);
+                requestThreadMessageSync(
+                  activeThreadId,
+                  Number(scrollDelta) < 0 ? 'older' : 'viewport',
+                  scrollDelta
+                );
               }}
             />
             {['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(selectedThread.inbox_folder) ? (
@@ -1301,6 +1745,7 @@ export default function App() {
                 onStageAttachment={handleStageAttachment}
                 onDiscardAttachment={handleDiscardAttachment}
                 capabilities={richCapabilities}
+                senderIdentity={currentSenderIdentity}
                 disabled={!!isCurrentSendDisabled || richCapabilities?.text?.enabled === false}
                 disabledReason={currentSendDisabledReason}
               />
@@ -1353,6 +1798,7 @@ export default function App() {
           campaignId={activeCampaignId}
           refreshVersion={campaignRefreshVersion}
           leadStatuses={leadStatuses}
+          socket={socket}
           onClose={() => { setActiveModal(null); setActiveCampaignId(null); }}
           onBackToList={() => { setActiveModal('campaigns'); setActiveCampaignId(null); }}
         />

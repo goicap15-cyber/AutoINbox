@@ -11,12 +11,14 @@ import {
   Info,
   ListOrdered,
   MessageSquare,
+  Plus,
   Repeat,
   Send,
   Settings2,
   ShieldAlert,
   Sparkles,
   Timer,
+  Trash2,
   Type,
   Users,
   X
@@ -68,7 +70,10 @@ export default function CampaignCreateModal({
   const [config, setConfig] = useState(null);
   const [campaigns, setCampaigns] = useState([]);
   const [name, setName] = useState('');
-  const [message, setMessage] = useState('');
+  const [messages, setMessages] = useState([
+    { id: 'msg_init_1', text_content: '' }
+  ]);
+  const newlyAddedIdRef = useRef(null);
   const [direction, setDirection] = useState('asc');
   const [startPosition, setStartPosition] = useState(1);
   const [pacingMs, setPacingMs] = useState(5000);
@@ -84,6 +89,32 @@ export default function CampaignCreateModal({
   const recommendation = useMemo(() => getPhoneAutomationRecommendation(leadStatuses), [leadStatuses]);
   const recommendedPhoneStatusName = recommendation.statusName;
 
+  const handleAddMessage = () => {
+    if (messages.length >= 5) return;
+    const newId = 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    newlyAddedIdRef.current = newId;
+    setMessages((prev) => [...prev, { id: newId, text_content: '' }]);
+  };
+
+  const handleUpdateMessage = (id, text) => {
+    setMessages((prev) => prev.map((m) => m.id === id ? { ...m, text_content: text } : m));
+  };
+
+  const handleRemoveMessage = (id) => {
+    if (messages.length <= 1) return;
+    setMessages((prev) => prev.filter((m) => m.id !== id));
+  };
+
+  useEffect(() => {
+    if (newlyAddedIdRef.current) {
+      const el = document.getElementById('campaign-message-' + newlyAddedIdRef.current);
+      if (el) {
+        el.focus();
+      }
+      newlyAddedIdRef.current = null;
+    }
+  }, [messages]);
+
   const hasSelection = selectedThreads.length > 0;
   const pageThreads = useMemo(
     () => selectedThreads.filter((thread) => thread.source_type === 'page_messenger'),
@@ -98,7 +129,12 @@ export default function CampaignCreateModal({
     return new Set(pageIds).size;
   }, [pageThreads]);
   const personalCount = personalThreads.length;
-  const canSubmit = hasSelection && !!config?.enabled && !!name.trim() && !!message.trim()
+  const hasOverlengthMessage = messages.some((m) => m.text_content.length > 2000);
+  const hasValidMessages = messages.length > 0 && messages.every((m) => {
+    const trimmed = m.text_content.trim();
+    return trimmed.length > 0 && trimmed.length <= 2000;
+  });
+  const canSubmit = hasSelection && !!config?.enabled && !!name.trim() && hasValidMessages
     && (phoneCapturePolicy !== 'thank_then_stop' || !!phoneCaptureThankYouText.trim()) && !submitting;
   const pacingSeconds = Number.isFinite(Number(pacingMs)) ? Number(pacingMs) / 1000 : 0;
 
@@ -139,7 +175,7 @@ export default function CampaignCreateModal({
         body: JSON.stringify({
           name: name.trim(),
           thread_ids: selectedThreads.map((thread) => thread.id),
-          messages: [{ text_content: message.trim() }],
+          messages: messages.map((m) => ({ text_content: m.text_content.trim() })),
           start_position: Number(startPosition),
           direction,
           pacing_ms: Number(pacingMs),
@@ -253,22 +289,95 @@ export default function CampaignCreateModal({
                 <p className="mt-[5px] pl-[3px] text-[11px] text-slate-400">💡 Chỉ để bạn quản lý — khách hàng sẽ không nhìn thấy tên này</p>
               </div>
 
-              <div>
-                <label htmlFor="campaign-message" className="mb-[7px] flex items-center gap-[8px]">
-                  <span className="flex h-[21px] w-[21px] shrink-0 items-center justify-center rounded-full bg-blue-100 text-[11px] font-bold text-blue-600">2</span>
-                  <span className="flex items-center text-[14px] font-bold text-slate-700">
-                    <MessageSquare size={16} className="mr-[6px] text-slate-400" />
-                    Viết tin nhắn gửi đi
-                    <Tooltip text="Nội dung này sẽ được gửi đến tất cả khách hàng trong danh sách bạn đã chọn." />
-                  </span>
-                </label>
-                <div className="relative">
-                  <textarea id="campaign-message" value={message} onChange={(event) => setMessage(event.target.value)} rows="4" placeholder="Ví dụ: Chào bạn! Bên mình đang có chương trình ưu đãi tháng này, bạn có muốn tham khảo không ạ? 😊" className="min-h-[112px] w-full resize-y rounded-[11px] border border-slate-200 bg-slate-50 px-[14px] py-[11px] pb-[28px] text-[14px] leading-relaxed text-slate-700 outline-none transition-all placeholder:text-slate-300 focus:border-blue-300 focus:bg-white focus:ring-2 focus:ring-blue-100" required />
-                  <span className="pointer-events-none absolute bottom-[9px] right-[12px] text-[11px] text-slate-300">{message.length} ký tự</span>
+              <div className="space-y-[10px]">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-[8px]">
+                    <span className="flex h-[21px] w-[21px] shrink-0 items-center justify-center rounded-full bg-blue-100 text-[11px] font-bold text-blue-600">2</span>
+                    <span className="flex items-center text-[14px] font-bold text-slate-700">
+                      <MessageSquare size={16} className="mr-[6px] text-slate-400" />
+                      Viết tin nhắn gửi đi
+                      <Tooltip text="Các tin nhắn sẽ được gửi lần lượt theo thứ tự bên dưới tới từng khách hàng." />
+                    </span>
+                  </div>
+                  {messages.length < 5 ? (
+                    <button
+                      type="button"
+                      onClick={handleAddMessage}
+                      className="inline-flex items-center gap-1 rounded-[8px] border border-blue-200 bg-blue-50/70 px-[10px] py-[4px] text-[12px] font-semibold text-blue-600 transition-colors hover:bg-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+                    >
+                      <Plus size={14} />
+                      <span>Thêm tin nhắn</span>
+                    </button>
+                  ) : (
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">
+                      Tối đa 5 tin
+                    </span>
+                  )}
                 </div>
-                <div className="mt-[6px] flex items-start gap-[6px] pl-[3px] text-[11px] leading-relaxed text-slate-400">
+
+                <div className="space-y-[10px]">
+                  {messages.map((item, index) => {
+                    const messageId = item.id;
+                    const isFirst = index === 0;
+                    const placeholder = isFirst
+                      ? 'Ví dụ: Chào bạn! Bên mình đang có chương trình ưu đãi tháng này, bạn có muốn tham khảo không ạ? 😊'
+                      : index === 1
+                        ? 'Ví dụ: Chi tiết chương trình ưu đãi gồm giảm 20% và tặng kèm voucher...'
+                        : `Ví dụ: Nội dung tin nhắn tiếp theo (${index + 1})...`;
+
+                        const isOverLength = item.text_content.length > 2000;
+                    return (
+                      <div
+                        key={messageId}
+                        className={`rounded-[12px] border ${isOverLength ? 'border-red-300 bg-red-50/30' : 'border-slate-200 bg-slate-50/70'} p-[12px] transition-all focus-within:border-blue-300 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-100`}
+                      >
+                        <div className="mb-[6px] flex items-center justify-between">
+                          <label
+                            htmlFor={'campaign-message-' + messageId}
+                            className="flex items-center gap-[6px] text-[12px] font-bold text-slate-700 cursor-pointer"
+                          >
+                            <span className="inline-flex h-[18px] items-center rounded bg-blue-100 px-[6px] text-[11px] font-extrabold text-blue-700">
+                              Tin {index + 1}
+                            </span>
+                            {!isFirst && (
+                              <span className="text-[11px] font-normal text-slate-400">
+                                (gửi sau tin {index} với khoảng nghỉ)
+                              </span>
+                            )}
+                          </label>
+                          {messages.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveMessage(messageId)}
+                              aria-label={`Xóa tin nhắn ${index + 1}`}
+                              className="rounded-[6px] p-[4px] text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-200"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          )}
+                        </div>
+                        <div className="relative">
+                          <textarea
+                            id={'campaign-message-' + messageId}
+                            value={item.text_content}
+                            onChange={(event) => handleUpdateMessage(messageId, event.target.value)}
+                            rows={isFirst ? 3 : 2}
+                            placeholder={placeholder}
+                            className={`w-full resize-y rounded-[9px] border ${isOverLength ? 'border-red-400 focus:border-red-500' : 'border-slate-200 focus:border-blue-400'} bg-white px-[12px] py-[9px] pb-[24px] text-[13px] leading-relaxed text-slate-700 outline-none transition-all placeholder:text-slate-300`}
+                            required
+                          />
+                          <span className={`pointer-events-none absolute bottom-[6px] right-[10px] text-[11px] font-medium ${isOverLength ? 'text-red-500 font-bold' : 'text-slate-400'}`}>
+                            {item.text_content.length}/2000 ký tự
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-start gap-[6px] pl-[3px] text-[11px] leading-relaxed text-slate-400">
                   <Sparkles size={14} className="mt-[1px] shrink-0 text-amber-400" />
-                  <span>Mẹo: viết ngắn gọn, thân thiện và có câu hỏi ở cuối để khách dễ phản hồi hơn</span>
+                  <span>Mẹo: viết ngắn gọn, thân thiện và chia thành các tin ngắn để khách hàng dễ đọc và trả lời hơn</span>
                 </div>
               </div>
 
@@ -366,7 +475,7 @@ export default function CampaignCreateModal({
               <div className="flex items-start gap-[9px] rounded-[11px] border border-blue-100 bg-blue-50 px-[13px] py-[11px]">
                 <Info size={16} className="mt-[1px] shrink-0 text-blue-500" />
                 <div className="text-[12px] leading-relaxed text-blue-700">
-                  <span className="font-bold">Tóm tắt:</span> Tin nhắn sẽ được gửi tới <span className="font-bold">{selectedThreads.length} hội thoại</span> ({pageThreads.length} Page, {personalCount} Messenger cá nhân), theo chiều <span className="font-bold">{direction === 'desc' ? 'giảm dần' : 'tăng dần'}</span>, nghỉ <span className="font-bold">{pacingSeconds} giây</span> giữa mỗi tin. Bạn sẽ được xem lại trước khi gửi thật.
+                  <span className="font-bold">Tóm tắt:</span> Chiến dịch gồm <span className="font-bold">{messages.length} tin nhắn</span> sẽ được gửi lần lượt tới <span className="font-bold">{selectedThreads.length} hội thoại</span> ({pageThreads.length} Page, {personalCount} Messenger cá nhân), theo chiều <span className="font-bold">{direction === 'desc' ? 'giảm dần' : 'tăng dần'}</span>, nghỉ ít nhất <span className="font-bold">{pacingSeconds} giây</span> sau mỗi tin. Bạn sẽ được xem lại trước khi gửi thật.
                 </div>
               </div>
             </form>
@@ -379,9 +488,11 @@ export default function CampaignCreateModal({
               <CheckCircle2 size={16} className={canSubmit ? 'text-emerald-500' : 'text-slate-300'} />
               {!config?.enabled
                 ? 'Campaign đang khóa ở backend'
-                : canSubmit
-                  ? 'Sẵn sàng tạo snapshot!'
-                  : 'Điền tên và tin nhắn để tiếp tục'}
+                : hasOverlengthMessage
+                  ? 'Tin nhắn không được vượt quá 2000 ký tự'
+                  : canSubmit
+                    ? 'Sẵn sàng tạo snapshot!'
+                    : 'Điền tên và tin nhắn để tiếp tục'}
             </div>
             <div className="flex items-center justify-end gap-[8px]">
               <button type="button" onClick={onClose} className="h-[40px] rounded-[10px] px-[15px] text-[13px] font-semibold text-slate-500 transition-colors hover:bg-slate-200">Hủy</button>

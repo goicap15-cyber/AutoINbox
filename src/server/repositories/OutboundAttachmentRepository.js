@@ -5,6 +5,21 @@ function getDefaultDb() {
 }
 
 class OutboundAttachmentRepository {
+  static normalizeMediaType(row) {
+    if (!row) return null;
+    const name = String(row.safe_name || row.original_name || row.storage_path || '').toLowerCase();
+    const videoMime = name.endsWith('.mp4')
+      ? 'video/mp4'
+      : name.endsWith('.mov')
+        ? 'video/quicktime'
+        : name.endsWith('.avi')
+          ? 'video/x-msvideo'
+          : null;
+    return videoMime || String(row.mime_type || '').startsWith('video/')
+      ? { ...row, media_type: 'video', mime_type: videoMime || row.mime_type }
+      : row;
+  }
+
   static create(data, database = getDefaultDb()) {
     database.prepare(
       'INSERT INTO outbound_attachments ' +
@@ -29,13 +44,15 @@ class OutboundAttachmentRepository {
   }
 
   static getById(id, database = getDefaultDb()) {
-    return database.prepare('SELECT * FROM outbound_attachments WHERE id = ?').get(id) || null;
+    return this.normalizeMediaType(
+      database.prepare('SELECT * FROM outbound_attachments WHERE id = ?').get(id) || null
+    );
   }
 
   static getForThread(id, threadId, database = getDefaultDb()) {
-    return database.prepare(
+    return this.normalizeMediaType(database.prepare(
       'SELECT * FROM outbound_attachments WHERE id = ? AND thread_id = ?'
-    ).get(id, threadId) || null;
+    ).get(id, threadId) || null);
   }
 
   static bindToMessage(id, messageId, database = getDefaultDb()) {

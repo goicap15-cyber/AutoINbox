@@ -39,8 +39,14 @@ class OutboundConfirmationService {
       if (!Number.isFinite(dispatchTime) || Math.abs(observedTime - dispatchTime) > windowMs) {
         return false;
       }
-      if (row.attachment_id && row.attachment_media_type !== mediaType && mediaType !== 'text') return false;
-      if (!row.attachment_id && mediaType !== 'text' && row.message_media_type !== mediaType) return false;
+      if (row.attachment_id && mediaType !== 'text') {
+        const expected = row.attachment_media_type;
+        if (expected !== mediaType) return false;
+      }
+      if (!row.attachment_id && mediaType !== 'text') {
+        const expected = row.message_media_type;
+        if (expected !== mediaType) return false;
+      }
       const expectedText = String(row.content || '').trim();
       const observedText = String(content || '').trim();
       if (expectedText && observedText && expectedText !== observedText) return false;
@@ -71,20 +77,36 @@ class OutboundConfirmationService {
     const candidate = candidates[0];
     const transaction = database.transaction(() => {
       const conflictingMessage = database.prepare(
-        'SELECT id FROM messages WHERE fb_message_id = ? AND id <> ?'
+        'SELECT id, thread_id, is_outgoing, media_type, media_url FROM messages WHERE fb_message_id = ? AND id <> ?'
       ).get(fbMessageId, candidate.message_id);
       if (conflictingMessage) {
-        OutboundAttemptRepository.transition(
-          candidate.id,
-          ['dispatching', 'awaiting_confirmation'],
-          'uncertain',
-          {
-            error_code: 'CONFIRMATION_ID_CONFLICT',
-            error_message: 'Facebook message id đã thuộc bản ghi khác.'
-          },
-          database
-        );
-        return { matched: false, reason: 'ID_CONFLICT' };
+        const candidateMediaType = candidate.attachment_id
+          ? candidate.attachment_media_type
+          : candidate.message_media_type;
+        const isSameMediaEcho = conflictingMessage.is_outgoing === 1
+          && String(conflictingMessage.thread_id) === String(candidate.thread_id)
+          && mediaType !== 'text'
+          && String(conflictingMessage.media_type || '') === String(mediaType)
+          && String(candidateMediaType || '') === String(mediaType);
+        if (isSameMediaEcho) {
+          // History/realtime may persist Facebook's official media bubble just
+          // before this observer sees the pending CRM attempt. It is the same
+          // send, not an ID conflict: retain the CRM row (stable UI position,
+          // attachment preview and client id) and remove only the official echo.
+          database.prepare('DELETE FROM messages WHERE id = ?').run(conflictingMessage.id);
+        } else {
+          OutboundAttemptRepository.transition(
+            candidate.id,
+            ['dispatching', 'awaiting_confirmation'],
+            'uncertain',
+            {
+              error_code: 'CONFIRMATION_ID_CONFLICT',
+              error_message: 'Facebook message id already belongs to another row.'
+            },
+            database
+          );
+          return { matched: false, reason: 'ID_CONFLICT' };
+        }
       }
 
       database.prepare(

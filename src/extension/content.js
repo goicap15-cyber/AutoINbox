@@ -1,5 +1,20 @@
 // AutoChatbot FB Engine - Content Script (Unified with Avatar Extraction)
 (function () {
+  // A boolean marker survives an extension/app reload in an already-open
+  // Facebook tab. The old content-script context can no longer talk to
+  // chrome.runtime, but that stale boolean used to make the replacement
+  // script exit immediately. Keep a short-lived instance marker instead:
+  // simultaneous injections are still collapsed, while a health-check
+  // failure can install a fresh realtime observer in the existing page.
+  const previousContentInstance = globalThis.__FB_CRM_CONTENT_ACTIVE__;
+  const contentInstanceStartedAt = Date.now();
+  if (previousContentInstance && typeof previousContentInstance === 'object'
+    && contentInstanceStartedAt - Number(previousContentInstance.started_at || 0) < 5000) return;
+  const contentInstance = {
+    started_at: contentInstanceStartedAt,
+    last_health_at: contentInstanceStartedAt
+  };
+  globalThis.__FB_CRM_CONTENT_ACTIVE__ = contentInstance;
   // Facebook sets c_user=0 as a placeholder while a page is mid-login/logged
   // out - a naive \d+ regex treats "0" as a real user id, which registered a
   // bogus "FB Account (0)" the moment an existing profile's session cookie
@@ -13,6 +28,8 @@
 
   let capturedFbDtsg = null;
   let capturedUserId = sanitizeUserId(document.cookie.match(/c_user=(\d+)/)?.[1]);
+  let capturedAccountName = '';
+  let capturedAccountAvatarUrl = '';
 
   // Bắt crm_pending_key từ URL nếu có và lưu vào chrome.storage.local
   const urlParams = new URLSearchParams(window.location.search);
@@ -64,7 +81,6 @@
   }
 
   function triggerCallAnswer(action, callback) {
-    stopAllRingtoneAudio();
     var targetLabel = action === 'accept' ? 'Ch\u1ea5p nh\u1eadn' : 'T\u1eeb ch\u1ed1i';
     var deadline = Date.now() + 5000;
     var completed = false;
@@ -74,6 +90,13 @@
       callback?.(!!success);
     }
     function findExactButton() {
+      // Additive fallback for Facebook's icon-only decline control.
+      if (action === 'decline') {
+        var defensiveDecline = findKnownMessengerDeclineButton() ||
+          findCallButtonFromRingingText('decline') ||
+          findRedIncomingCallDeclineButton();
+        if (defensiveDecline) return defensiveDecline;
+      }
       var selectors = action === 'accept'
         ? ['[aria-label="Ch\u1ea5p nh\u1eadn"][role="button"]', '[aria-label="Ch\u1ea5p nh\u1eadn"]', '[role="button"][aria-label*="Accept"]', '[role="button"][aria-label*="Answer"]']
         : ['[aria-label="T\u1eeb ch\u1ed1i"][role="button"]', '[aria-label="T\u1eeb ch\u1ed1i"]', '[role="button"][aria-label*="Decline"]', '[role="button"][aria-label*="Reject"]'];
@@ -97,7 +120,9 @@
       if (btn) {
         try {
           btn.click();
-          stopAllRingtoneAudio();
+          // Do not stop the ringtone here. Messenger may ignore an untrusted
+          // HTMLElement.click(); the background verifies the control and
+          // retries with a trusted CDP click before declaring success.
           finish(true);
           return;
         } catch (_) {}
@@ -111,6 +136,12 @@
   try {
     if (chrome?.runtime?.onMessage) {
       chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+        if (msg.type === 'FB_CRM_HEALTH_CHECK') {
+          if (globalThis.__FB_CRM_CONTENT_ACTIVE__ !== contentInstance) return;
+          contentInstance.last_health_at = Date.now();
+          sendResponse?.({ success: true, thread_id: extractThreadIdFromUrl?.() || null });
+          return;
+        }
         if (msg.type === 'CLEAR_PENDING_KEY') {
           try {
             if (chrome?.storage?.local) {
@@ -124,7 +155,9 @@
         }
         if (msg.type === 'GET_INCOMING_CALL_BUTTON_RECT') {
           var candidate = findIncomingCallCandidate();
-          var button = (candidate && (msg.action === 'accept' ? candidate.acceptButton : candidate.declineButton)) || findIncomingCallActionButton(msg.action);
+          var button = (candidate && (msg.action === 'accept' ? candidate.acceptButton : candidate.declineButton)) ||
+            (msg.action === 'decline' ? (findKnownMessengerDeclineButton() || findCallButtonFromRingingText('decline') || findRedIncomingCallDeclineButton()) : null) ||
+            findIncomingCallActionButton(msg.action);
           if (!button || !isVisibleCallElement(button)) {
             sendResponse?.({ success: false });
             return;
@@ -197,9 +230,96 @@
   });
 
   const processedKeys = new Set();
+  // Do not use text + timestamp as a packet key. Facebook may assign the same
+  // second timestamp to several physical bubbles (v, v, v, v). The old key
+  // silently discarded every occurrence after the first one.
+  let fallbackNetworkObservation = 0;
+  function networkPacketIdentity(prefix, threadId, payload, timestampMs) {
+    const nativeId = payload && (
+      payload.message_id || payload.messageId || payload.offline_threading_id || payload.id ||
+      payload?.metadata?.message_id || payload?.metadata?.messageId
+    );
+    if (nativeId) return `${prefix}_mid_${String(nativeId)}`;
+    fallbackNetworkObservation += 1;
+    return `${prefix}_${String(threadId || '')}_${Number(timestampMs) || Date.now()}_${fallbackNetworkObservation}`;
+  }
   const recentNetworkEmits = new Map();
   const recentDomEmits = new Map();
+  const domOccurrenceIds = new WeakMap();
+  let nextDomOccurrenceId = 1;
+  function markDomOccurrence(parsed, sourceNode) {
+    // A MutationObserver callback can be rooted at a shared wrapper that
+    // contains several new bubbles. Use the exact article/row discovered by
+    // the parser first; using callback sourceNode made c,c,c share one fallback
+    // id and only the first bubble reached CRM.
+    const parsedAnchor = parsed?.dom_anchor;
+    const anchor = parsedAnchor?.closest?.('[role=article], [role=row]') || parsedAnchor
+      || sourceNode?.closest?.('[role=article], [role=row]') || sourceNode;
+    if (!anchor || typeof anchor !== 'object') return parsed;
+    if (!domOccurrenceIds.has(anchor)) domOccurrenceIds.set(anchor, nextDomOccurrenceId++);
+    parsed.dom_occurrence_id = domOccurrenceIds.get(anchor);
+    return parsed;
+  }
 
+  function decodeFacebookString(value) {
+    try { return JSON.parse(`"${value}"`); } catch (_) { return String(value || ''); }
+  }
+
+  function extractCurrentFacebookAccountName(userId, scripts) {
+    const safeUserId = String(userId || '').replace(/[^0-9]/g, '');
+    if (!safeUserId) return '';
+    const patterns = [
+      new RegExp(`"ACCOUNT_ID":"${safeUserId}"[\\s\\S]{0,1200}?"NAME":"((?:\\\\.|[^"\\\\])*)"`),
+      new RegExp(`"USER_ID":"${safeUserId}"[\\s\\S]{0,1200}?"NAME":"((?:\\\\.|[^"\\\\])*)"`),
+      new RegExp(`"NAME":"((?:\\\\.|[^"\\\\])*)"[\\s\\S]{0,500}?"ACCOUNT_ID":"${safeUserId}"`)
+    ];
+    for (const script of scripts || []) {
+      const source = script.textContent || '';
+      if (!source.includes(safeUserId)) continue;
+      for (const pattern of patterns) {
+        const match = source.match(pattern);
+        const candidate = decodeFacebookString(match?.[1] || '').trim();
+        if (candidate && candidate.length <= 100 && !/^(facebook|messenger)$/i.test(candidate)) return candidate;
+      }
+    }
+    return '';
+  }
+  function extractCurrentFacebookAccountAvatar(userId, scripts) {
+    const safeUserId = String(userId || '').replace(/[^0-9]/g, '');
+    if (!safeUserId) return '';
+    const patterns = [
+      new RegExp(`"ACCOUNT_ID":"${safeUserId}"[\\s\\S]{0,1800}?"PROFILE_PICTURE_URI":"((?:\\\\.|[^"\\\\])*)"`),
+      new RegExp(`"USER_ID":"${safeUserId}"[\\s\\S]{0,1800}?"PROFILE_PICTURE_URI":"((?:\\\\.|[^"\\\\])*)"`),
+      new RegExp(`"ACCOUNT_ID":"${safeUserId}"[\\s\\S]{0,1800}?"profile_picture":\\{"uri":"((?:\\\\.|[^"\\\\])*)"`),
+      new RegExp(`"PROFILE_PICTURE_URI":"((?:\\\\.|[^"\\\\])*)"[\\s\\S]{0,700}?"ACCOUNT_ID":"${safeUserId}"`)
+    ];
+    for (const script of scripts || []) {
+      const source = script.textContent || '';
+      if (!source.includes(safeUserId)) continue;
+      for (const pattern of patterns) {
+        const match = source.match(pattern);
+        const candidate = decodeFacebookString(match?.[1] || '').trim();
+        if (/^https?:\/\//i.test(candidate) && candidate.length <= 4096) return candidate;
+      }
+    }
+    const accountAvatarSelectors = [
+      '[aria-label*="profile" i] img, [aria-label*="profile" i] image',
+      '[aria-label*="account" i] img, [aria-label*="account" i] image',
+      '[aria-label*="trang cá nhân" i] img, [aria-label*="trang cá nhân" i] image',
+      '[aria-label*="tài khoản" i] img, [aria-label*="tài khoản" i] image',
+      '[role="banner"] img, [role="banner"] image',
+      '[role="navigation"] img, [role="navigation"] image'
+    ];
+    for (const selector of accountAvatarSelectors) {
+      for (const node of document.querySelectorAll(selector)) {
+        const candidate = String(
+          node.currentSrc || node.src || node.href?.baseVal
+          || node.getAttribute?.('href') || node.getAttribute?.('xlink:href') || ''
+        ).trim();
+        if (/^https?:\/\//i.test(candidate) && candidate.length <= 4096) return candidate;
+      }
+    }    return '';
+  }
   function reportTokens(fb_dtsg, user_id) {
     if (!user_id) return;
     try {
@@ -207,10 +327,10 @@
         if (chrome?.storage?.local) {
           chrome.storage.local.get(['crm_pending_key'], (res) => {
             const pending_key = res?.crm_pending_key || pendingKeyFromUrl || null;
-            chrome.runtime.sendMessage({ type: 'FB_TOKENS_EXTRACTED', data: { fb_dtsg: fb_dtsg || '', user_id, pending_key } });
+            chrome.runtime.sendMessage({ type: 'FB_TOKENS_EXTRACTED', data: { fb_dtsg: fb_dtsg || '', user_id, pending_key, name: capturedAccountName || null, avatar_url: capturedAccountAvatarUrl || null } });
           });
         } else {
-          chrome.runtime.sendMessage({ type: 'FB_TOKENS_EXTRACTED', data: { fb_dtsg: fb_dtsg || '', user_id, pending_key: pendingKeyFromUrl || null } });
+          chrome.runtime.sendMessage({ type: 'FB_TOKENS_EXTRACTED', data: { fb_dtsg: fb_dtsg || '', user_id, pending_key: pendingKeyFromUrl || null, name: capturedAccountName || null, avatar_url: capturedAccountAvatarUrl || null } });
         }
       }
     } catch (e) { }
@@ -233,6 +353,12 @@
           if (match) capturedFbDtsg = match[1];
         }
       }
+    }
+    if (!capturedAccountName && capturedUserId) {
+      capturedAccountName = extractCurrentFacebookAccountName(capturedUserId, scripts);
+    }
+    if (!capturedAccountAvatarUrl && capturedUserId) {
+      capturedAccountAvatarUrl = extractCurrentFacebookAccountAvatar(capturedUserId, scripts);
     }
     const inputEl = document.querySelector('input[name="fb_dtsg"]');
     if (inputEl?.value) { capturedFbDtsg = inputEl.value; }
@@ -260,7 +386,8 @@
               const sender_id = action.actor_fbid || action.sender_fbid || action.sender_user_id;
               const content = action.body;
               const timestampMs = normalizeTimestampMs(action.timestamp || Date.now());
-              const cacheKey = `${thread_id}:${content}:${timestampMs}`;
+              const packetId = networkPacketIdentity('ws', thread_id, action, timestampMs);
+              const cacheKey = packetId;
               if (processedKeys.has(cacheKey)) return; processedKeys.add(cacheKey);
               if (processedKeys.size > 1000) processedKeys.delete(processedKeys.values().next().value);
               recentNetworkEmits.set(`${thread_id}:${content}`, Date.now());
@@ -269,7 +396,7 @@
                 try {
                   capturedUserId = capturedUserId || document.cookie.match(/c_user=(\d+)/)?.[1] || null;
                   const is_outgoing = !!(sender_id && capturedUserId && String(sender_id) === String(capturedUserId));
-                  const fbMsgId = 'ws_' + thread_id + '_' + timestampMs;
+                  const fbMsgId = packetId;
                   chrome.runtime.sendMessage({
                     type: 'NEW_MESSAGE_FROM_FB',
                     data: {
@@ -296,7 +423,8 @@
                 const content = mut.args[0].body;
                 const sender_id = mut.args[0].actor_fbid || mut.args[0].sender_fbid;
                 const tsMs = normalizeTimestampMs(mut.args[0].timestamp || Date.now());
-                const cacheKey = `${thread_id}:${content}:${tsMs}`;
+                const packetId = networkPacketIdentity('mercury', thread_id, mut.args[0], tsMs);
+                const cacheKey = packetId;
                 if (!processedKeys.has(cacheKey)) {
                   processedKeys.add(cacheKey); 
                   recentNetworkEmits.set(`${thread_id}:${content}`, Date.now());
@@ -313,7 +441,7 @@
                           sender_id,
                           content,
                           is_outgoing: is_outgoing,
-                          fb_message_id: `mercury_${thread_id}_${Date.now()}`,
+                          fb_message_id: packetId,
                           media_type: 'text',
                           timestamp_ms: mut.args[0].timestamp ? tsMs : null,
                           timestamp_source: mut.args[0].timestamp ? 'facebook_payload' : 'realtime_fallback',
@@ -391,7 +519,9 @@
       }
       if (bodies.length === 0) return;
       const content = bodies[bodies.length - 1];
-      const cacheKey = `${thread_id}:${content}:${timestampMs || Date.now()}`;
+      const rawMessageIdMatch = text.match(/"(?:message_id|messageId)"\s*:\s*"([^"]+)"/);
+      const packetId = networkPacketIdentity('xhr', thread_id, { message_id: rawMessageIdMatch?.[1] || null }, timestampMs);
+      const cacheKey = packetId;
       if (processedKeys.has(cacheKey)) return;
       processedKeys.add(cacheKey);
       if (processedKeys.size > 500) processedKeys.delete(processedKeys.values().next().value);
@@ -409,7 +539,7 @@
               sender_id,
               content,
               is_outgoing,
-              fb_message_id: `xhr_${thread_id}_${Date.now()}`,
+              fb_message_id: packetId,
               media_type: 'text',
               timestamp_ms: timestampMs,
               timestamp_source: timestampMs ? 'facebook_payload' : 'realtime_fallback',
@@ -430,6 +560,17 @@
   // so ConversationRepository.reconcileExistingMessage's hysteresis (spec 019)
   // gets a chance to resolve it, instead of being silently dropped forever.
   let lastObservedMessages = new Map();
+
+  // Messenger mounts an article before its media URL is hydrated. Let the
+  // same stable message id pass again only when its payload becomes richer.
+  function domObservationSignature(parsed) {
+    return [
+      parsed?.is_outgoing ? 'out' : 'in',
+      parsed?.media_type || 'text',
+      parsed?.media_url || '',
+      parsed?.content || ''
+    ].join('|');
+  }
 
   function extractThreadIdFromUrl() {
     const match = document.location.href.match(/\/messages\/(?:e2ee\/)?t\/(\d+)/) || 
@@ -471,11 +612,60 @@
         if (payload && !/[A-Za-zÀ-ỹ0-9]/.test(payload)) cleanText = payload;
       }
       cleanText = cleanText.replace(/(?:\n|\r|\s{2,})(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen|Nhấn Enter để gửi)\s*$/i, '').trim();
+      cleanText = cleanText.replace(/(?<=\S)(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen)$/i, '').trim();
       cleanText = cleanText.replace(/^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?\s*$/i, '').replace(/(?:\n|\r)\s*\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i, '').trim();
       cleanText = cleanText.replace(/^[:\s]+/, '').trim();
     }
     return cleanText;
   }
+
+  // Personal Messenger renders many emoji as an image/SVG;
+  // they are absent from textContent. Read only short pictographic labels so
+  // avatar names and accessibility prose can never become chat content.
+  // NOTE: Quick-like (👍 hover button / "Thích") detection is intentionally
+  // removed – the floating reaction button shares the same aria-label as a
+  // real Like message, causing ghost 👍 entries in CRM every time a message
+  // is sent. We no longer report quick-likes from the left side at all.
+  function extractBubbleEmoji(container) {
+    if (!container?.querySelectorAll) return '';
+    const candidates = container.querySelectorAll('img[alt], [aria-label], [title], svg title');
+    for (const element of candidates) {
+      const exactReceivedLikeTitle = element.tagName === 'TITLE'
+        && /^(?:k\u00fd hi\u1ec7u gi\u01a1 ng\u00f3n tay c\u00e1i|thumbs up symbol)$/i.test(String(element.textContent || '').trim());
+      if (exactReceivedLikeTitle) return '👍';
+      // Controls for Like/reaction are UI, not message content.
+      if (element.matches?.('[role="button"], button') || element.closest?.('[role="button"], button')) continue;
+      // Messenger's Like glyph is currently an SVG whose human label lives in
+      // a child <title>, e.g. <title>Ký hiệu giơ ngón tay cái</title>.
+      const value = String(
+        element.getAttribute('alt') || element.getAttribute('aria-label') || element.getAttribute('title')
+        || (element.tagName === 'TITLE' ? element.textContent : '') || ''
+      ).trim();
+      if (!value) continue;
+      // Only match when the attribute value IS itself an emoji character
+      // (e.g. alt="👍", alt="❤️"). Word-based labels like "Thích"/"Like"/
+      // "thumbs up" are deliberately excluded to prevent the hover Like
+      // button from being mistaken for a real customer message.
+      if (value.length <= 16 && /^\p{Extended_Pictographic}[\p{Extended_Pictographic}\uFE0F\u20D0-\u20FF]*$/u.test(value)) return value;
+      // Match the exact SVG <title> used by Messenger's received Like.
+      // The hover control remains excluded above because it is a button.
+      if (/(?:giơ ngón tay cái|thumbs?\s*up|\blike\b|thích|👍)/i.test(value)
+        && (element.matches?.('img, svg, title, [role="img"]') || element.closest?.('svg'))) return '👍';    }
+    // Fallback: textContent of container itself is a single pictographic character
+    const directText = (container.textContent || '').trim();
+    if (directText.length <= 4 && /^\p{Extended_Pictographic}+$/u.test(directText)) return directText;
+    return '';
+  }
+
+
+  function isClockMinuteFragment(value, label) {
+    const normalized = String(value || '').trim().replace(/\s+/g, '');
+    const fragment = normalized.match(/^(\d{1,2})(?:sáng|chiều|tối|am|pm|sa|ch)?$/i);
+    if (!fragment) return false;
+    const match = String(label || '').match(/\b\d{1,2}:(\d{2})\b/);
+    return !!match && Number(fragment[1]) === Number(match[1]);
+  }
+
 
   function parseMessagesFromDOMNode(node, isRealtime = false) {
     if (!node || node.nodeType !== 1) return [];
@@ -520,6 +710,7 @@
       }
     }
     const messageRow = directRowMatch || node;
+    let rowEmojiContent = extractBubbleEmoji(messageRow);
 
     // ── STALE DOM GUARD (Self-Tagging Marker) ──
     if (messageRow && messageRow.dataset) {
@@ -562,7 +753,7 @@
     // have this race and is sufficient proof on its own that this is a real
     // message row, not composer/avatar/unrelated UI.
     const OPEN_PHOTO_ALT_PATTERN = /^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i;
-    const OPEN_VIDEO_LABEL_PATTERN = /^(?:Phát video|Mở video|Xem video|Play video|Open video|Watch video)$/i;
+    const OPEN_VIDEO_LABEL_PATTERN = /(?:ph\u00e1t|m\u1edf|xem|play|open|watch)?\s*video/i;
     let isPhotoMessage = false;
     let isVideoMessage = false;
     let mediaUrl = null;
@@ -578,15 +769,43 @@
       }
     }
 
+    // Some Messenger builds omit the Open-photo alt text while the image is
+    // hydrating. A large visible image inside one message row is still media;
+    // avatars, receipts and emoji stay below this size threshold.
+    if (!isPhotoMessage) {
+      const largeImage = Array.from(rowImgs).find((img) => {
+        if (img.closest(COMPOSER_EXCLUDE)) return false;
+        const rect = img.getBoundingClientRect?.();
+        const width = Number(rect?.width || img.naturalWidth || 0);
+        const height = Number(rect?.height || img.naturalHeight || 0);
+        return width >= 96 && height >= 96;
+      });
+      if (largeImage) {
+        const source = largeImage.currentSrc || largeImage.getAttribute('src') || '';
+        isPhotoMessage = true;
+        mediaUrl = /^(?:https?:\/\/|data:image\/)/i.test(source) ? source : null;
+      }
+    }
+
     const rowVideos = messageRow.querySelectorAll?.('video') || [];
     for (const video of rowVideos) {
       if (video.closest(COMPOSER_EXCLUDE)) continue;
       const label = (video.getAttribute('aria-label') || video.getAttribute('title') || '').trim();
-      const source = video.currentSrc || video.getAttribute('src') || video.querySelector('source[src]')?.getAttribute('src') || '';
-      const poster = video.poster || video.getAttribute('poster') || '';
+      const sourceCandidates = [
+        video.currentSrc,
+        video.getAttribute('src'),
+        ...Array.from(video.querySelectorAll('source[src]')).map((source) => source.getAttribute('src'))
+      ].filter(Boolean);
+      const source = sourceCandidates.find((candidate) => /^https?:\/\//i.test(candidate)) || sourceCandidates[0] || '';
       if (source || OPEN_VIDEO_LABEL_PATTERN.test(label) || video.closest('[aria-label*="video" i]')) {
         isVideoMessage = true;
-        mediaUrl = /^(?:https?:\/\/|data:image\/)/i.test(source)
+        // A blob URL only works inside Facebook, and poster is not a playable
+        // video. Wait for a durable CDN URL instead of poisoning the CRM row.
+        const poster = video.poster || video.getAttribute('poster') || '';
+        // A performance entry belongs to the page, not to this message row.
+        // Reusing the newest entry assigned one customer's video to several
+        // different rows. Only row-scoped sources/posters are safe here.
+        mediaUrl = /^https?:\/\//i.test(source)
           ? source
           : (/^(?:https?:\/\/|data:image\/)/i.test(poster) ? poster : null);
         break;
@@ -604,6 +823,14 @@
         mediaUrl = /^https?:\/\/.*\.mp4(?:\?|$)/i.test(href) ? href : null;
       }
     }
+    if (!isVideoMessage) {
+      const semanticVideo = Array.from(messageRow.querySelectorAll?.('[role="img"]') || []).find((element) => {
+        if (element.closest(COMPOSER_EXCLUDE)) return false;
+        const label = String(element.getAttribute('aria-label') || element.getAttribute('title') || '').trim();
+        return OPEN_VIDEO_LABEL_PATTERN.test(label) && !/(?:cu\u1ed9c g\u1ecdi|video call|call video)/i.test(label);
+      });
+      if (semanticVideo) isVideoMessage = true;
+    }
 
     const rowAriaLabel = messageRow.getAttribute?.('aria-label') || '';
     const childMsgEl = !rowAriaLabel ? messageRow.querySelector?.('[aria-label*="Tin nhắn do"], [aria-label*="Message sent"]') : null;
@@ -616,13 +843,18 @@
     // it first means a message row already has a STABLE native_id on the very
     // first (label-not-yet-hydrated) MutationObserver pass, not just the second.
     const nativeIdEl = messageRow.querySelector?.('[data-message-id], [data-id], [id^="mid."]');
-    const hasNativeId = !!nativeIdEl;
+    // Facebook commonly puts the native id on messageRow itself during the
+    // first render. querySelector() above only searches descendants; include
+    // the row so the first incoming message is captured immediately instead
+    // of waiting for a second message to trigger a React re-render.
+    const hasNativeId = !!nativeIdEl || messageRow.hasAttribute?.('data-message-id') ||
+      messageRow.hasAttribute?.('data-id') || String(messageRow.id || '').startsWith('mid.');
 
-    if (!hasMessageLabel && !hasNativeId && !isPhotoMessage && !isVideoMessage) return []; // Không phải message row
+    if (!hasMessageLabel && !hasNativeId && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return []; // Không phải message row
 
     const rawText = (node.textContent || '').trim();
     if (!isPhotoMessage && !isVideoMessage) {
-      if (!rawText) return [];
+      if (!rawText && !rowEmojiContent) return [];
 
       for (const pat of EXCLUDED_PATTERNS) {
         if (pat.test(rawText)) return [];
@@ -665,7 +897,7 @@
       });
     }
 
-    if (finalBubbles.length === 0 && !isPhotoMessage && !isVideoMessage) return [];
+    if (finalBubbles.length === 0 && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return [];
 
     let sender_name = '';
     let is_outgoing = false;
@@ -724,7 +956,56 @@
       }
     }
 
+    // Facebook can hydrate an incorrect/stale accessibility sender label for
+    // a freshly mounted bubble. In realtime, a clearly left/right visual
+    // bubble is the strongest direction evidence and prevents customer text
+    // from being discarded as our own message until history runs later.
+    if (isRealtime && finalBubbles.length > 0) {
+      const mainEl = document.querySelector('div[role="main"]');
+      const visualBubble = finalBubbles.reduce((best, candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        const bestRect = best?.getBoundingClientRect?.();
+        return !bestRect || rect.width * rect.height > bestRect.width * bestRect.height ? candidate : best;
+      }, null);
+      const mainRect = mainEl?.getBoundingClientRect?.();
+      const bubbleRect = visualBubble?.getBoundingClientRect?.();
+      if (mainRect?.width > 0 && bubbleRect?.width > 0) {
+        const relativeCenter = (bubbleRect.left + bubbleRect.width / 2 - mainRect.left) / mainRect.width;
+        if (relativeCenter <= 0.45) {
+          is_outgoing = false;
+          sender_name = contactNameStr || 'Khách hàng';
+        } else if (relativeCenter >= 0.55) {
+          is_outgoing = true;
+          sender_name = 'Bạn';
+        }
+      }
+    }
     const filter = globalThis.FbCrmTextFilter;
+
+    // A Like row can contain a visual minute fragment (for example 37sáng)
+    // beside its SVG. That fragment is timestamp chrome, not message text.
+    const hasOnlyClockFragments = finalBubbles.length > 0 && finalBubbles.every((bubble) => {
+      const bubbleText = cleanBubbleText(bubble.textContent);
+      return !bubbleText || isClockMinuteFragment(bubbleText, effectiveLabel);
+    });
+    // Some Messenger builds expose no semantic title for a received Like, but
+    // the message row still contains its SVG and a dir=auto timestamp minute.
+    // In that exact shape the minute (e.g. 55) must become the Like glyph.
+    if (!rowEmojiContent && hasOnlyClockFragments && messageRow.querySelector?.('svg')) rowEmojiContent = '👍';
+    if (rowEmojiContent && (finalBubbles.length === 0 || hasOnlyClockFragments) && !isPhotoMessage && !isVideoMessage) {
+      return [{
+        sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
+        content: rowEmojiContent,
+        is_outgoing,
+        native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
+        effective_label: effectiveLabel,
+        is_valid: true,
+        bubble_idx: 0,
+        media_type: 'text',
+        media_url: null,
+        dom_anchor: messageRow,
+        }];
+    }
 
     // ── Ảnh: trả về đúng 1 kết quả duy nhất cho cả row ──
     // Live DOM inspection found Facebook renders a sent photo+caption pair
@@ -736,30 +1017,39 @@
     // per-bubble loop below as its own independent text event, unaffected.
     if (isPhotoMessage || isVideoMessage) {
       let caption = '';
+      const MEDIA_PLACEHOLDER_RE = /^\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Mở ảnh|Xem ảnh|Open photo|View photo|Attachment)\]?$/i;
       for (const bubble of finalBubbles) {
         const cleaned = cleanBubbleText(bubble.textContent);
         if (!cleaned || cleaned.length > 1000) continue;
+        if (isClockMinuteFragment(cleaned, effectiveLabel)) continue;
+        if (MEDIA_PLACEHOLDER_RE.test(cleaned)) continue;
         if (filter?.isSystemOrMetadataText && filter.isSystemOrMetadataText(cleaned)) continue;
         caption = cleaned;
         break;
       }
       return [{
         sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
-        content: caption || (isVideoMessage && !mediaUrl ? '[Video]' : ''),
+        content: caption || '',
         is_outgoing,
         native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
         effective_label: effectiveLabel,
         is_valid: true,
         bubble_idx: 0,
         media_type: isVideoMessage ? 'video' : 'image',
-        media_url: mediaUrl
-      }];
+        media_url: mediaUrl,
+        dom_anchor: messageRow,
+        }];
     }
 
     const results = [];
     let bubble_idx = 0;
     for (const bubble of finalBubbles) {
-      const cleanText = cleanBubbleText(bubble.textContent);
+      const textContent = cleanBubbleText(bubble.textContent);
+      // Keep icon ownership scoped to this exact bubble.
+      const emojiContent = extractBubbleEmoji(bubble);
+      const cleanText = emojiContent && (!textContent || isClockMinuteFragment(textContent, effectiveLabel))
+        ? emojiContent
+        : textContent;
 
       if (!cleanText || cleanText.length < 1 || cleanText.length > 1000) {
         bubble_idx++;
@@ -788,6 +1078,9 @@
       bubble_idx++;
     }
 
+    // Preserve the exact physical row for stable fallback IDs. This property is
+    // local to the parser and is never sent over the wire.
+    results.forEach((parsed) => { parsed.dom_anchor = messageRow; });
     return results;
   }
 
@@ -800,7 +1093,16 @@
       if (allImgs) {
         for (const img of allImgs) {
           const src = img.currentSrc || img.src || '';
-          if (src && !src.includes('transparent') && !src.includes('blank') && (src.includes('fbcdn.net') || src.includes('scontent') || src.includes('platform.facebook.com')) && src.length > 50) return src;
+          const label = (String(img.getAttribute?.('alt') || '') + ' ' + String(img.getAttribute?.('aria-label') || '')).toLowerCase();
+          const rect = img.getBoundingClientRect?.();
+          const width = Number(rect?.width || img.width || 0);
+          const height = Number(rect?.height || img.height || 0);
+          // Message photos/videos also live under the same ancestor and use
+          // fbcdn URLs. Only accept profile-sized images; otherwise a customer
+          // attachment can overwrite the contact avatar and later disappear.
+          const isProfileSized = width > 0 && height > 0 && width <= 80 && height <= 80;
+          const isMessageMedia = /open photo|view photo|mở ảnh|xem ảnh|video/.test(label);
+          if (isProfileSized && !isMessageMedia && src && !src.includes('transparent') && !src.includes('blank') && (src.includes('fbcdn.net') || src.includes('scontent') || src.includes('platform.facebook.com')) && src.length > 50) return src;
         }
       }
       current = current.parentElement;
@@ -813,8 +1115,15 @@
 
   function makeDomMessageId(thread_id, parsed) {
     // Real Facebook native id (data-message-id/data-id/mid.*) is always the
-    // most stable identifier when present - use it directly, no hashing.
-    if (parsed.native_id) return String(parsed.native_id);
+    // most stable identifier when present. Facebook can place several
+    // consecutive bubbles inside one native message wrapper, though. Keep
+    // the first bubble's legacy id for DB compatibility and give subsequent
+    // bubbles a stable suffix so they are not silently deduplicated.
+    if (parsed.native_id) {
+      const nativeId = String(parsed.native_id);
+      const bubbleIndex = Number(parsed.bubble_idx) || 0;
+      return bubbleIndex > 0 ? `${nativeId}__bubble_${bubbleIndex}` : nativeId;
+    }
     // Fallback hash for messages with no native id. is_outgoing/sender_name/
     // effective_label are deliberately excluded: all three are derived from
     // the message row's aria-label (see the sender/direction block above),
@@ -831,18 +1140,135 @@
     for (let i = 0; i < strToHash.length; i++) {
       textHash = Math.imul(31, textHash) + strToHash.charCodeAt(i) | 0;
     }
-    return `dom_${thread_id}_hash_${Math.abs(textHash)}_${parsed.bubble_idx}`;
+    const occurrence = parsed.dom_occurrence_id ? `_occ_${parsed.dom_occurrence_id}` : '';
+    return `dom_${thread_id}_hash_${Math.abs(textHash)}_${parsed.bubble_idx}${occurrence}`;
   }
 
+  function getDomMessagePosition(sourceNode, threadId, expectedMessageId) {
+    try {
+      const log = sourceNode.closest?.('[role="log"]') || document.querySelector('div[role="main"] [role="log"]');
+      if (!log) return null;
+      const rows = Array.from(log.querySelectorAll('[role="article"]'));
+      const candidates = [];
+      // Flatten every parsed bubble, not just every article. Messenger can put
+      // several rapid messages inside one article and article-level neighbors
+      // cannot express their real order.
+      const flatEntries = [];
+      for (const row of rows) {
+        for (const item of parseMessagesFromDOMNode(row, true)) {
+          markDomOccurrence(item, row);
+          flatEntries.push({ id: makeDomMessageId(threadId, item), row });
+        }
+      }
+      const flatIndex = flatEntries.findIndex((entry) => entry.id === expectedMessageId);
+      if (flatIndex >= 0) {
+        return {
+          dom_previous_message_id: flatEntries[flatIndex - 1]?.id || null,
+          dom_next_message_id: flatEntries[flatIndex + 1]?.id || null,
+          dom_order_index: flatIndex,
+          dom_order_total: flatEntries.length
+        };
+      }
+      const closest = sourceNode.matches?.('[role="article"]') ? sourceNode : sourceNode.closest?.('[role="article"]');
+      if (closest) candidates.push(closest);
+      sourceNode.querySelectorAll?.('[role="article"]').forEach((candidate) => candidates.push(candidate));
+      let row = candidates.find((candidate) => {
+        const parsed = parseMessagesFromDOMNode(candidate, true);
+        return parsed.some((item) => makeDomMessageId(threadId, item) === expectedMessageId);
+      }) || closest || candidates[0];
+      if (!row) return null;
+      const index = rows.indexOf(row);
+      if (index < 0) return null;
+      const nearestMessageId = (rowIndex, step, fromEnd) => {
+        for (let cursor = rowIndex; cursor >= 0 && cursor < rows.length; cursor += step) {
+          const parsed = parseMessagesFromDOMNode(rows[cursor], true);
+          if (!parsed.length) continue;
+          const item = parsed[fromEnd ? parsed.length - 1 : 0];
+          const id = makeDomMessageId(threadId, item);
+          if (id && id !== expectedMessageId) return id;
+        }
+        return null;
+      };
+      return {
+        dom_previous_message_id: nearestMessageId(index - 1, -1, true),
+        dom_next_message_id: nearestMessageId(index + 1, 1, false),
+        dom_order_index: index,
+        dom_order_total: rows.length
+      };
+    } catch (_) {
+      return null;
+    }
+  }
   function seedBaseline(thread_id) {
     const existingRows = document.querySelectorAll('div[role="row"], div[role="article"], div[data-scope="messages_table"] div[dir="auto"]');
     existingRows.forEach(row => {
       const parsedMessages = parseMessagesFromDOMNode(row);
       parsedMessages.forEach(p => {
-        lastObservedMessages.set(makeDomMessageId(thread_id, p), p.is_outgoing);
+        markDomOccurrence(p, row);
+        lastObservedMessages.set(makeDomMessageId(thread_id, p), domObservationSignature(p));
       });
     });
     while (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
+  }
+
+  // If the app/extension reconnects while Facebook is already open, a customer
+  // message can be mounted before MutationObserver is attached. Re-submit only
+  // incoming rows carrying Facebook's durable native id. The server's unique
+  // fb_message_id makes this safe for old rows, while the just-arrived row is no
+  // longer swallowed by the startup baseline.
+  function replayStableIncomingTail(thread_id) {
+    const main = document.querySelector('div[role=main]');
+    if (!main) return;
+    const rows = Array.from(main.querySelectorAll('div[role=row], div[role=article]')).slice(-32);
+    for (const row of rows) {
+      for (const parsed of parseMessagesFromDOMNode(row, true)) {
+        if (parsed.is_outgoing || !parsed.native_id) continue;
+        markDomOccurrence(parsed, row);
+        const fbMessageId = makeDomMessageId(thread_id, parsed);
+        const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
+        const observationSignature = domObservationSignature(parsed);
+        if (lastObservedMessages.get(fbMessageId) === observationSignature) continue;
+        lastObservedMessages.set(fbMessageId, observationSignature);
+
+        let timestampMs = null;
+        const timeMatch = String(parsed.effective_label || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
+        if (timeMatch) {
+          let hours = Number(timeMatch[1]);
+          const minutes = Number(timeMatch[2]);
+          const suffix = String(timeMatch[3] || '').toUpperCase();
+          if ((suffix === 'PM' || suffix === 'CH') && hours < 12) hours += 12;
+          if ((suffix === 'AM' || suffix === 'SA') && hours === 12) hours = 0;
+          const observedAt = new Date();
+          observedAt.setHours(hours, minutes, 0, 0);
+          if (observedAt.getTime() > Date.now() + 60000) observedAt.setDate(observedAt.getDate() - 1);
+          timestampMs = observedAt.getTime();
+        }
+
+        try {
+          chrome.runtime.sendMessage({
+            type: 'NEW_MESSAGE_FROM_FB',
+            data: {
+              thread_id,
+              sender_id: null,
+              sender_name: parsed.sender_name,
+              content: parsed.content,
+              is_outgoing: false,
+              sender_role: 'customer',
+              fb_message_id: fbMessageId,
+              media_type: parsed.media_type || 'text',
+              media_url: parsed.media_url || null,
+              timestamp_ms: timestampMs,
+              timestamp_source: timestampMs ? 'facebook_label' : 'startup_catchup',
+              created_at: new Date(timestampMs || Date.now()).toISOString(),
+              source: 'dom_observer',
+              ...(domPosition || {}),
+              dom_position_confirmed: Boolean(domPosition),
+              contact_avatar: extractContactAvatarFromNode(row) || ''
+            }
+          });
+        } catch (_) {}
+      }
+    }
   }
 
   const chatObserver = new MutationObserver((mutations) => {
@@ -862,19 +1288,24 @@
     if (thread_id !== currentBaselineThreadId) {
       currentBaselineThreadId = thread_id;
       observerPaused = true;
-      // Seed lần đầu với các node đang có sẵn
+      // Seed only the DOM that already exists at the instant this thread is
+      // selected, then listen immediately. The old second seed 1.5s later
+      // marked customer messages arriving during navigation as historical;
+      // they appeared in CRM only after our next outgoing send caused another
+      // mutation. Server-side stable-id dedup safely handles late history
+      // hydration, so keeping this blind window is both unnecessary and lossy.
+      replayStableIncomingTail(thread_id);
       seedBaseline(thread_id);
-      // Tiếp tục seed sau 1.5s để cover nốt lịch sử load chậm
-      setTimeout(() => {
-        if (currentBaselineThreadId !== thread_id) return; // Tránh leak timeout sang thread khác nếu user chuyển quá nhanh
-        seedBaseline(thread_id);
-        observerPaused = false;
-      }, 1500);
+      observerPaused = false;
     }
 
     if (observerPaused) return;
 
-    mutations.forEach(mutation => mutation.addedNodes.forEach(node => {
+    mutations.forEach(mutation => {
+      const changedNodes = mutation.type === 'attributes'
+        ? [mutation.target]
+        : Array.from(mutation.addedNodes || []);
+      changedNodes.forEach(node => {
       if (node.nodeType !== 1) return;
 
       const inMain = node.closest?.('div[role="main"]');
@@ -896,26 +1327,21 @@
       const contactAvatar = extractContactAvatarFromNode(node);
 
       activeParsed.forEach((parsed) => {
-        // Ưu tiên network: nếu tin nhắn này đã được bắt bởi network trong 2 giây qua, bỏ qua DOM observer
-        const networkTime = recentNetworkEmits.get(`${thread_id}:${parsed.content}`);
-        if (networkTime && Date.now() - networkTime < 2000) return;
-
-        // Dedupe DOM ngắn hạn (800ms) để chặn clone node bắn cùng lúc
-        const domDedupeKey = `${thread_id}:${parsed.content}:${parsed.is_outgoing}`;
-        const lastDomTime = recentDomEmits.get(domDedupeKey);
-        if (lastDomTime && Date.now() - lastDomTime < 800) return;
-        recentDomEmits.set(domDedupeKey, Date.now());
-        if (recentDomEmits.size > 500) recentDomEmits.delete(recentDomEmits.keys().next().value);
+        // Every physical bubble gets its own identity. Content/time based
+        // cooldowns incorrectly collapsed rapid messages such as c, c, c.
+        markDomOccurrence(parsed, node);
 
         const fbMessageId = makeDomMessageId(thread_id, parsed);
+        const domPosition = getDomMessagePosition(node, thread_id, fbMessageId);
 
         // Skip only if THIS exact reading (same id, same direction) was already
         // forwarded - a re-scan that now disagrees on direction is deliberately
         // let through (with the same fbMessageId) so the server's existing
         // reconcile/hysteresis path (spec 019) can settle it, rather than a new
         // duplicate row being created or the correction being silently dropped.
-        if (lastObservedMessages.get(fbMessageId) === parsed.is_outgoing) return;
-        lastObservedMessages.set(fbMessageId, parsed.is_outgoing);
+        const observationSignature = domObservationSignature(parsed);
+        if (lastObservedMessages.get(fbMessageId) === observationSignature) return;
+        lastObservedMessages.set(fbMessageId, observationSignature);
         if (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
 
         let tsMs = null;
@@ -966,13 +1392,16 @@
                 timestamp_source: tsSource,
                 created_at: new Date(tsMs || Date.now()).toISOString(),
                 source: 'dom_observer',
+                ...(domPosition || {}),
+                dom_position_confirmed: Boolean(domPosition),
                 contact_avatar: contactAvatar || ''
               }
             });
           }
         } catch (err) {}
       });
-    }));
+    });
+    });
   });
 
   // React sometimes hydrates an already-mounted Messenger article by changing
@@ -989,16 +1418,23 @@
     const rows = Array.from(log.querySelectorAll('div[role="row"], div[role="article"]')).slice(-24);
     for (const row of rows) {
       for (const parsed of parseMessagesFromDOMNode(row, true)) {
+        markDomOccurrence(parsed, row);
+        // Tail reconciliation is hydration recovery, so require Facebook's
+        // durable identity. Virtualized history without a native id can remount
+        // after our own video send and must never become a new CRM message.
+        if (!parsed.native_id) continue;
         const parsedText = String(parsed.content || '').toLocaleLowerCase('vi-VN');
         const isCallRow = /(?:cu?c g?i|nh?|b? l?|audio call|video call|missed call|call ended)/i.test(parsedText);
-        if (parsed.is_outgoing && !isCallRow) continue;
+        const isMediaRow = Boolean(parsed.media_url || (parsed.media_type && parsed.media_type !== 'text'));
+        // Outgoing media is required here: MutationObserver often sees the
+        // video shell before Facebook hydrates its native id/media element.
+        // The periodic tail pass then provides the confirmation that clears
+        // the CRM pending spinner. Plain outgoing text remains on its existing path.
+        if (parsed.is_outgoing && !isCallRow && !isMediaRow) continue;
         const fbMessageId = makeDomMessageId(thread_id, parsed);
-        if (lastObservedMessages.get(fbMessageId) === parsed.is_outgoing) continue;
-        const networkTime = recentNetworkEmits.get(`${thread_id}:${parsed.content}`);
-        if (networkTime && Date.now() - networkTime < 2500) {
-          lastObservedMessages.set(fbMessageId, false);
-          continue;
-        }
+        const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
+        const observationSignature = domObservationSignature(parsed);
+        if (lastObservedMessages.get(fbMessageId) === observationSignature) continue;
         let tsMs = null;
         const timeMatch = String(parsed.effective_label || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
         if (timeMatch) {
@@ -1012,7 +1448,7 @@
           if (observed.getTime() > Date.now() + 60000) observed.setDate(observed.getDate() - 1);
           tsMs = observed.getTime();
         }
-        lastObservedMessages.set(fbMessageId, false);
+        lastObservedMessages.set(fbMessageId, observationSignature);
         try {
           if (chrome?.runtime?.id) chrome.runtime.sendMessage({
             type: 'NEW_MESSAGE_FROM_FB',
@@ -1030,6 +1466,8 @@
               timestamp_source: tsMs ? 'facebook_label' : 'realtime_fallback',
               created_at: new Date(tsMs || Date.now()).toISOString(),
               source: 'dom_observer',
+              ...(domPosition || {}),
+              dom_position_confirmed: Boolean(domPosition),
               contact_avatar: extractContactAvatarFromNode(row) || ''
             }
           });
@@ -1043,32 +1481,23 @@
   patchXHR(); patchFetch(); patchWebSocket();
   extractFbTokensFromDOM(); setInterval(extractFbTokensFromDOM, 3000);
 
-  // Observer starts paused to avoid replaying old history on page load/reload
+  // Seed the already-mounted history once and start observing immediately.
+  // Delaying this by 1s and seeding again after another 3s swallowed any
+  // customer message received during those four seconds.
   observerPaused = true;
-  setTimeout(() => {
-    const initialThreadId = extractThreadIdFromUrl();
-    if (initialThreadId && /^\d+$/.test(initialThreadId)) {
-      currentBaselineThreadId = initialThreadId;
-      // First seed: capture whatever DOM rows exist now
-      seedBaseline(initialThreadId);
-    }
-    // Start observing, but mutations are ignored while observerPaused === true
-    chatObserver.observe(document.body, { childList: true, subtree: true });
-
-    // Second seed after 3s to cover late-rendered history, then unpause
-    setTimeout(() => {
-      const threadIdNow = extractThreadIdFromUrl();
-      if (threadIdNow && /^\d+$/.test(threadIdNow)) {
-        if (threadIdNow !== currentBaselineThreadId) {
-          // Thread changed during startup window; reset baseline for new thread
-          currentBaselineThreadId = threadIdNow;
-          lastObservedMessages.clear();
-        }
-        seedBaseline(threadIdNow);
-      }
-      observerPaused = false;
-    }, 3000);
-  }, 1000);
+  const initialThreadId = extractThreadIdFromUrl();
+  if (initialThreadId && /^\d+$/.test(initialThreadId)) {
+    currentBaselineThreadId = initialThreadId;
+    replayStableIncomingTail(initialThreadId);
+    seedBaseline(initialThreadId);
+  }
+  chatObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['src', 'poster', 'aria-label', 'data-message-id', 'data-id']
+  });
+  observerPaused = false;
   setInterval(reconcileLatestIncomingMessages, 250);
 
   // ── Call Log Scanner ────────────────────────────────────────────────────────
@@ -1329,6 +1758,31 @@
     } catch(e) {}
   }
 
+  // Messenger mounts the final call bubble asynchronously after its ringing
+  // dialog disappears. Targeted short retries make that bubble realtime while
+  // retaining scanCallLogsNow's existing baseline/direction/dedup guards.
+  function scheduleFastCallLogSync() {
+    [0, 60, 140, 300, 600, 1000, 1600, 2500].forEach(function(delay) {
+      window.setTimeout(scanCallLogsNow, delay);
+    });
+  }
+
+  // Call result rows can mount without another ringing-dialog transition
+  // (especially outbound/rejected calls). Observe the chat log itself so the
+  // canonical call scanner runs immediately instead of waiting for history.
+  var callLogScanTimer = null;
+  var callLogObserver = new MutationObserver(function(mutations) {
+    if (!mutations.some(function(mutation) { return mutation.addedNodes && mutation.addedNodes.length; })) return;
+    if (callLogScanTimer) window.clearTimeout(callLogScanTimer);
+    callLogScanTimer = window.setTimeout(function() {
+      callLogScanTimer = null;
+      scanCallLogsNow();
+    }, 35);
+  });
+  // Do not attach this scanner to arbitrary DOM mutations. Video/image hydration
+  // remounts virtualized historical call rows and previously emitted fake
+  // call_dom_* records. Real incoming-call lifecycle explicitly seeds/runs it.
+
   // Synthetic call scanning is deliberately disabled: virtualized historical
   // call rows can remount and look new. The canonical stable-id observer below
   // handles fresh calls without creating fake call_dom_* events.
@@ -1413,6 +1867,38 @@
     return null;
   }
 
+  // Independent decline fallback: current Messenger builds may omit the
+  // aria-label but retain a red circular phone-off control. This intentionally
+  // never references or derives position from the Accept button.
+  function findRedIncomingCallDeclineButton() {
+    var candidate = liveIncomingCallCandidate || findIncomingCallCandidate();
+    var root = candidate?.dialog || document;
+    var controls = root.querySelectorAll('[role="button"], button');
+    var best = null;
+    var bestScore = -Infinity;
+    for (var i = 0; i < controls.length; i++) {
+      var control = controls[i];
+      if (!isVisibleCallElement(control) || callButtonIntent(control) === 'accept') continue;
+      var rect = control.getBoundingClientRect();
+      if (rect.width < 32 || rect.height < 32 || rect.width > 110 || rect.height > 110) continue;
+      var painted = [control].concat(Array.from(control.querySelectorAll('div, span, svg')));
+      var redStrength = 0;
+      for (var j = 0; j < painted.length; j++) {
+        var color = window.getComputedStyle(painted[j]).backgroundColor || '';
+        var rgb = color.match(/rgba?\(\s*(\d+)\D+(\d+)\D+(\d+)/i);
+        if (!rgb) continue;
+        var red = Number(rgb[1]);
+        var green = Number(rgb[2]);
+        var blue = Number(rgb[3]);
+        redStrength = Math.max(redStrength, red - Math.max(green, blue));
+      }
+      if (redStrength < 45) continue;
+      var roundness = Math.abs(rect.width - rect.height);
+      var score = redStrength - roundness;
+      if (score > bestScore) { best = control; bestScore = score; }
+    }
+    return best;
+  }
   function findCallButtonFromRingingText(action) {
     var candidate = liveIncomingCallCandidate || findIncomingCallCandidate();
     var root = candidate?.dialog || null;
@@ -1567,6 +2053,7 @@
         if (incomingCallState.phase === 'RINGING') {
           stopAllRingtoneAudio();
           chrome.runtime.sendMessage({ type: 'INCOMING_CALL_ENDED', data: { call_id: incomingCallState.callId, timestamp: Date.now() } });
+          scheduleFastCallLogSync();
         }
         incomingCallState = { phase: 'IDLE', signature: null, stableScans: 0, callId: null, callerName: '' };
         return;
@@ -1589,6 +2076,9 @@
           type: 'INCOMING_CALL_RINGING',
           data: { call_id: incomingCallState.callId, thread_id: threadId || null, caller_name: incomingCallState.callerName, timestamp: Date.now() }
         });
+        // Seed the existing call rows before the new final row is mounted.
+        // This ensures the first post-call scan can recognize it as new.
+        scanCallLogsNow();
       } else if (incomingCallState.phase === 'RINGING' && candidate.callerName && candidate.callerName !== incomingCallState.callerName) {
         // Update the existing CRM popup as soon as the delayed caller name is mounted.
         incomingCallState.callerName = candidate.callerName;
@@ -1617,4 +2107,3 @@
   setInterval(scanIncomingCallDialog, 300);
   // ── End Call Log Scanner ────────────────────────────────────────────────────
 })();
-

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, LoaderCircle, MessageCircleReply, Phone, RefreshCw, UserRoundX, Users, X } from 'lucide-react';
 
 const filters = [
@@ -13,17 +13,20 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('vi-VN');
 }
 
-export default function CampaignResponseStatsModal({ campaignId, campaignName, onClose }) {
+export default function CampaignResponseStatsModal({ campaignId, campaignName, onClose, socket = null }) {
   const [data, setData] = useState(null);
   const [filter, setFilter] = useState('replied');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const realtimeRefreshTimerRef = useRef(null);
 
   const load = async () => {
     setLoading(true);
     setError('');
     try {
-      const response = await fetch(`/api/campaigns/${campaignId}/response-stats`);
+      const response = await fetch(`/api/campaigns/${campaignId}/response-stats?_=${Date.now()}`, {
+        cache: 'no-store'
+      });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload?.error?.message || 'Không tải được thống kê phản hồi.');
       setData(payload);
@@ -35,6 +38,44 @@ export default function CampaignResponseStatsModal({ campaignId, campaignName, o
   };
 
   useEffect(() => { load(); }, [campaignId]);
+
+  // Socket delivery can be missed during extension reconnects and the first
+  // reply may be persisted before this modal subscribes. Poll lightly while
+  // the modal is visible so one customer message is sufficient to update
+  // statistics; no second message or manual refresh is required.
+  useEffect(() => {
+    const interval = setInterval(() => load(), 1000);
+    return () => clearInterval(interval);
+  }, [campaignId]);
+
+  // Keep response statistics live while this modal remains open. Incoming
+  // messages are persisted before NEW_MESSAGE is emitted, so the refreshed
+  // API result is already authoritative. Debounce the related events because
+  // one reply containing a phone number also emits PHONE_CAPTURED.
+  useEffect(() => {
+    if (!socket) return undefined;
+    const scheduleRefresh = () => {
+      if (realtimeRefreshTimerRef.current) clearTimeout(realtimeRefreshTimerRef.current);
+      realtimeRefreshTimerRef.current = setTimeout(() => load(), 180);
+    };
+    const handleNewMessage = (message = {}) => {
+      if (message.is_outgoing === true || message.is_outgoing === 1) return;
+      scheduleRefresh();
+    };
+    const handleCampaignResponse = (event = {}) => {
+      if (event.campaign_id && String(event.campaign_id) !== String(campaignId)) return;
+      scheduleRefresh();
+    };
+    socket.on('NEW_MESSAGE', handleNewMessage);
+    socket.on('PHONE_CAPTURED', scheduleRefresh);
+    socket.on('CAMPAIGN_RESPONSE_UPDATED', handleCampaignResponse);
+    return () => {
+      socket.off('NEW_MESSAGE', handleNewMessage);
+      socket.off('PHONE_CAPTURED', scheduleRefresh);
+      socket.off('CAMPAIGN_RESPONSE_UPDATED', handleCampaignResponse);
+      if (realtimeRefreshTimerRef.current) clearTimeout(realtimeRefreshTimerRef.current);
+    };
+  }, [socket, campaignId]);
 
   const rows = useMemo(() => (data?.recipients || []).filter((recipient) => {
     if (filter === 'phone') return recipient.has_phone;

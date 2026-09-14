@@ -8,6 +8,7 @@ export default function MessageComposer({
   onStageAttachment,
   onDiscardAttachment,
   capabilities = null,
+  senderIdentity = null,
   disabled = false,
   disabledReason = 'Không thể gửi - tài khoản Facebook chưa kết nối'
 }) {
@@ -189,7 +190,15 @@ export default function MessageComposer({
     }
   };
 
-  const attachmentKind = (file) => String(file?.type || '').toLowerCase().startsWith('image/') ? 'image' : 'file';
+  const attachmentKind = (file) => {
+    const type = String(file?.type || '').toLowerCase();
+    const name = String(file?.name || '').toLowerCase();
+    if (type.startsWith('image/') || /\.(png|jpe?g|gif|webp)$/i.test(name)) return 'image';
+    // Chromium on Windows can expose MP4/MOV as application/pdf. Infer the
+    // transport kind from the extension so the v2 media contract is retained.
+    if (type.startsWith('video/') || /\.(mp4|mov|avi|webm|mkv)$/i.test(name)) return 'video';
+    return 'file';
+  };
 
   const composerRef = useRef(null);
 
@@ -258,6 +267,11 @@ export default function MessageComposer({
 
   const hasText = inputText.trim().length > 0;
   const hasSendableContent = hasText || Boolean(attachment);
+  // Video shares the generic picker with files. Keep that picker enabled when
+  // video is supported even if arbitrary file transport is disabled.
+  const genericAttachmentEnabled = !capabilities
+    || capabilities?.video?.enabled === true
+    || capabilities?.file?.enabled !== false;
   const iconButtonClass = 'w-8 h-8 inline-flex items-center justify-center hover:bg-[var(--color-bg-hover)] rounded-full transition-colors flex-shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40 disabled:opacity-40 disabled:cursor-not-allowed';
 
   return (
@@ -268,6 +282,20 @@ export default function MessageComposer({
       {draggingAttachment && (
         <div className="fixed inset-0 lg:absolute lg:inset-0 z-30 flex items-center justify-center rounded-xl border-2 border-dashed border-[var(--color-accent)] bg-[var(--color-bg-panel)]/95 text-sm font-semibold text-[var(--color-accent)] pointer-events-none">
           {attachment ? 'Gỡ file hiện tại trước khi thêm file mới' : 'Thả ảnh hoặc file vào đây'}
+        </div>
+      )}
+      {senderIdentity?.name && (
+        <div
+          className="mb-2 flex min-w-0 items-center gap-2 rounded-lg border border-[var(--color-accent)]/20 bg-[var(--color-accent-subtle)] px-3 py-1.5"
+          title={`Tin nhắn này sẽ được gửi bằng ${senderIdentity.name}${senderIdentity.id ? ` · ID ${senderIdentity.id}` : ''}`}
+        >
+          <span className="relative flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--color-accent)] text-[10px] font-extrabold text-[var(--color-text-on-accent)]">
+            {String(senderIdentity.name).charAt(0).toUpperCase()}
+            {senderIdentity.avatar_url && <img src={senderIdentity.avatar_url} alt="" className="absolute inset-0 h-full w-full object-cover" onError={(event) => { event.currentTarget.style.display = 'none'; }} />}
+          </span>
+          <span className="shrink-0 text-[11px] font-medium text-[var(--color-text-muted)]">Gửi bằng:</span>
+          <strong className="min-w-0 truncate text-xs text-[var(--color-accent)]">{senderIdentity.name}</strong>
+          {senderIdentity.id && <span className="ml-auto shrink-0 rounded bg-[var(--color-bg-panel)] px-1.5 py-0.5 font-mono text-[10px] font-bold text-[var(--color-text-secondary)]">#{String(senderIdentity.id).slice(-4)}</span>}
         </div>
       )}
       {disabled && (
@@ -341,15 +369,18 @@ export default function MessageComposer({
           type="file"
           accept=".pdf,.txt,.csv,.json,.xml,.html,.md,.zip,.rar,.7z,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.mp3,.wav,.mp4,.mov,.avi"
           className="hidden"
-          onChange={(event) => selectAttachment(event.target.files?.[0], 'file')}
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            selectAttachment(file, attachmentKind(file));
+          }}
         />
         <button
           type="button"
-          aria-label="Đính kèm PDF"
-          title={capabilities?.file?.enabled === false
-            ? (capabilities.disabled_reason || 'Nguồn gửi này chưa hỗ trợ PDF')
-            : 'Đính kèm PDF'}
-          disabled={disabled || sending || uploadingAttachment || Boolean(attachment) || capabilities?.file?.enabled === false}
+          aria-label="Đính kèm tệp hoặc video"
+          title={!genericAttachmentEnabled
+            ? (capabilities.disabled_reason || 'Nguồn gửi này chưa hỗ trợ tệp hoặc video')
+            : 'Đính kèm tệp hoặc video'}
+          disabled={disabled || sending || uploadingAttachment || Boolean(attachment) || !genericAttachmentEnabled}
           onClick={() => fileInputRef.current?.click()}
           className={iconButtonClass + ' text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]'}
         >

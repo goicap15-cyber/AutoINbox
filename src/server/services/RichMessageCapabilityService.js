@@ -1,5 +1,6 @@
-const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_BYTES = 25 * 1024 * 1024;
 const IMAGE_MIME_TYPES = Object.freeze(['image/jpeg', 'image/png', 'image/webp']);
+const VIDEO_MIME_TYPES = Object.freeze(['video/mp4', 'video/quicktime', 'video/x-msvideo']);
 const FILE_MIME_TYPES = Object.freeze([
   'application/pdf', 'text/plain', 'text/csv', 'application/json', 'application/xml',
   'text/html', 'text/markdown', 'application/zip', 'application/vnd.rar',
@@ -7,7 +8,7 @@ const FILE_MIME_TYPES = Object.freeze([
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'audio/mpeg', 'audio/wav', 'video/mp4', 'video/quicktime', 'video/x-msvideo'
+  'audio/mpeg', 'audio/wav'
 ]);
 
 class RichMessageCapabilityError extends Error {
@@ -27,10 +28,12 @@ class RichMessageCapabilityService {
       adapters: {
         page_messenger: {
           image: process.env.RICH_MESSAGE_PAGE_IMAGE_ENABLED !== 'false',
+          video: process.env.RICH_MESSAGE_PAGE_VIDEO_ENABLED !== 'false',
           file: process.env.RICH_MESSAGE_PAGE_FILE_ENABLED !== 'false'
         },
         personal_messenger: {
           image: process.env.RICH_MESSAGE_PERSONAL_IMAGE_ENABLED !== 'false',
+          video: process.env.RICH_MESSAGE_PERSONAL_VIDEO_ENABLED !== 'false',
           file: process.env.RICH_MESSAGE_PERSONAL_FILE_ENABLED !== 'false'
         }
       }
@@ -62,6 +65,7 @@ class RichMessageCapabilityService {
     const textEnabled = featureReady && sourceReady && connected;
     const adapter = config.adapters?.[route.source_type] || {};
     const imageEnabled = textEnabled && adapter.image === true;
+    const videoEnabled = textEnabled && adapter.video === true;
     const fileEnabled = textEnabled && adapter.file === true;
     let disabledReason = null;
     if (!featureReady) disabledReason = 'Tính năng gửi rich-message đang tắt.';
@@ -84,6 +88,11 @@ class RichMessageCapabilityService {
         mime_types: imageEnabled ? [...IMAGE_MIME_TYPES] : [],
         max_bytes: Number(config.maxBytes) || DEFAULT_MAX_BYTES
       },
+      video: {
+        enabled: videoEnabled,
+        mime_types: videoEnabled ? [...VIDEO_MIME_TYPES] : [],
+        max_bytes: Number(config.maxBytes) || DEFAULT_MAX_BYTES
+      },
       file: {
         enabled: fileEnabled,
         mime_types: fileEnabled ? [...FILE_MIME_TYPES] : [],
@@ -96,6 +105,7 @@ class RichMessageCapabilityService {
   static allowedMimeTypes(capability) {
     return [
       ...(capability?.image?.enabled ? capability.image.mime_types : []),
+      ...(capability?.video?.enabled ? capability.video.mime_types : []),
       ...(capability?.file?.enabled ? capability.file.mime_types : [])
     ];
   }
@@ -104,5 +114,6 @@ class RichMessageCapabilityService {
 RichMessageCapabilityService.Error = RichMessageCapabilityError;
 RichMessageCapabilityService.DEFAULT_MAX_BYTES = DEFAULT_MAX_BYTES;
 RichMessageCapabilityService.IMAGE_MIME_TYPES = IMAGE_MIME_TYPES;
+RichMessageCapabilityService.VIDEO_MIME_TYPES = VIDEO_MIME_TYPES;
 RichMessageCapabilityService.FILE_MIME_TYPES = FILE_MIME_TYPES;
 module.exports = RichMessageCapabilityService;

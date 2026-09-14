@@ -99,6 +99,7 @@ test('personal_messenger image queue builds a v2 envelope with no page_id and co
   assert.equal(envelope.type, 'SEND_QUEUED_MESSAGE');
   assert.equal(envelope.data.contract_version, 2);
   assert.equal(envelope.data.source_type, 'personal_messenger');
+  assert.equal(envelope.data.recipient_thread_id, 'thread-personal-image');
   assert.equal(envelope.data.thread_url, 'https://www.facebook.com/messages/t/thread-personal-image');
   assert.equal(envelope.data.expected_contact_name, 'Personal Contact');
   assert.equal(envelope.data.outbound_attempt_id, accepted.attempt_id);

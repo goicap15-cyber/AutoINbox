@@ -547,7 +547,7 @@ class ProcessManager {
 
     if (process.platform === 'win32') {
       const psScript = `
-try { Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32Helper { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int m); [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n); [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags); }' } catch {}
+try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue; Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class Win32Helper { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int m); [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n); [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags); }' } catch {}
 $targetPids = @(${pid || 0})
 $profile = '${escapedProfileDir}'
 if ($profile) {
@@ -560,8 +560,12 @@ foreach ($app in $apps) {
   $style = [Win32Helper]::GetWindowLong($handle, -20)
   $style = ($style -band -bnot 0x00000080) -bor 0x00040000
   [Win32Helper]::SetWindowLong($handle, -20, $style) | Out-Null
-  [Win32Helper]::SetWindowPos($handle, [IntPtr]::Zero, 80, 80, 0, 0, 0x0015) | Out-Null
-  [Win32Helper]::ShowWindowAsync($handle, 9) | Out-Null
+  # Force the window onto its monitor's full working area. Chrome can ignore an
+  # async maximize request while restoring its previous session placement.
+  [Win32Helper]::ShowWindow($handle, 9) | Out-Null
+  $workingArea = [System.Windows.Forms.Screen]::FromHandle($handle).WorkingArea
+  [Win32Helper]::SetWindowPos($handle, [IntPtr]::Zero, $workingArea.X, $workingArea.Y, $workingArea.Width, $workingArea.Height, 0x0044) | Out-Null
+  [Win32Helper]::ShowWindow($handle, 3) | Out-Null
   [Win32Helper]::SetForegroundWindow($handle) | Out-Null
 }
 if (-not $apps -and $profile) {

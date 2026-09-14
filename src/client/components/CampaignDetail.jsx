@@ -82,7 +82,7 @@ function auditMeta(eventType = '') {
   return { dot: 'bg-slate-400', badge: 'bg-slate-100 text-slate-600' };
 }
 
-export default function CampaignDetail({ campaignId, refreshVersion = 0, onClose, onBackToList, leadStatuses = [] }) {
+export default function CampaignDetail({ campaignId, refreshVersion = 0, onClose, onBackToList, leadStatuses = [], socket = null }) {
   const [campaign, setCampaign] = useState(null);
   const [config, setConfig] = useState(null);
   const [busyAction, setBusyAction] = useState('');
@@ -335,6 +335,7 @@ export default function CampaignDetail({ campaignId, refreshVersion = 0, onClose
         <CampaignResponseStatsModal
           campaignId={campaignId}
           campaignName={campaign?.name}
+          socket={socket}
           onClose={() => setResponseStatsOpen(false)}
         />
       )}

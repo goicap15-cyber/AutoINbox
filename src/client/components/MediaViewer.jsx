@@ -1,19 +1,19 @@
 import React, { useState } from 'react';
-import { Volume2, FileText, Download, X } from 'lucide-react';
+import { Volume2, FileText, Download, X, Play } from 'lucide-react';
 
 export default function MediaViewer({ mediaType, mediaUrl, localMediaPath }) {
   const [isLightboxOpen, setIsLightboxOpen] = useState(false);
   const displayUrl = localMediaPath || mediaUrl;
 
+  // Keep the existing video hydration path intact, but do not render a
+  // synthetic message while Facebook has not exposed playable media yet.
+  // The real video bubble appears automatically when media_url/local path is
+  // backfilled by the existing hydration flow.
   if (!displayUrl) return null;
 
-  const isImg = mediaType === 'image' ||
-    /\.(png|jpg|jpeg|webp|gif|bmp)(\?.*)?$/i.test(displayUrl) ||
-    (typeof displayUrl === 'string' && (
-      displayUrl.includes('/outbound-attachments/') ||
-      displayUrl.includes('/campaign-attachments/') ||
-      displayUrl.startsWith('data:image/')
-    ));
+  const inferredImage = /\.(png|jpg|jpeg|webp|gif|bmp)(\?.*)?$/i.test(displayUrl)
+    || (typeof displayUrl === 'string' && displayUrl.startsWith('data:image/'));
+  const isImg = mediaType === 'image' || (mediaType !== 'video' && inferredImage);
 
   if (isImg) {
     return (
@@ -47,6 +47,22 @@ export default function MediaViewer({ mediaType, mediaUrl, localMediaPath }) {
   }
 
   if (mediaType === 'video') {
+    // Facebook may expose only the video poster while the playable stream is
+    // a page-scoped blob URL. Keep that incoming video visible as a thumbnail
+    // instead of passing image bytes to the video decoder.
+    if (inferredImage) {
+      return React.createElement(
+        'a',
+        { href: displayUrl, target: '_blank', rel: 'noopener noreferrer', className: 'relative block mt-2 max-w-xs overflow-hidden rounded-lg border border-[var(--color-border)] shadow-sm' },
+        React.createElement('img', { src: displayUrl, alt: 'Video thumbnail', className: 'block w-full max-h-60 object-cover' }),
+        React.createElement(
+          'span',
+          { className: 'absolute inset-0 flex items-center justify-center bg-black/20' },
+          React.createElement('span', { className: 'w-11 h-11 rounded-full bg-black/65 text-white flex items-center justify-center' },
+            React.createElement(Play, { size: 22, fill: 'currentColor' }))
+        )
+      );
+    }
     return (
       <div className="mt-2 max-w-xs">
         <video controls className="w-full rounded-lg border border-[var(--color-border)] shadow-sm">

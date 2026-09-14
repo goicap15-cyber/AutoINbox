@@ -16,13 +16,18 @@
   // the SAME message that read a different label produced a DIFFERENT id -
   // landing as a ghost duplicate row with a flipped direction (spec 045).
   function makeDomMessageId(thread_id, parsed) {
+    if (parsed.native_id) {
+      const nativeId = String(parsed.native_id);
+      const bubbleIndex = Number(parsed.bubble_idx) || 0;
+      return bubbleIndex > 0 ? `${nativeId}__bubble_${bubbleIndex}` : nativeId;
+    }
     let textHash = 0;
     const strToHash = `${thread_id}|${parsed.content}`;
     for (let i = 0; i < strToHash.length; i++) {
       textHash = Math.imul(31, textHash) + strToHash.charCodeAt(i) | 0;
     }
-    const stableId = parsed.native_id || `hash_${Math.abs(textHash)}`;
-    return `dom_${thread_id}_${stableId}_${parsed.bubble_idx}`;
+    const occurrence = parsed.dom_occurrence_id ? `_occ_${parsed.dom_occurrence_id}` : '';
+    return `dom_${thread_id}_hash_${Math.abs(textHash)}_${parsed.bubble_idx}${occurrence}`;
   }
 
   // Returns true when this reading should be SKIPPED (already forwarded with

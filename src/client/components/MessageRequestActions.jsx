@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, LoaderCircle, RefreshCw, ShieldBan, Trash2 } from 'lucide-react';
+import { Check, LoaderCircle, RefreshCw, ShieldBan, Trash2, X } from 'lucide-react';
 
 const ACTION_META = {
   continue: { label: 'Tiếp tục', icon: Check, className: 'bg-[var(--color-accent)] text-white hover:brightness-95' },
   accept: { label: 'Chấp nhận', icon: Check, className: 'bg-[var(--color-accent)] text-white hover:brightness-95' },
+  decline: { label: 'Từ chối', icon: X, className: 'bg-[var(--color-bg-surface)] text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10' },
   delete: { label: 'Xóa', icon: Trash2, className: 'bg-[var(--color-bg-surface)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]' },
   block: { label: 'Chặn', icon: ShieldBan, className: 'bg-[var(--color-bg-surface)] text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10' },
 };
@@ -66,6 +67,7 @@ export default function MessageRequestActions({ thread, socket, isConnected }) {
   const handleAction = (action) => {
     const contactName = thread?.contact_name || thread?.name || 'khách này';
     if (action === 'delete' && !window.confirm(`Xóa tin nhắn đang chờ của ${contactName} trên Messenger?`)) return;
+    if (action === 'decline' && !window.confirm(`Từ chối tin nhắn của ${contactName} trên Messenger?`)) return;
     if (action === 'block' && !window.confirm(`Chặn ${contactName} trên Messenger? Người này sẽ không thể nhắn cho bạn.`)) return;
     sendCommand(action);
   };

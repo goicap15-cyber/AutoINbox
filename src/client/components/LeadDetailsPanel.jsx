@@ -165,6 +165,10 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
   const [savingTags, setSavingTags] = useState(false);
   const tagOpenerRef = useRef(null);
   const tagInputRef = useRef(null);
+  // Keep an immediately-current draft for consecutive Add/Enter actions.
+  // React state is async; reading draftTags again before the next render used
+  // to reuse the previous array and silently lose the 2nd/3rd custom label.
+  const draftTagsRef = useRef([]);
   const activeTagContactRef = useRef('');
   const tagOperationRef = useRef(0);
 
@@ -215,6 +219,7 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
     // Tags sync & reset on contact switch
     setCommittedTags(parseTags(contactInfo.tags));
     setDraftTags([]);
+    draftTagsRef.current = [];
     setIsTagEditorOpen(false);
     setCustomTagInput('');
     setTagError('');
@@ -299,7 +304,9 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
 
   const handleOpenTagEditor = (openerElement) => {
     tagOpenerRef.current = openerElement || null;
-    setDraftTags([...committedTags]);
+    const nextDraft = [...committedTags];
+    draftTagsRef.current = nextDraft;
+    setDraftTags(nextDraft);
     setCustomTagInput('');
     setTagError('');
     setTagSaveError('');
@@ -312,6 +319,7 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
   const handleCloseTagEditor = () => {
     setIsTagEditorOpen(false);
     setDraftTags([]);
+    draftTagsRef.current = [];
     setCustomTagInput('');
     setTagError('');
     setTagSaveError('');
@@ -372,40 +380,43 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
   };
 
   const handleAddDraftTag = () => {
-    const trimmed = customTagInput.trim();
+    const trimmed = String(tagInputRef.current?.value ?? customTagInput).trim();
     if (!trimmed) {
       setTagError('Tên nhãn không được để trống.');
       return;
     }
-    const result = addTag(draftTags, trimmed);
+    const result = addTag(draftTagsRef.current, trimmed);
     if (result.error) {
       setTagError(result.error);
       return;
     }
+    draftTagsRef.current = result.tags;
     setDraftTags(result.tags);
     setCustomTagInput('');
     setTagError('');
   };
 
   const handleRemoveDraftTag = (tagToRemove) => {
-    const updated = removeTag(draftTags, tagToRemove);
+    const updated = removeTag(draftTagsRef.current, tagToRemove);
+    draftTagsRef.current = updated;
     setDraftTags(updated);
     setTagError('');
   };
 
   const handleApplyDraftTags = async () => {
     if (savingTags) return;
-    if (areTagsEqual(committedTags, draftTags)) {
+    const latestDraftTags = [...draftTagsRef.current];
+    if (areTagsEqual(committedTags, latestDraftTags)) {
       handleCloseTagEditor();
       return;
     }
 
     const previousTags = [...committedTags];
-    setCommittedTags(draftTags);
+    setCommittedTags(latestDraftTags);
     setSavingTags(true);
     setTagSaveError('');
     try {
-      await onSaveContact?.(savePayload({ tags: draftTags }));
+      await onSaveContact?.(savePayload({ tags: latestDraftTags }));
       handleCloseTagEditor();
     } catch (err) {
       setCommittedTags(previousTags);

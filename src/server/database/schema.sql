@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     status TEXT CHECK(status IN ('ACTIVE', 'DISCONNECTED', 'CHECKPOINT')) DEFAULT 'ACTIVE',
     owner_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     company_id INTEGER,
+    avatar_url TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -253,7 +254,7 @@ CREATE TABLE IF NOT EXISTS message_queue (
     attachment_mime_type TEXT,
     attachment_name TEXT,
     outbound_attempt_id TEXT REFERENCES outbound_attempts(id),
-    attachment_media_type TEXT CHECK(attachment_media_type IN ('image', 'file')),
+    attachment_media_type TEXT CHECK(attachment_media_type IN ('image', 'video', 'file')),
     attachment_byte_size INTEGER CHECK(attachment_byte_size IS NULL OR attachment_byte_size > 0),
     attachment_checksum TEXT,
     -- Spec 040: when set, this dispatch carries every campaign_attachments
@@ -285,8 +286,8 @@ CREATE TABLE IF NOT EXISTS outbound_attachments (
     created_by INTEGER,
     original_name TEXT NOT NULL,
     safe_name TEXT NOT NULL,
-    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'file')),
-    mime_type TEXT NOT NULL CHECK(mime_type IN ('image/jpeg', 'image/png', 'image/webp', 'application/pdf')),
+    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'file')),
+    mime_type TEXT NOT NULL,
     byte_size INTEGER NOT NULL CHECK(byte_size > 0),
     storage_path TEXT NOT NULL,
     checksum_sha256 TEXT NOT NULL CHECK(length(checksum_sha256) = 64),
@@ -472,6 +473,18 @@ CREATE TABLE IF NOT EXISTS campaign_audit_events (
     FOREIGN KEY(campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
     FOREIGN KEY(campaign_recipient_id) REFERENCES campaign_recipients(id) ON DELETE SET NULL
 );
+
+CREATE TABLE IF NOT EXISTS campaign_response_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id TEXT NOT NULL,
+    campaign_recipient_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
+    FOREIGN KEY(campaign_recipient_id) REFERENCES campaign_recipients(id) ON DELETE CASCADE,
+    FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_response_recipient ON campaign_response_events(campaign_recipient_id, id);
 
 CREATE TABLE IF NOT EXISTS campaign_phone_capture_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

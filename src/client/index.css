@@ -321,6 +321,14 @@ html, body, #root {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  /*
+   * A conversation is replaced as one rendering island when its thread changes.
+   * This prevents a previously virtualized Messenger viewport from being painted
+   * over the newly selected customer while Chromium is catching up.
+   */
+  isolation: isolate;
+  contain: layout paint;
+  background: var(--color-bg-app);
 }
 
 .chat-messages {
@@ -328,6 +336,9 @@ html, body, #root {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  /* Keep old scroll layers out of the next conversation's paint tree. */
+  isolation: isolate;
+  contain: layout paint style;
 }
 
 .chat-content-wrapper {

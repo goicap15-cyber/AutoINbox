@@ -15,6 +15,18 @@ function updateQueueStatusFromClientMessage(clientMessageId, status, errorReason
 }
 
 class OutboundDomCorrelationService {
+  static hasRecentCrmImageOutbound(database, threadId, observedTimestamp = 0) {
+    const observed = Number(observedTimestamp) || Date.now();
+    return Boolean(database.prepare(`
+      SELECT 1 FROM messages
+      WHERE thread_id = ? AND is_outgoing = 1
+        AND client_message_id IS NOT NULL
+        AND media_type = 'image'
+        AND ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) <= 180000
+      LIMIT 1
+    `).get(threadId, observed, observed));
+  }
+
   static findTemporaryIdUpgrade(database, threadId, message, isMedia = false) {
     if (!message?.fb_message_id) return null;
     const observedTimestamp = Number(message.timestamp_ms) || Date.parse(message.created_at || '') || Date.now();
@@ -29,7 +41,7 @@ class OutboundDomCorrelationService {
       FROM messages
       WHERE thread_id = ? AND is_outgoing = 1 AND delivery_status = 'sent'
         AND fb_message_id IS NOT NULL AND fb_message_id != ?
-        AND fb_message_id NOT LIKE 'mid.%'
+        AND (fb_message_id NOT LIKE 'mid.%' OR client_message_id IS NOT NULL)
         AND ${mediaClause}
         AND ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) <= 90000
       ORDER BY ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) ASC, id DESC
@@ -76,6 +88,17 @@ class OutboundDomCorrelationService {
     // while CRM already owns a temporary attachment row. Upgrade that durable
     // CRM row first; otherwise merging into the Facebook base leaves two images.
     if (isOutgoing) {
+      // When the base Facebook id already belongs to the CRM-owned attachment,
+      // it is the exact parent. Merge the late _media companion into it before
+      // any fuzzy recent-media lookup can select a different send.
+      if (parent && (parent.attachment_id || parent.client_message_id)) {
+        database.prepare(`UPDATE messages SET media_type = ?,
+          media_url = CASE WHEN attachment_id IS NOT NULL THEN media_url ELSE COALESCE(?, media_url) END,
+          local_media_path = COALESCE(local_media_path, ?)
+          WHERE id = ?`).run(message.media_type || 'image', message.media_url || null,
+            message.local_media_path || null, parent.id);
+        return database.prepare('SELECT * FROM messages WHERE id = ?').get(parent.id);
+      }
       const temporary = this.findTemporaryIdUpgrade(database, threadId, {
         ...message, fb_message_id: parentFbMessageId
       }, true);
@@ -85,12 +108,21 @@ class OutboundDomCorrelationService {
           UPDATE messages SET fb_message_id = ?, media_type = ?,
             media_url = CASE WHEN attachment_id IS NOT NULL THEN media_url ELSE COALESCE(?, media_url) END,
             local_media_path = COALESCE(local_media_path, ?),
-            timestamp_ms = CASE WHEN ? > 0 THEN ? ELSE timestamp_ms END,
-            timestamp_source = COALESCE(?, timestamp_source)
+            -- The CRM-created attachment row owns display time/order. The
+            -- Messenger observation confirms transport only; it must not move
+            -- or replace the already-visible CRM image bubble.
+            timestamp_ms = timestamp_ms,
+            timestamp_source = timestamp_source,
+            sequence_order = sequence_order,
+            content = CASE
+              WHEN TRIM(COALESCE(content, '')) GLOB '[0-9]*'
+               AND LENGTH(TRIM(COALESCE(content, ''))) <= 2
+               AND CAST(TRIM(content) AS INTEGER) = CAST((? / 60000) AS INTEGER) % 60
+              THEN '' ELSE content END
           WHERE id = ?
         `).run(parentFbMessageId, message.media_type || 'image', message.media_url || null,
-          message.local_media_path || null, Number(message.timestamp_ms) || 0, Number(message.timestamp_ms) || 0,
-          message.timestamp_source || null, temporary.id);
+          message.local_media_path || null,
+          Number(message.timestamp_ms) || 0, temporary.id);
         return database.prepare('SELECT * FROM messages WHERE id = ?').get(temporary.id);
       }
     }
@@ -99,28 +131,42 @@ class OutboundDomCorrelationService {
       UPDATE messages SET
         media_type = CASE WHEN ? IS NOT NULL AND ? != 'text' THEN ? ELSE media_type END,
         media_url = CASE WHEN attachment_id IS NOT NULL THEN media_url ELSE COALESCE(?, media_url) END,
-        local_media_path = COALESCE(?, local_media_path)
+        local_media_path = COALESCE(?, local_media_path),
+        timestamp_ms = CASE WHEN ? > 0 THEN ? ELSE timestamp_ms END,
+        timestamp_source = COALESCE(?, timestamp_source),
+        sequence_order = COALESCE(?, sequence_order),
+        content = CASE
+          WHEN TRIM(COALESCE(content, '')) GLOB '[0-9]*'
+           AND LENGTH(TRIM(COALESCE(content, ''))) <= 2
+           AND CAST(TRIM(content) AS INTEGER) = CAST((? / 60000) AS INTEGER) % 60
+          THEN '' ELSE content END
       WHERE id = ?
     `).run(message.media_type || null, message.media_type || null, message.media_type || null,
-      message.media_url || null, message.local_media_path || null, parent.id);
+      message.media_url || null, message.local_media_path || null,
+      Number(message.timestamp_ms) || 0, Number(message.timestamp_ms) || 0, message.timestamp_source || null,
+      Number.isFinite(Number(message.sequence_order)) ? Number(message.sequence_order) : null,
+      Number(message.timestamp_ms) || 0, parent.id);
     return database.prepare('SELECT * FROM messages WHERE id = ?').get(parent.id);
   }
 
   static collapseStoredMediaCompanions(database, threadId) {
     const companions = database.prepare(`
-      SELECT media.id AS media_id, media.media_type, media.media_url, media.local_media_path,
-             parent.id AS parent_id
+      SELECT media.id AS media_id, media.media_type, media.media_url, media.local_media_path
       FROM messages media
-      JOIN messages parent
-        ON parent.thread_id = media.thread_id
-       AND parent.is_outgoing = media.is_outgoing
-       AND parent.fb_message_id = substr(media.fb_message_id, 1, length(media.fb_message_id) - 6)
       WHERE media.thread_id = ? AND media.fb_message_id LIKE '%_media'
+        AND media.client_message_id IS NULL
+        AND media.attachment_id IS NULL
+        AND media.latest_attempt_id IS NULL
     `).all(threadId);
     for (const row of companions) {
       const media = database.prepare('SELECT * FROM messages WHERE id = ?').get(row.media_id);
-      this.mergeMediaCompanion(database, threadId, media, Boolean(media.is_outgoing));
-      database.prepare('DELETE FROM messages WHERE id = ?').run(row.media_id);
+      const merged = this.mergeMediaCompanion(database, threadId, media, Boolean(media.is_outgoing));
+      // A CRM-owned attachment can be upgraded to a Facebook id ending in
+      // _media. It is the durable row referenced by outbound attempts, not a
+      // disposable companion. Never delete the row returned by the merge.
+      if (merged && Number(merged.id) !== Number(row.media_id)) {
+        database.prepare('DELETE FROM messages WHERE id = ?').run(row.media_id);
+      }
     }
     return companions.length;
   }
@@ -196,17 +242,42 @@ class OutboundDomCorrelationService {
    * content equality. Bounding by the same confirmation window at least
    * keeps a long-stale pending image in this thread from being coincidentally
    * claimed by an unrelated later image confirmation.
+   *
+   * @param {string} mediaType - 'image' | 'video' | 'any' (default 'any').
+   *   Pass 'image' to exclude video pending rows so an image DOM observation
+   *   cannot accidentally claim a video that is stuck in awaiting_confirmation.
+   *   Pass 'video' to match only video pending rows. 'any' is the legacy
+   *   behaviour (no media_type filter) used when the caller doesn't know the
+   *   observed media type.
    */
-  static matchPendingImageOutbound(database, threadId) {
+  static matchPendingImageOutbound(database, threadId, mediaType = 'any') {
     const windowSeconds = Math.round(OutboundConfirmationService.DEFAULT_CONFIRMATION_WINDOW_MS / 1000);
+
+    // Build an extra WHERE clause that restricts attachment media_type when
+    // the caller knows what it saw. This prevents cross-type false matches:
+    // - An image DOM event must not consume a pending video attempt (video
+    //   may still be uploading or temporarily stuck – it should time out to
+    //   failed on its own, not be stolen by the next image send).
+    // - A video DOM event must not consume a pending image attempt.
+    const normalizedMediaType = ['image', 'video', 'file'].includes(String(mediaType || '').toLowerCase())
+      ? String(mediaType).toLowerCase()
+      : 'any';
+    const mediaTypeClause = normalizedMediaType === 'any'
+      ? ''
+      : "AND LOWER(COALESCE(oa.media_type, queued.attachment_media_type, outbound.media_type, '')) = ?";
+    const params = normalizedMediaType === 'any'
+      ? [threadId, windowSeconds]
+      : [threadId, windowSeconds, normalizedMediaType];
+
     return database.prepare(`
-      SELECT outbound.id, outbound.client_message_id
+      SELECT outbound.id, outbound.client_message_id, outbound.thread_id, outbound.attachment_id, outbound.media_type
       FROM messages outbound
       LEFT JOIN outbound_attempts attempt ON outbound.latest_attempt_id = attempt.id
       LEFT JOIN message_queue queued ON (
         outbound.client_message_id = 'queue_' || queued.id
         OR attempt.id = queued.outbound_attempt_id
       )
+      LEFT JOIN outbound_attachments oa ON oa.id = COALESCE(outbound.attachment_id, queued.attachment_id)
       WHERE outbound.thread_id = ? AND outbound.is_outgoing = 1
         AND outbound.delivery_status = 'pending'
         AND (
@@ -216,8 +287,9 @@ class OutboundDomCorrelationService {
           OR queued.manifest_id IS NOT NULL
         )
         AND datetime(outbound.created_at) >= datetime('now', '-' || ? || ' seconds')
-      ORDER BY outbound.id DESC LIMIT 1
-    `).get(threadId, windowSeconds) || null;
+        ${mediaTypeClause}
+      ORDER BY outbound.id ASC LIMIT 1
+    `).get(...params) || null;
   }
 
   /**
@@ -229,7 +301,9 @@ class OutboundDomCorrelationService {
    */
   static confirmPendingOutbound(database, ioServer, pendingRow, { fbMessageId, tsMs = 0, tsSource = 'unknown', rawMessage }) {
     const confirmedId = fbMessageId || `dom_${pendingRow.client_message_id}`;
-    const existingConfirmed = database.prepare('SELECT id, is_outgoing FROM messages WHERE fb_message_id = ?').get(confirmedId);
+    const existingConfirmed = database.prepare(
+      'SELECT id, thread_id, is_outgoing, media_type, media_url, attachment_id, timestamp_ms FROM messages WHERE fb_message_id = ?'
+    ).get(confirmedId);
     if (existingConfirmed) {
       if (existingConfirmed.id === pendingRow.id) {
         return false;
@@ -237,8 +311,17 @@ class OutboundDomCorrelationService {
       if (existingConfirmed.is_outgoing === 0) {
         console.log(`[WS] Removing duplicate misidentified incoming row ${existingConfirmed.id} in favor of pending outbound row ${pendingRow.id}`);
         database.prepare('DELETE FROM messages WHERE id = ?').run(existingConfirmed.id);
+      } else if (
+        (pendingRow.attachment_id || (pendingRow.media_type && pendingRow.media_type !== 'text')) &&
+        (existingConfirmed.media_url || (existingConfirmed.media_type && existingConfirmed.media_type !== 'text')) &&
+        String(existingConfirmed.thread_id) === String(pendingRow.thread_id || rawMessage?.thread_id)
+      ) {
+        // History sync can persist Facebook's official media row before the
+        // realtime observer confirms the CRM-owned pending attachment. Keep
+        // the durable CRM row (preview/order/client id) and collapse the echo.
+        database.prepare('DELETE FROM messages WHERE id = ?').run(existingConfirmed.id);
       } else {
-        console.log(`[WS] Confirmed ID ${confirmedId} đã tồn tại ở row outgoing ${existingConfirmed.id}. Bỏ qua pending match.`);
+        console.log(`[WS] Confirmed ID ${confirmedId} already belongs to outgoing row ${existingConfirmed.id}; pending match skipped.`);
         return false;
       }
     }

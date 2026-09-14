@@ -126,3 +126,87 @@ test('Page image bytes changed after staging fail checksum verification before e
   assert.equal(OutboundAttemptRepository.getById(accepted.attempt_id, db).status, 'failed');
   assert.equal(db.prepare('SELECT status FROM message_queue WHERE id = ?').get(accepted.queue_id).status, 'failed');
 }));
+
+test('an official media echo already stored by history is collapsed into the pending CRM row', () => withPageFixture(async (fixture) => {
+  const { db } = fixture;
+  const { accepted } = await createPageImage(fixture);
+  await queueWorker.processNext();
+  OutboundAttemptRepository.transition(accepted.attempt_id, ['dispatching'], 'awaiting_confirmation', {}, db);
+
+  db.prepare(`
+    INSERT INTO messages (thread_id, fb_message_id, sender_id, content, media_type, media_url, is_outgoing, delivery_status, timestamp_ms)
+    VALUES ('thread-page-image', 'mid.facebook.history.echo', 'SYSTEM', '', 'image', 'https://scontent.example/image.jpg', 1, 'sent', ?)
+  `).run(Date.now());
+
+  const confirmed = OutboundConfirmationService.confirmObservation({
+    threadId: 'thread-page-image',
+    fbMessageId: 'mid.facebook.history.echo',
+    isOutgoing: true,
+    mediaType: 'image',
+    content: '',
+    observedAt: Date.now(),
+    confirmationSource: 'personal_dom'
+  }, { database: db });
+
+  assert.equal(confirmed.matched, true);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM messages WHERE thread_id = 'thread-page-image' AND media_type = 'image'").get().count, 1);
+  assert.equal(db.prepare('SELECT fb_message_id FROM messages WHERE id = ?').get(accepted.message_id).fb_message_id, 'mid.facebook.history.echo');
+}));
+
+test('a stale rich-message dispatch is failed during queue recovery', () => withPageFixture(async (fixture) => {
+  const { db } = fixture;
+  const { attachment, accepted } = await createPageImage(fixture);
+  const dispatch = await queueWorker.processNext();
+  assert.equal(dispatch.outcome, 'dispatched');
+
+  db.prepare(`
+    UPDATE outbound_attempts
+    SET dispatched_at = datetime('now', '-10 minutes'),
+        updated_at = datetime('now', '-10 minutes')
+    WHERE id = ?
+  `).run(accepted.attempt_id);
+  db.prepare(`
+    UPDATE message_queue
+    SET processed_at = datetime('now', '-10 minutes')
+    WHERE id = ?
+  `).run(accepted.queue_id);
+
+  const recovered = queueWorker.recoverStaleRichDispatches({
+    dispatchTimeoutMs: 3 * 60 * 1000,
+    confirmationTimeoutMs: 3 * 60 * 1000
+  });
+
+  assert.deepEqual(recovered, { dispatching: 1, awaiting_confirmation: 0 });
+  assert.equal(OutboundAttemptRepository.getById(accepted.attempt_id, db).status, 'failed');
+  assert.equal(db.prepare('SELECT status FROM message_queue WHERE id = ?').get(accepted.queue_id).status, 'failed');
+  assert.equal(db.prepare('SELECT status FROM outbound_attachments WHERE id = ?').get(attachment.id).status, 'failed');
+}));
+test('an image attempt ignores a video observation and remains available for the real image confirmation', () => withPageFixture(async (fixture) => {
+  const { db } = fixture;
+  const { accepted } = await createPageImage(fixture);
+  await queueWorker.processNext();
+  OutboundAttemptRepository.transition(accepted.attempt_id, ['dispatching'], 'awaiting_confirmation', {}, db);
+
+  const wrongKind = OutboundConfirmationService.confirmObservation({
+    threadId: 'thread-page-image',
+    fbMessageId: 'mid.facebook.unrelated.video',
+    isOutgoing: true,
+    mediaType: 'video',
+    content: '',
+    observedAt: Date.now(),
+    confirmationSource: 'personal_dom'
+  }, { database: db });
+  assert.equal(wrongKind.matched, false);
+  assert.equal(db.prepare('SELECT delivery_status FROM messages WHERE id = ?').get(accepted.message_id).delivery_status, 'pending');
+
+  const correctKind = OutboundConfirmationService.confirmObservation({
+    threadId: 'thread-page-image',
+    fbMessageId: 'mid.facebook.real.image',
+    isOutgoing: true,
+    mediaType: 'image',
+    content: '',
+    observedAt: Date.now(),
+    confirmationSource: 'personal_dom'
+  }, { database: db });
+  assert.equal(correctKind.matched, true);
+}));

@@ -20,6 +20,16 @@ test('a stable native_id makes the id direction-independent regardless of conten
   assert.equal(makeDomMessageId('t1', firstScan), makeDomMessageId('t1', secondScan));
 });
 
+test('grouped native bubbles keep the legacy first id and distinguish later bubbles', () => {
+  const first = { content: 'tin mot', is_outgoing: false, native_id: 'mid.grouped', bubble_idx: 0 };
+  const second = { content: 'tin hai', is_outgoing: false, native_id: 'mid.grouped', bubble_idx: 1 };
+  const third = { content: 'tin ba', is_outgoing: false, native_id: 'mid.grouped', bubble_idx: 2 };
+
+  assert.equal(makeDomMessageId('t1', first), 'mid.grouped');
+  assert.equal(makeDomMessageId('t1', second), 'mid.grouped__bubble_1');
+  assert.equal(makeDomMessageId('t1', third), 'mid.grouped__bubble_2');
+});
+
 test('genuinely different content still produces different ids (no regression, SC-002)', () => {
   const a = { content: 'ok', is_outgoing: false, native_id: null, bubble_idx: 0 };
   const b = { content: 'ok nhé', is_outgoing: false, native_id: null, bubble_idx: 0 };
@@ -39,4 +49,17 @@ test('shouldSkipObservation: same id but direction now disagrees -> do NOT skip 
 test('shouldSkipObservation: id never seen before -> do NOT skip', () => {
   const seen = new Map();
   assert.equal(shouldSkipObservation(seen, 'dom_t1_hash_1_0', false), false);
+});
+
+test('separate physical bubbles with identical content keep separate ids', () => {
+  const first = { content: 'c', native_id: null, bubble_idx: 0, dom_occurrence_id: 101 };
+  const second = { content: 'c', native_id: null, bubble_idx: 0, dom_occurrence_id: 102 };
+  assert.notEqual(makeDomMessageId('t1', first), makeDomMessageId('t1', second));
+});
+
+test('content observer has no delayed startup or thread-change baseline window', () => {
+  const source = fs.readFileSync('src/extension/content.js', 'utf8');
+  assert.doesNotMatch(source, /Second seed after 3s/);
+  assert.doesNotMatch(source, /seedBaseline\(thread_id\);\s*setTimeout/);
+  assert.match(source, /chatObserver\.observe\(document\.body[\s\S]*observerPaused = false;/);
 });

@@ -240,20 +240,38 @@ test('merges an official media companion into the existing temporary attachment 
   db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
     .run('thread-temp-media', 'thread-temp-media', 'acct-temp-media', 'Khach hang');
   db.prepare(`INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, media_url, is_outgoing, delivery_status, timestamp_ms)
-    VALUES ('thread-temp-media', '7503000', 'client-img', 'acct-temp-media', '', 'image', '/api/local', 1, 'sent', 137000)`).run();
+    VALUES ('thread-temp-media', '7503000', 'client-img', 'acct-temp-media', '57', 'image', '/api/local', 1, 'sent', 3420000)`).run();
   db.prepare(`INSERT INTO messages (thread_id, fb_message_id, sender_id, content, media_type, is_outgoing, delivery_status, timestamp_ms)
     VALUES ('thread-temp-media', 'mid.$IMG', 'acct-temp-media', '57', 'text', 1, 'sent', 100002)`).run();
 
   const merged = OutboundDomCorrelationService.mergeMediaCompanion(db, 'thread-temp-media', {
     fb_message_id: 'mid.$IMG_media', content: '', media_type: 'image', media_url: 'https://facebook/image.jpg',
-    timestamp_ms: 100001, timestamp_source: 'dom_order'
+    timestamp_ms: 3420001, timestamp_source: 'dom_order', sequence_order: 77
   }, true);
   assert.ok(merged);
   assert.equal(merged.client_message_id, 'client-img');
   assert.equal(merged.fb_message_id, 'mid.$IMG');
+  assert.equal(merged.sequence_order, null);
+  assert.equal(merged.timestamp_ms, 3420000);
+  assert.equal(merged.content, '');
   assert.equal(db.prepare('SELECT COUNT(*) total FROM messages WHERE thread_id = ?').get('thread-temp-media').total, 1);
 }));
 
+test('merges a late _media echo into a CRM row already upgraded to another mid id', () => withDatabase((db) => {
+  db.prepare('INSERT OR IGNORE INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-live-media', 'Test', '/tmp/test');
+  db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
+    .run('thread-live-media', 'thread-live-media', 'acct-live-media', 'Khach hang');
+  db.prepare(`INSERT INTO messages
+    (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, is_outgoing, delivery_status, timestamp_ms)
+    VALUES ('thread-live-media', 'mid.$CRMROW', 'queue_live', 'acct-live-media', 'caption', 'image', 1, 'sent', 100000)`).run();
+  db.prepare(`INSERT INTO messages
+    (thread_id, fb_message_id, sender_id, content, media_type, media_url, is_outgoing, delivery_status, timestamp_ms)
+    VALUES ('thread-live-media', 'mid.$FACEBOOK_media', 'acct-live-media', '', 'image', 'https://facebook/image.jpg', 1, 'sent', 100001)`).run();
+
+  assert.equal(OutboundDomCorrelationService.collapseStoredMediaCompanions(db, 'thread-live-media'), 1);
+  const rows = db.prepare('SELECT fb_message_id, client_message_id, content, media_type FROM messages WHERE thread_id = ?').all('thread-live-media');
+  assert.deepEqual(rows, [{ fb_message_id: 'mid.$FACEBOOK', client_message_id: 'queue_live', content: 'caption', media_type: 'image' }]);
+}));
 test('collapses media companion rows already stored in the database', () => withDatabase((db) => {
   db.prepare('INSERT OR IGNORE INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-old-media', 'Test', '/tmp/test');
   db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
@@ -268,4 +286,58 @@ test('collapses media companion rows already stored in the database', () => with
   assert.equal(OutboundDomCorrelationService.collapseStoredMediaCompanions(db, 'thread-old-media'), 1);
   const rows = db.prepare('SELECT fb_message_id, content, media_type, media_url FROM messages WHERE thread_id = ?').all('thread-old-media');
   assert.deepEqual(rows, [{ fb_message_id: 'mid.$OLD', content: 'caption', media_type: 'image', media_url: 'https://example.test/old.jpg' }]);
+}));
+
+test('detects a recent CRM-owned image so Messenger echo can be ignored', () => withDatabase((db) => {
+  db.prepare('INSERT OR IGNORE INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-own', 'Test', '/tmp/test');
+  db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
+    .run('thread-own', 'thread-own', 'acct-own', 'Khach hang');
+  db.prepare(`INSERT INTO messages
+    (thread_id, fb_message_id, client_message_id, sender_id, content, media_type,
+     is_outgoing, delivery_status, timestamp_ms)
+    VALUES ('thread-own', 'pending_client-img', 'client-img', 'acct-own', '', 'image', 1, 'sent', 100000)`).run();
+  assert.equal(OutboundDomCorrelationService.hasRecentCrmImageOutbound(db, 'thread-own', 100500), true);
+  assert.equal(OutboundDomCorrelationService.hasRecentCrmImageOutbound(db, 'thread-own', 400000), false);
+}));
+
+test('typed media correlation never lets an image observation claim a pending video', () => withDatabase((db) => {
+  db.prepare('INSERT OR IGNORE INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-media-kind', 'Test', '/tmp/test');
+  db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
+    .run('thread-media-kind', 'thread-media-kind', 'acct-media-kind', 'Khach hang');
+  db.prepare(`INSERT INTO messages
+    (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, is_outgoing, delivery_status)
+    VALUES ('thread-media-kind', 'pending_video', 'client-video', 'SYSTEM', '', 'video', 1, 'pending')`).run();
+  db.prepare(`INSERT INTO messages
+    (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, is_outgoing, delivery_status)
+    VALUES ('thread-media-kind', 'pending_image', 'client-image', 'SYSTEM', '', 'image', 1, 'pending')`).run();
+
+  assert.equal(
+    OutboundDomCorrelationService.matchPendingImageOutbound(db, 'thread-media-kind', 'image').client_message_id,
+    'client-image'
+  );
+  assert.equal(
+    OutboundDomCorrelationService.matchPendingImageOutbound(db, 'thread-media-kind', 'video').client_message_id,
+    'client-video'
+  );
+}));
+
+test('confirmation collapses an already-persisted Facebook media echo into the CRM-owned row', () => withDatabase((db) => {
+  db.prepare('INSERT OR IGNORE INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-media-echo', 'Test', '/tmp/test');
+  db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
+    .run('thread-media-echo', 'thread-media-echo', 'acct-media-echo', 'Khach hang');
+  db.prepare(`INSERT INTO messages
+    (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, media_url, is_outgoing, delivery_status, timestamp_ms)
+    VALUES ('thread-media-echo', 'pending_client-media', 'client-media', 'SYSTEM', '', 'image', '/api/local-preview', 1, 'pending', 100000)`).run();
+  db.prepare(`INSERT INTO messages
+    (thread_id, fb_message_id, sender_id, content, media_type, media_url, is_outgoing, delivery_status, timestamp_ms)
+    VALUES ('thread-media-echo', 'mid.$MEDIA-ECHO', 'acct-media-echo', '', 'image', 'https://facebook/image.jpg', 1, 'sent', 100001)`).run();
+
+  const pending = db.prepare('SELECT * FROM messages WHERE client_message_id = ?').get('client-media');
+  assert.equal(OutboundDomCorrelationService.confirmPendingOutbound(db, null, pending, {
+    fbMessageId: 'mid.$MEDIA-ECHO', tsMs: 100001, tsSource: 'dom_history_sync',
+    rawMessage: { thread_id: 'thread-media-echo', media_type: 'image', media_url: 'https://facebook/image.jpg' }
+  }), true);
+
+  const rows = db.prepare('SELECT fb_message_id, client_message_id, delivery_status FROM messages WHERE thread_id = ?').all('thread-media-echo');
+  assert.deepEqual(rows, [{ fb_message_id: 'mid.$MEDIA-ECHO', client_message_id: 'client-media', delivery_status: 'sent' }]);
 }));

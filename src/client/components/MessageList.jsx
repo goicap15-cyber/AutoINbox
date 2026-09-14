@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useLayoutEffect, useState } from 'react';
 import MessageBubble from './MessageBubble.jsx';
 import { MessageSquare, RefreshCw } from 'lucide-react';
 import { collapseMessengerMediaCompanions } from '../utils/messageDedup.js';
+import { getMessageDateKey, formatDateSeparatorLabel } from '../utils/messageTimestampPresentation.js';
 
 export default function MessageList({ messages = [], activeThread, onSyncThread, onRetryMessage, onViewportScroll, historySyncing = false }) {
   const containerRef = useRef(null);
@@ -19,7 +20,10 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
   const localSyncTimeoutRef = useRef(null);
   const [localHistorySyncing, setLocalHistorySyncing] = useState(false);
   const displayMessages = collapseMessengerMediaCompanions(messages);
-  const messageIdentity = (msg, index) => String(msg?.id || msg?.client_message_id || msg?.fb_message_id || `${msg?.created_at || msg?.time || ''}:${index}`);
+  // CRM-owned bubbles keep the client identity for their whole lifecycle.
+  // The database id and Facebook mid arrive later and must not remount the
+  // DOM node or make React treat the same image as a new bubble.
+  const messageIdentity = (msg, index) => String(msg?.ui_render_key || msg?.client_message_id || msg?.id || msg?.fb_message_id || `${msg?.created_at || msg?.time || ''}:${index}`);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -91,6 +95,13 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
 
   const queueViewportDelta = (delta) => {
     if (!delta || !onViewportScroll) return;
+    // History synchronization is one-way: only an upward gesture can reveal
+    // rows older than the current CRM snapshot. A downward sync used to let
+    // Messenger's newer viewport overwrite the persisted oldest cursor.
+    if (delta > 0) {
+      pendingOlderSyncRef.current = false;
+      return;
+    }
     if (delta < 0 && historyRequestInFlightRef.current) return;
     if (delta < 0) {
       historyRequestInFlightRef.current = true;
@@ -172,12 +183,27 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
             )}
           </div>
         ) : (
-          <div className="py-2 space-y-4">
+          <div className="py-2 space-y-1.5">
             {displayMessages.map((msg, index) => {
+              const currentDateKey = getMessageDateKey(msg);
+              const previousDateKey = index > 0 ? getMessageDateKey(displayMessages[index - 1]) : null;
+              const showDateDivider = currentDateKey && currentDateKey !== previousDateKey;
+
               return (
-                <div key={msg.id || msg.client_message_id || `${msg.fb_message_id}-${msg.created_at || msg.time || index}`}>
-                  <MessageBubble msg={msg} activeThread={activeThread} onRetry={onRetryMessage} />
-                </div>
+                <React.Fragment key={messageIdentity(msg, index)}>
+                  {showDateDivider && (
+                    <div className="flex items-center gap-3 my-4 select-none">
+                      <div className="flex-1 h-px bg-[var(--color-border)]/60" />
+                      <span className="text-[11px] font-medium text-[var(--color-text-muted)] px-3 py-0.5 rounded-full bg-[var(--color-bg-panel)] border border-[var(--color-border)] shadow-xs capitalize">
+                        {formatDateSeparatorLabel(msg)}
+                      </span>
+                      <div className="flex-1 h-px bg-[var(--color-border)]/60" />
+                    </div>
+                  )}
+                  <div>
+                    <MessageBubble msg={msg} activeThread={activeThread} onRetry={onRetryMessage} />
+                  </div>
+                </React.Fragment>
               );
             })}
           </div>

@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { X, ExternalLink, ShieldAlert, RefreshCw, PlusCircle, Trash2 } from 'lucide-react';
+import { X, ExternalLink, ShieldAlert, RefreshCw, PlusCircle, Trash2, Monitor } from 'lucide-react';
 
 export default function AccountManagerModal({ onClose, onSourcesChanged, onFacebookSyncStart, socket, sessionUser }) {
   const isCompanyAdmin = sessionUser?.company_role === 'ADMIN';
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [startingId, setStartingId] = useState(null);
+  const [displayActionId, setDisplayActionId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
   const [accountActionError, setAccountActionError] = useState('');
   const [addingSession, setAddingSession] = useState(false);
@@ -195,6 +196,40 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
     }
   };
 
+  const handleChromeDisplayChange = async (account, nextVisible) => {
+    const accountId = String(account.id);
+    const shouldStartChrome = nextVisible && account.is_chrome_running !== true;
+    setAccountActionError('');
+    setDisplayActionId(accountId);
+    setAccounts((current) => current.map((item) => (
+      String(item.id) === accountId
+        ? {
+            ...item,
+            is_chrome_running: nextVisible ? true : item.is_chrome_running,
+            chrome_display_mode: nextVisible ? 'VISIBLE' : 'BACKGROUND'
+          }
+        : item
+    )));
+    if (shouldStartChrome) onFacebookSyncStart?.(accountId, true);
+    try {
+      if (shouldStartChrome) {
+        const startRes = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/start`, { method: 'POST' });
+        const startData = await startRes.json().catch(() => ({}));
+        if (!startRes.ok || !startData.success) throw new Error(startData.error || 'Không thể khởi động Chrome');
+      }
+      const action = nextVisible ? 'open' : 'background';
+      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/${action}`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || 'Không thể đổi chế độ hiển thị Chrome');
+      await loadAccounts();
+    } catch (error) {
+      if (shouldStartChrome) onFacebookSyncStart?.(accountId, false);
+      await loadAccounts();
+      setAccountActionError(error.message || 'Không thể đổi chế độ hiển thị Chrome');
+    } finally {
+      setDisplayActionId(null);
+    }
+  };
   const handleDeleteAccount = async (account) => {
     const accountName = account.name || account.id;
     const confirmed = window.confirm(
@@ -382,21 +417,24 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
               {accounts.map((acc) => {
                 const isCheckpoint = acc.status === 'CHECKPOINT';
                 const isConnected = acc.is_extension_connected === true;
+                const isChromeVisible = acc.is_chrome_running === true && acc.chrome_display_mode === 'VISIBLE';
+                const isChangingDisplay = displayActionId === String(acc.id);
                 return (
                   <div
                     key={acc.id}
-                    className={`p-3.5 rounded-lg border flex items-center justify-between gap-3 ${
+                    className={`p-3.5 rounded-lg border ${
                       isCheckpoint ? 'bg-slate-950 border-red-500/40' : 'bg-slate-950 border-slate-800'
                     }`}
                   >
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-slate-800 text-slate-300 font-semibold text-xs flex items-center justify-center border border-slate-700/50">
+                    <div className="flex items-start gap-3 min-w-0">
+                      <div className="relative w-10 h-10 shrink-0 overflow-hidden rounded-full bg-slate-800 text-slate-300 font-semibold text-xs flex items-center justify-center border border-slate-700/50">
                         {(acc.name || 'F').charAt(0).toUpperCase()}
+                        {acc.avatar_url && <img src={acc.avatar_url} alt="" className="absolute inset-0 h-full w-full object-cover" onError={(event) => { event.currentTarget.style.display = 'none'; }} />}
                       </div>
-                      <div>
-                        <h4 className="text-xs font-semibold text-slate-100">{acc.name || 'Tài khoản Facebook'}</h4>
-                        <div className="flex items-center gap-2 mt-0.5">
-                          <span className="text-[10px] text-slate-500 font-mono">ID: {acc.id}</span>
+                      <div className="min-w-0 flex-1">
+                        <h4 className="text-xs font-semibold text-slate-100 break-words">{acc.name || 'Tài khoản Facebook'}</h4>
+                        <div className="text-[10px] text-slate-500 font-mono mt-0.5 break-all">ID: {acc.id}</div>
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
                           <span
                             className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                               isConnected
@@ -406,6 +444,11 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
                           >
                             {isConnected ? 'Đã kết nối' : 'Chưa kết nối'}
                           </span>
+                          {acc.is_chrome_running && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-sky-500/10 text-sky-400 border border-sky-500/20">
+                              Chrome đang chạy
+                            </span>
+                          )}
                           {isCheckpoint && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-red-500/10 text-red-400 border border-red-500/20">
                               Checkpoint / 2FA
@@ -415,32 +458,58 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleStartChrome(acc.id)}
-                        disabled={startingId === acc.id || deletingId === acc.id}
-                        className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors border disabled:opacity-50 ${
-                          isCheckpoint
-                            ? 'bg-red-600 hover:bg-red-500 text-white border-red-500'
-                            : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700/60'
-                        }`}
-                      >
-                        {startingId === acc.id ? <RefreshCw size={13} className="animate-spin" /> : <ExternalLink size={13} />}
-                        <span>{startingId === acc.id ? 'Đang kết nối...' : (isCompanyAdmin ? 'Kết nối Facebook' : 'Kết nối')}</span>
-                      </button>
-                      {isCompanyAdmin && <button
-                        type="button"
-                        onClick={() => handleDeleteAccount(acc)}
-                        disabled={deletingId === acc.id || startingId === acc.id}
-                        aria-label={`Xóa tài khoản ${acc.name || acc.id}`}
-                        title="Xóa tài khoản khỏi CRM"
-                        className="p-1.5 rounded-md text-red-400 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-colors disabled:opacity-50"
-                      >
-                        {deletingId === acc.id
-                          ? <RefreshCw size={13} className="animate-spin" />
-                          : <Trash2 size={13} />}
-                      </button>}
+                    <div className="mt-3 pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Monitor size={14} className={isChromeVisible ? 'text-sky-400' : 'text-slate-500'} />
+                        <span className="text-[11px] text-slate-300">Hiện Chrome</span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={isChromeVisible}
+                          aria-label={`${isChromeVisible ? 'Ẩn' : 'Hiện'} Chrome của ${acc.name || acc.id}`}
+                          title={isChromeVisible ? 'OFF: Ẩn cửa sổ Chrome' : 'ON: Mở Chrome ra màn hình'}
+                          onClick={() => handleChromeDisplayChange(acc, !isChromeVisible)}
+                          disabled={isChangingDisplay || deletingId === acc.id}
+                          className={`relative inline-flex h-6 w-12 shrink-0 items-center rounded-full border transition-colors disabled:opacity-40 ${
+                            isChromeVisible
+                              ? 'bg-sky-500 border-sky-400'
+                              : 'bg-slate-800 border-slate-700'
+                          }`}
+                        >
+                          <span className={`absolute text-[8px] font-bold ${isChromeVisible ? 'left-1 text-white' : 'right-1 text-slate-400'}`}>
+                            {isChangingDisplay ? '...' : (isChromeVisible ? 'ON' : 'OFF')}
+                          </span>
+                          <span className={`h-4 w-4 rounded-full bg-white shadow transition-transform ${isChromeVisible ? 'translate-x-7' : 'translate-x-1'}`} />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+                        <button
+                          type="button"
+                          onClick={() => handleStartChrome(acc.id)}
+                          disabled={startingId === acc.id || deletingId === acc.id || isChangingDisplay}
+                          className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors border disabled:opacity-50 ${
+                            isCheckpoint
+                              ? 'bg-red-600 hover:bg-red-500 text-white border-red-500'
+                              : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700/60'
+                          }`}
+                        >
+                          {startingId === acc.id ? <RefreshCw size={13} className="animate-spin" /> : <ExternalLink size={13} />}
+                          <span>{startingId === acc.id ? 'Đang kết nối...' : (isCompanyAdmin ? 'Kết nối Facebook' : 'Kết nối')}</span>
+                        </button>
+                        {isCompanyAdmin && <button
+                          type="button"
+                          onClick={() => handleDeleteAccount(acc)}
+                          disabled={deletingId === acc.id || startingId === acc.id || isChangingDisplay}
+                          aria-label={`Xóa tài khoản ${acc.name || acc.id}`}
+                          title="Xóa tài khoản khỏi CRM"
+                          className="p-1.5 rounded-md text-red-400 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-colors disabled:opacity-50"
+                        >
+                          {deletingId === acc.id
+                            ? <RefreshCw size={13} className="animate-spin" />
+                            : <Trash2 size={13} />}
+                        </button>}
+                      </div>
                     </div>
                   </div>
                 );

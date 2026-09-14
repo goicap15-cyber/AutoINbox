@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const path = require('path');
 const JSZip = require('jszip');
 
-const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_BYTES = 25 * 1024 * 1024;
 const DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024;
 const SAFE_FILE_EXTENSIONS = Object.freeze({
   '.txt': 'text/plain', '.csv': 'text/csv', '.json': 'application/json', '.xml': 'application/xml', '.html': 'text/html', '.md': 'text/markdown',
@@ -19,7 +19,7 @@ const FILE_MIME_CAPABILITIES = Object.fromEntries(
   Object.entries(SAFE_FILE_EXTENSIONS).map(([extension, mimeType]) => [mimeType, Object.freeze({
     extension,
     extensions: Object.freeze(Object.entries(SAFE_FILE_EXTENSIONS).filter(([, value]) => value === mimeType).map(([key]) => key)),
-    mediaType: 'file'
+    mediaType: mimeType.startsWith('video/') ? 'video' : 'file'
   })])
 );
 const MIME_CAPABILITIES = Object.freeze({
@@ -83,6 +83,11 @@ function detectMimeType(buffer) {
     buffer.length >= 5 &&
     buffer.subarray(0, 5).toString('ascii') === '%PDF-'
   ) return 'application/pdf';
+  if (buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
+    const brand = buffer.subarray(8, 12).toString('ascii').toLowerCase();
+    return brand === 'qt  ' ? 'video/quicktime' : 'video/mp4';
+  }
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'AVI ') return 'video/x-msvideo';
   if (buffer.length >= 4 && buffer.subarray(0, 4).toString('binary') === 'PK\x03\x04') return 'application/zip';
   return null;
 }
@@ -295,7 +300,11 @@ function validateAttachment({
       'Attachment type is not supported.'
     );
   }
-  if (detectedMimeType && normalizedDeclared && normalizedDeclared !== detectedMimeType && !compatibleContainer) {
+  const extensionMatchesDetected = Boolean(extensionMimeType && detectedMimeType && extensionMimeType === detectedMimeType);
+  // Some Windows browsers misreport selected MP4/MOV files as application/pdf
+  // or octet-stream. If the filename extension and byte signature agree, trust
+  // the signature while retaining strict mismatch checks for unsafe files.
+  if (detectedMimeType && normalizedDeclared && normalizedDeclared !== detectedMimeType && !compatibleContainer && !extensionMatchesDetected) {
     throw new AttachmentValidationError(
       'ATTACHMENT_TYPE_MISMATCH',
       'Declared attachment type does not match its byte signature.',

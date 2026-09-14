@@ -110,6 +110,18 @@ CREATE TABLE IF NOT EXISTS campaign_audit_events (
     FOREIGN KEY(campaign_recipient_id) REFERENCES campaign_recipients(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS campaign_response_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id TEXT NOT NULL,
+    campaign_recipient_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
+    FOREIGN KEY(campaign_recipient_id) REFERENCES campaign_recipients(id) ON DELETE CASCADE,
+    FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_response_recipient ON campaign_response_events(campaign_recipient_id, id);
+
 CREATE TABLE IF NOT EXISTS campaign_phone_capture_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     campaign_id TEXT NOT NULL,

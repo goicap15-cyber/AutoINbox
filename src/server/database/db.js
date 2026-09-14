@@ -838,6 +838,158 @@ const migrations = [
         console.log('[DB] Migration v56: threads.inbox_folder already exists, skipped.');
       }
     }
+  },
+  {
+    version: 57,
+    name: 'add_campaign_response_events',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS campaign_response_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          campaign_id TEXT NOT NULL,
+          campaign_recipient_id TEXT NOT NULL,
+          message_id INTEGER NOT NULL UNIQUE,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
+          FOREIGN KEY(campaign_recipient_id) REFERENCES campaign_recipients(id) ON DELETE CASCADE,
+          FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_campaign_response_recipient
+          ON campaign_response_events(campaign_recipient_id, id);
+      `);
+    }
+  }
+,
+  {
+    version: 58,
+    name: 'store_outbound_video_metadata_natively',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE outbound_attachments_v58 (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          created_by INTEGER,
+          original_name TEXT NOT NULL,
+          safe_name TEXT NOT NULL,
+          media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'file')),
+          mime_type TEXT NOT NULL,
+          byte_size INTEGER NOT NULL CHECK(byte_size > 0),
+          storage_path TEXT NOT NULL,
+          checksum_sha256 TEXT NOT NULL CHECK(length(checksum_sha256) = 64),
+          status TEXT NOT NULL CHECK(status IN ('staged', 'queued', 'sending', 'sent', 'failed', 'expired', 'deleted')) DEFAULT 'staged',
+          validation_error TEXT,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          expires_at DATETIME,
+          consumed_by_message_id INTEGER UNIQUE,
+          FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+          FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL,
+          FOREIGN KEY(consumed_by_message_id) REFERENCES messages(id) ON DELETE SET NULL
+        );
+        INSERT INTO outbound_attachments_v58 (
+          id, thread_id, created_by, original_name, safe_name, media_type, mime_type,
+          byte_size, storage_path, checksum_sha256, status, validation_error,
+          created_at, expires_at, consumed_by_message_id
+        )
+        SELECT
+          id, thread_id, created_by, original_name, safe_name,
+          CASE
+            WHEN lower(safe_name) LIKE '%.mp4' OR lower(storage_path) LIKE '%.mp4' THEN 'video'
+            WHEN lower(safe_name) LIKE '%.mov' OR lower(storage_path) LIKE '%.mov' THEN 'video'
+            WHEN lower(safe_name) LIKE '%.avi' OR lower(storage_path) LIKE '%.avi' THEN 'video'
+            ELSE media_type
+          END,
+          CASE
+            WHEN lower(safe_name) LIKE '%.mp4' OR lower(storage_path) LIKE '%.mp4' THEN 'video/mp4'
+            WHEN lower(safe_name) LIKE '%.mov' OR lower(storage_path) LIKE '%.mov' THEN 'video/quicktime'
+            WHEN lower(safe_name) LIKE '%.avi' OR lower(storage_path) LIKE '%.avi' THEN 'video/x-msvideo'
+            ELSE mime_type
+          END,
+          byte_size, storage_path, checksum_sha256, status, validation_error,
+          created_at, expires_at, consumed_by_message_id
+        FROM outbound_attachments;
+        DROP TABLE outbound_attachments;
+        ALTER TABLE outbound_attachments_v58 RENAME TO outbound_attachments;
+        CREATE INDEX IF NOT EXISTS idx_outbound_attachments_thread_status
+          ON outbound_attachments(thread_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_outbound_attachments_expiry
+          ON outbound_attachments(status, expires_at);
+        CREATE INDEX IF NOT EXISTS idx_outbound_attachments_checksum
+          ON outbound_attachments(checksum_sha256);
+      `);
+      console.log('[DB] Migration v58: Outbound video metadata is now stored as video MIME natively.');
+    }
+  },
+  {
+    version: 59,
+    name: 'allow_video_media_type_in_message_queue',
+    up: (db) => {
+      const tableSql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='message_queue'").get()?.sql || '';
+      if (/attachment_media_type\s+TEXT\s+CHECK\s*\(attachment_media_type\s+IN\s*\([^)]*'video'/i.test(tableSql)) {
+        console.log('[DB] Migration v59: message_queue already accepts video.');
+        return;
+      }
+      db.exec(`
+        CREATE TABLE message_queue_v59 (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
+          source_id TEXT,
+          source_type TEXT CHECK(source_type IN ('personal_messenger', 'page_messenger')),
+          page_id TEXT,
+          content TEXT NOT NULL DEFAULT '',
+          attachment_id TEXT,
+          attachment_path TEXT,
+          attachment_mime_type TEXT,
+          attachment_name TEXT,
+          outbound_attempt_id TEXT REFERENCES outbound_attempts(id),
+          attachment_media_type TEXT CHECK(attachment_media_type IN ('image', 'video', 'file')),
+          attachment_byte_size INTEGER CHECK(attachment_byte_size IS NULL OR attachment_byte_size > 0),
+          attachment_checksum TEXT,
+          manifest_id TEXT,
+          contract_version INTEGER NOT NULL DEFAULT 1,
+          campaign_id TEXT,
+          campaign_recipient_id TEXT,
+          campaign_attempt_id TEXT,
+          idempotency_key TEXT UNIQUE,
+          status TEXT CHECK(status IN ('pending', 'processing', 'sent', 'failed')) DEFAULT 'pending',
+          error_reason TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          processed_at DATETIME,
+          FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+        );
+        INSERT INTO message_queue_v59 (
+          id, thread_id, account_id, source_id, source_type, page_id, content,
+          attachment_id, attachment_path, attachment_mime_type, attachment_name,
+          outbound_attempt_id, attachment_media_type, attachment_byte_size,
+          attachment_checksum, manifest_id, contract_version, campaign_id,
+          campaign_recipient_id, campaign_attempt_id, idempotency_key, status,
+          error_reason, created_at, processed_at
+        )
+        SELECT
+          id, thread_id, account_id, source_id, source_type, page_id, content,
+          attachment_id, attachment_path, attachment_mime_type, attachment_name,
+          outbound_attempt_id, attachment_media_type, attachment_byte_size,
+          attachment_checksum, manifest_id, contract_version, campaign_id,
+          campaign_recipient_id, campaign_attempt_id, idempotency_key, status,
+          error_reason, created_at, processed_at
+        FROM message_queue;
+        DROP TABLE message_queue;
+        ALTER TABLE message_queue_v59 RENAME TO message_queue;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_message_queue_idempotency
+          ON message_queue(idempotency_key) WHERE idempotency_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_message_queue_outbound_attempt
+          ON message_queue(outbound_attempt_id) WHERE outbound_attempt_id IS NOT NULL;
+      `);
+      console.log('[DB] Migration v59: message_queue now accepts image/video/file attachments.');
+    }
+  },
+  {
+    version: 60,
+    name: 'persist_facebook_account_avatar',
+    up: (db) => {
+      try { db.exec('ALTER TABLE accounts ADD COLUMN avatar_url TEXT;'); } catch (error) { }
+      console.log('[DB] Migration v60: Facebook account avatars are now persisted.');
+    }
   }
 ];
 

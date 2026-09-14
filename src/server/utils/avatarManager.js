@@ -8,6 +8,11 @@ const { APP_DATA_ROOT } = require('./appDataRoot');
 
 const DATA_DIR = APP_DATA_ROOT;
 const AVATAR_DIR = path.join(DATA_DIR, 'avatars');
+// Multiple sidebar/realtime syncs may save different Facebook CDN variants
+// for the same contact concurrently. Deleting the previous file here races
+// the DB update and can leave contacts pointing at a missing avatar. Retain
+// valid cached variants; they are content-hashed and safely reusable.
+const RETAIN_PREVIOUS_AVATARS = true;
 
 // Ensure avatar directory exists
 function initAvatarDir() {
@@ -85,7 +90,7 @@ async function downloadAvatar(avatarUrl, threadId = null) {
     const stat = fs.statSync(tempPath);
     if (stat.size > 300) {
       fs.renameSync(tempPath, filePath);
-      if (threadId) {
+      if (!RETAIN_PREVIOUS_AVATARS && threadId) {
         try {
           const files = fs.readdirSync(AVATAR_DIR);
           for (const f of files) {
@@ -124,7 +129,7 @@ async function saveAvatarFromBase64OrUrl(avatarData, threadId) {
       const buffer = Buffer.from(base64Data, 'base64');
       if (buffer.length > 300) {
         fs.writeFileSync(filePath, buffer);
-        if (threadId) {
+        if (!RETAIN_PREVIOUS_AVATARS && threadId) {
           try {
             const files = fs.readdirSync(AVATAR_DIR);
             for (const f of files) {

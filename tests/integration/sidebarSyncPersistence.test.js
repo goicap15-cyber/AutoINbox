@@ -14,6 +14,30 @@ test('partial sidebar snapshot preserves other conversations', () => {
   db.close();
 });
 
+test('same Facebook thread id stays isolated between connected accounts', () => {
+  const db = getTestDatabase();
+  db.prepare('INSERT INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-1', 'First', '/tmp/first');
+  db.prepare('INSERT INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-2', 'Second', '/tmp/second');
+
+  const first = ConversationRepository.upsertThread({
+    id: 'shared-facebook-id',
+    external_thread_id: 'shared-facebook-id',
+    account_id: 'acct-1',
+    contact_name: 'First contact'
+  }, db);
+  const second = ConversationRepository.upsertThread({
+    id: 'shared-facebook-id',
+    external_thread_id: 'shared-facebook-id',
+    account_id: 'acct-2',
+    contact_name: 'Second contact'
+  }, db);
+
+  assert.equal(first.id, 'shared-facebook-id');
+  assert.equal(second.id, 'acct-2:shared-facebook-id');
+  assert.equal(db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(first.id).contact_name, 'First contact');
+  assert.equal(db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(second.id).contact_name, 'Second contact');
+  db.close();
+});
 test('empty sidebar snapshot preserves all conversations', () => {
   const db = getTestDatabase();
   db.prepare('INSERT INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-1', 'Test', '/tmp/test');
@@ -64,6 +88,28 @@ test('an explicit inbox sync can promote a replied message request', () => {
   assert.equal(
     db.prepare('SELECT inbox_folder FROM threads WHERE id = ?').get('request-1').inbox_folder,
     'INBOX'
+  );
+  db.close();
+});
+
+test('a verified Requests surface can repair a legacy Inbox classification', () => {
+  const db = getTestDatabase();
+  db.prepare('INSERT INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-1', 'Test', '/tmp/test');
+  ConversationRepository.upsertThread({
+    id: 'legacy-request',
+    account_id: 'acct-1',
+    inbox_folder: 'INBOX'
+  }, db);
+  ConversationRepository.upsertThread({
+    id: 'legacy-request',
+    account_id: 'acct-1',
+    inbox_folder: 'MESSAGE_REQUEST_POSSIBLE',
+    inbox_folder_verified: true
+  }, db);
+
+  assert.equal(
+    db.prepare('SELECT inbox_folder FROM threads WHERE id = ?').get('legacy-request').inbox_folder,
+    'MESSAGE_REQUEST_POSSIBLE'
   );
   db.close();
 });

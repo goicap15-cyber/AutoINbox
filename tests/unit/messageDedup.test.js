@@ -26,10 +26,14 @@ test('does not collapse unrelated images', async () => {
 test('collapses an optimistic and durable copy of the same outbound attachment', async () => {
   const { collapseMessengerMediaCompanions } = await import('../../src/client/utils/messageDedup.js');
   const rows = collapseMessengerMediaCompanions([
-    { client_message_id: 'client-local', attachment_id: 'att-1', local_media_path: 'C:/a.jpg', media_type: 'image', is_outgoing: 1, status: 'sent' },
+    { client_message_id: 'client-local', attachment_id: 'att-1', local_media_path: 'C:/a.jpg', media_type: 'image', is_outgoing: 1, status: 'sent', ui_render_key: 'crm_client-local', ui_position_locked: true, sequence_order: 7 },
     { id: 99, client_message_id: 'client-server', fb_message_id: 'mid.$REAL', attachment_id: 'att-1', media_url: '/api/a', media_type: 'image', is_outgoing: 1, status: 'sent' }
   ]);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].id, 99);
   assert.equal(rows[0].fb_message_id, 'mid.$REAL');
+  assert.equal(rows[0].client_message_id, 'client-local');
+  assert.equal(rows[0].ui_render_key, 'crm_client-local');
+  assert.equal(rows[0].ui_position_locked, true);
+  assert.equal(rows[0].sequence_order, 7);
 });
