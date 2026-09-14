@@ -46,6 +46,7 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
 
   const hasMedia = Boolean(msg.local_media_path || msg.media_url);
   const visibleContent = content;
+  const isQuickLike = !isCallMessage && !isUnsent && !hasMedia && (visibleContent?.trim() === '👍' || /^(?:thích|like)$/i.test(visibleContent?.trim() || ''));
   if (!content && !hasMedia && !isUnsent) return null;
 
   return (
@@ -74,33 +75,55 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
 
       <div className={`flex flex-col max-w-[min(78%,560px)] ${isOutgoing ? 'items-end' : 'items-start'}`}>
         <div
-          className={`message-bubble px-4 py-2.5 text-sm shadow-sm ${
-            isUnsent
-              ? 'bg-[var(--color-danger-subtle)] border border-[var(--color-danger)]/35 text-[var(--color-danger)] rounded-2xl'
-              : isOutgoing
-              ? 'bg-[var(--color-accent)] text-[var(--color-text-on-accent)] rounded-2xl rounded-br-sm'
-              : 'bg-[var(--color-bg-panel)] text-[var(--color-text-primary)] rounded-2xl rounded-bl-sm border border-[var(--color-border)]'
+          className={`message-bubble ${
+            isQuickLike
+              ? 'p-1 bg-transparent border-0 shadow-none'
+              : `px-4 py-2.5 text-sm shadow-sm ${
+                  isUnsent
+                    ? 'bg-[var(--color-danger-subtle)] border border-[var(--color-danger)]/35 text-[var(--color-danger)] rounded-2xl'
+                    : isOutgoing
+                    ? 'bg-[var(--color-accent)] text-[var(--color-text-on-accent)] rounded-2xl rounded-br-sm'
+                    : 'bg-[var(--color-bg-panel)] text-[var(--color-text-primary)] rounded-2xl rounded-bl-sm border border-[var(--color-border)]'
+                }`
           } ${status === 'sending' ? 'opacity-70' : ''} ${status === 'failed' ? 'ring-2 ring-[var(--color-danger)]/50' : ''}`}
         >
-          {isUnsent && (
-            <div className="flex items-center gap-1.5 text-xs font-medium mb-1.5 pb-1.5 border-b border-[var(--color-danger)]/20">
-              <AlertTriangle size={13} strokeWidth={1.75} />
-              <span>Khách đã thu hồi</span>
-            </div>
-          )}
-          {isCallMessage ? (
-            <div className="flex items-center gap-2.5 py-0.5">
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${isOutgoing ? 'bg-white/20 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200'}`}>
-                {isMissedCall ? <PhoneMissed size={16} /> : isVideoCall ? <Video size={16} /> : isOutgoing ? <PhoneCall size={16} /> : <PhoneIncoming size={16} />}
-              </div>
-              <div className="flex flex-col">
-                <span className="font-semibold text-xs leading-tight">{content}</span>
-              </div>
+          {isQuickLike ? (
+            <div
+              className="inline-flex items-center justify-center select-none py-1 transition-transform hover:scale-110 active:scale-95 duration-150"
+              role="img"
+              aria-label="Thích"
+              title="Thích"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="w-9 h-9 fill-[#0084ff] stroke-[#0084ff] stroke-1 drop-shadow-sm"
+              >
+                <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
+              </svg>
             </div>
           ) : (
             <>
-              <MediaViewer mediaType={msg.media_type} mediaUrl={msg.media_url} localMediaPath={msg.local_media_path} />
-              {visibleContent && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words select-text ${hasMedia ? 'mt-1.5' : ''}`}>{visibleContent}</p>}
+              {isUnsent && (
+                <div className="flex items-center gap-1.5 text-xs font-medium mb-1.5 pb-1.5 border-b border-[var(--color-danger)]/20">
+                  <AlertTriangle size={13} strokeWidth={1.75} />
+                  <span>Khách đã thu hồi</span>
+                </div>
+              )}
+              {isCallMessage ? (
+                <div className="flex items-center gap-2.5 py-0.5">
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${isOutgoing ? 'bg-white/20 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200'}`}>
+                    {isMissedCall ? <PhoneMissed size={16} /> : isVideoCall ? <Video size={16} /> : isOutgoing ? <PhoneCall size={16} /> : <PhoneIncoming size={16} />}
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="font-semibold text-xs leading-tight">{content}</span>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <MediaViewer mediaType={msg.media_type} mediaUrl={msg.media_url} localMediaPath={msg.local_media_path} />
+                  {visibleContent && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words select-text ${hasMedia ? 'mt-1.5' : ''}`}>{visibleContent}</p>}
+                </>
+              )}
             </>
           )}
         </div>

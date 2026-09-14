@@ -1913,16 +1913,15 @@ async function typeAndSubmitComposer(tabId, content) {
   }
 }
 
-async function handleSendPageMessage({ thread_id, content, page_id, client_message_id, attachment = null, attachmentManifest = null }) {
-  console.log(`[FB Engine] 📤 Bắt đầu gửi qua Business Suite: page_id=${page_id} thread=${thread_id}`);
+async function handleSendPageMessage({ thread_id, content, page_id, client_message_id, attachment = null, attachmentManifest = null, expected_contact_name = null }) {
+  console.log(`[FB Engine] 📤 Bắt đầu gửi qua Business Suite: page_id=${page_id} thread=${thread_id} expected_name=${expected_contact_name || 'none'}`);
 
   // Extract recipient PSID from thread_id (format is "sourceId:recipientPsid" or just "recipientPsid")
   const recipientPsid = thread_id.includes(':') ? thread_id.split(':')[1] : thread_id;
-  const targetUrl = `https://business.facebook.com/latest/inbox/messenger?asset_id=${page_id}&selected_item_id=${recipientPsid}`;
+  const targetUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(page_id)}&mailbox_id=${encodeURIComponent(page_id)}&selected_item_id=${encodeURIComponent(recipientPsid)}&thread_type=FB_MESSAGE`;
 
   const role = `page:${page_id}`;
   let tab = await getBusinessSuiteTab(page_id);
-  let composerReady;
 
   if (!tab) {
     if (await isTabCreationOnCooldown(role)) {
@@ -1939,10 +1938,6 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
         if (created?.id) {
           await registerTab(role, created.id);
           await Promise.race([waitForTabComplete(created.id, 10000), delay(4000)]);
-          // Confirm the tab actually settled on Business Suite for this exact
-          // page before trusting it for a send - same "don't blindly trust a
-          // just-created tab" check as ensureFacebookMessagesTab, so a shared-
-          // identity flip right after creation can't silently misdirect a send.
           const settled = await chrome.tabs.get(created.id).catch(() => null);
           if (!settled || !isBusinessSuiteUrl(settled.url) || !String(settled.url || '').includes(`asset_id=${page_id}`)) {
             await unregisterTab(role);
@@ -1954,25 +1949,104 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
         return created || null;
       }
     );
-    composerReady = await pollForComposer(tab.id, 10000);
-    const onCorrectThread = await ensureTabOnThread(tab, recipientPsid, targetUrl, page_id);
-    if (!onCorrectThread) {
-      console.log(`[FB Engine] Thread hiện tại chưa đúng recipientPsid=${recipientPsid}, điều hướng sang targetUrl.`);
-      await chrome.tabs.update(tab.id, { url: targetUrl });
-      await Promise.race([waitForTabComplete(tab.id, 10000), delay(4000)]);
+  }
+
+  if (!tab) {
+    sendToBackend('SEND_MESSAGE_RESULT', { thread_id, client_message_id, success: false, error: 'Không tìm thấy hoặc không thể mở Tab Business Suite', error_code: 'FACEBOOK_TAB_NOT_FOUND' });
+    throw new Error('Không tìm thấy Tab Business Suite');
+  }
+
+  // Đảm bảo tab đã ở đúng hội thoại (dù tab vừa mở hay đã mở sẵn từ trước)
+  const onCorrectThread = await ensureTabOnThread(tab, recipientPsid, targetUrl, page_id, null, expected_contact_name);
+  if (!onCorrectThread) {
+    console.log(`[FB Engine] Business Suite chưa vào đúng recipientPsid=${recipientPsid}, thử tabs.update...`);
+    await chrome.tabs.update(tab.id, { url: targetUrl });
+    await Promise.race([waitForTabComplete(tab.id, 8000), delay(3000)]);
+    await delay(1200);
+  }
+
+  // Vòng lặp chờ ô soạn thảo và so khớp danh tính thực tế trên DOM
+  const interactionDeadline = Date.now() + 10000;
+  let interactionState = null;
+  while (Date.now() < interactionDeadline) {
+    interactionState = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (targetThreadId) => {
+        const main = document.querySelector('div[role="main"]') || document;
+        const composer = [...main.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
+          .find((element) => {
+            const rect = element.getBoundingClientRect();
+            const label = (element.getAttribute('aria-label') || '').toLowerCase();
+            return rect.width > 0 && rect.height > 0 && !label.includes('search') && !label.includes('tìm kiếm');
+          });
+
+        const heading = main.querySelector('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], [data-surface*="contact_name"]');
+        const headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
+        const composerLabel = (composer?.getAttribute('aria-label') || '').trim();
+        const visibleContactName = headingName || composerLabel.replace(/^(?:Viết cho|Write to)\s+/i, '').trim() || null;
+
+        const selected = document.querySelector('[role="navigation"] [aria-selected="true"], [role="gridcell"] [aria-selected="true"], [data-surface*="thread_list"] [aria-selected="true"], [aria-selected="true"]');
+        let selectedThreadId = null;
+        if (selected) {
+          const links = selected.tagName === 'A' ? [selected] : Array.from(selected.querySelectorAll('a[href]'));
+          for (const l of links) {
+            const m = l.href?.match(/(?:selected_item_id|thread_id)=(\d+)/);
+            if (m) { selectedThreadId = m[1]; break; }
+          }
+        }
+        const routeMatch = location.href.match(/[?&](?:selected_item_id|thread_id)=([^&#]+)/);
+        const currentThreadId = selectedThreadId || (routeMatch ? decodeURIComponent(routeMatch[1]) : null);
+
+        return {
+          current_thread_id: currentThreadId,
+          composer_ready: Boolean(composer),
+          visible_contact_name: visibleContactName,
+          route_ready: String(currentThreadId || '') === String(targetThreadId || '')
+        };
+      },
+      args: [recipientPsid]
+    }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+
+    if (interactionState?.route_ready && interactionState?.composer_ready) {
+      if (!expected_contact_name || interactionState?.visible_contact_name) break;
     }
-    composerReady = await pollForComposer(tab.id, 10000);
+    await delay(300);
   }
 
-  if (!composerReady) {
-    throw new Error('Không tìm thấy ô soạn tin nhắn Business Suite');
+  if (!interactionState?.composer_ready) {
+    const composerReady = await pollForComposer(tab.id, 5000);
+    if (!composerReady) {
+      throw new Error('Không tìm thấy ô soạn tin nhắn Business Suite');
+    }
   }
 
-  // Safety guard: Đảm bảo tuyệt đối không gõ nhầm vào cuộc trò chuyện của người khác
-  const activeThreadId = await getCurrentThreadIdInTab(tab.id);
-  if (activeThreadId && String(activeThreadId) !== String(recipientPsid)) {
-    console.error(`[FB Engine] 🛑 Chặn gửi nhầm: Tab Business Suite đang mở thread ${activeThreadId}, nhưng đích là ${recipientPsid}`);
-    throw new Error(`Tab Business Suite chưa ở đúng thread mục tiêu (đang mở ${activeThreadId} thay vì ${recipientPsid})`);
+  // Chốt chặn 1: Thread ID trên DOM
+  const verifiedThreadId = interactionState?.current_thread_id || await getCurrentThreadIdInTab(tab.id);
+  if (verifiedThreadId && String(verifiedThreadId) !== String(recipientPsid)) {
+    console.error(`[FB Engine] 🛑 Chặn gửi nhầm: Tab Business Suite đang mở thread ${verifiedThreadId}, nhưng đích là ${recipientPsid}`);
+    sendToBackend('SEND_MESSAGE_RESULT', {
+      thread_id,
+      client_message_id,
+      success: false,
+      error: `Tab Business Suite chưa ở đúng thread mục tiêu (đang mở ${verifiedThreadId} thay vì ${recipientPsid})`,
+      error_code: 'THREAD_ROUTE_MISMATCH'
+    });
+    throw new Error(`Tab Business Suite chưa ở đúng thread mục tiêu (đang mở ${verifiedThreadId} thay vì ${recipientPsid})`);
+  }
+
+  // Chốt chặn 2: Tên người nhận trên Header (Identity Check - chống gửi nhầm người)
+  const visibleContactName = interactionState?.visible_contact_name;
+  const normalizeIdentity = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+  if (expected_contact_name && visibleContactName && normalizeIdentity(visibleContactName) !== normalizeIdentity(expected_contact_name)) {
+    console.error(`[FB Engine] 🛑 Chặn gửi nhầm: Khung chat Business Suite đang mở "${visibleContactName}" thay vì "${expected_contact_name}"`);
+    sendToBackend('SEND_MESSAGE_RESULT', {
+      thread_id,
+      client_message_id,
+      success: false,
+      error: `Business Suite contact identity does not match (${visibleContactName} vs ${expected_contact_name}); send blocked`,
+      error_code: 'CONTACT_IDENTITY_MISMATCH'
+    });
+    throw new Error(`Business Suite contact identity mismatch: ${visibleContactName} !== ${expected_contact_name}`);
   }
 
   await stageBusinessSuiteAttachment(tab.id, attachmentManifest || attachment);
@@ -2026,7 +2100,8 @@ async function handleSendQueuedMessage(data) {
         page_id: data.page_id,
         client_message_id,
         attachment: data.attachment || null,
-        attachmentManifest: Array.isArray(data.attachment_manifest) ? data.attachment_manifest : null
+        attachmentManifest: Array.isArray(data.attachment_manifest) ? data.attachment_manifest : null,
+        expected_contact_name: data.expected_contact_name || null
       });
       sendToBackend('QUEUED_MESSAGE_RESULT', {
         contract_version: data.contract_version || 1,
@@ -2442,7 +2517,11 @@ async function handleSync100Threads({ account_id, resume = false, time_budget_ms
               cancelled = discoverySyncCancelledAccounts.has(accountKey);
               break;
             }
-            const results = await chrome.scripting.executeScript({ target: { tabId: target.tab.id }, func: scrapeFacebookSidebar });
+            const results = await chrome.scripting.executeScript({ target: { tabId: target.tab.id }, func: scrapeFacebookSidebar }).catch((err) => {
+              console.warn(`[FB Engine] [DISCOVERY] Tab ${target.tab.id} không còn truy cập được:`, err.message);
+              return null;
+            });
+            if (!results) break;
             const primaryVisible = results?.[0]?.result || [];
             let visible = primaryVisible;
             if (target.requestSection) {
@@ -2516,7 +2595,11 @@ async function handleSync100Threads({ account_id, resume = false, time_budget_ms
             // the currently loaded chunk. Give it several load windows before
             // deciding that the real end has been reached.
             if (roundsWithoutNew >= 8) break;
-            const move = await chrome.scripting.executeScript({ target: { tabId: target.tab.id }, func: moveMessengerDiscoverySidebar, args: ['step'] });
+            const move = await chrome.scripting.executeScript({ target: { tabId: target.tab.id }, func: moveMessengerDiscoverySidebar, args: ['step'] }).catch((err) => {
+              console.warn(`[FB Engine] [DISCOVERY] Move sidebar tab ${target.tab.id} error:`, err.message);
+              return null;
+            });
+            if (!move) break;
             const moveState = move?.[0]?.result || {};
             // At the real bottom, allow three lazy-load windows and then move
             // to the requests phase. Previously it waited eight identical
@@ -3075,12 +3158,7 @@ async function getCurrentThreadIdInTab(tabId) {
     const res = await chrome.scripting.executeScript({
       target: { tabId },
       func: () => {
-        const match = location.href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/) ||
-                      location.href.match(/[?&](?:selected_item_id|thread_id)=(\d+)/);
-        if (match) return decodeURIComponent(match[1]);
-
-        const selected = document.querySelector('[aria-selected="true"]') ||
-                         document.querySelector('[aria-current="page"]');
+        const selected = document.querySelector('[role="navigation"] [aria-selected="true"], [role="gridcell"] [aria-selected="true"], [data-surface*="thread_list"] [aria-selected="true"], [aria-selected="true"], [aria-current="page"], [aria-current="true"]');
         if (selected) {
           const links = selected.tagName === 'A' ? [selected] : Array.from(selected.querySelectorAll('a[href]'));
           for (const l of links) {
@@ -3088,6 +3166,11 @@ async function getCurrentThreadIdInTab(tabId) {
             if (m) return m[1];
           }
         }
+
+        const match = location.href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/) ||
+                      location.href.match(/[?&](?:selected_item_id|thread_id)=(\d+)/);
+        if (match) return decodeURIComponent(match[1]);
+
         return null;
       }
     });
@@ -3144,7 +3227,8 @@ function waitForTabComplete(tabId, timeoutMs = 15000) {
 
 async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId = null, navigationToken = null, contactName = null) {
   const targetId = String(targetThreadId);
-  const currentFromUrl = extractThreadIdFromMessengerUrl(tab.url);
+  const isBiz = isBusinessSuiteUrl(tab.url);
+  const currentFromUrl = isBiz ? null : extractThreadIdFromMessengerUrl(tab.url);
   const currentFromPage = currentFromUrl || await getCurrentThreadIdInTab(tab.id);
   if (String(currentFromPage) === targetId) {
     return true;
@@ -3152,11 +3236,63 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
 
   // Business Suite keeps its existing routing path. Personal-navigation tokens
   // deliberately do not affect Page tabs.
-  if (isBusinessSuiteUrl(tab.url)) {
+  if (isBiz) {
     const pId = pageId || (tab.url?.match(/[?&]asset_id=(\d+)/)?.[1] || null);
     if (!pId) {
       console.warn('[FB Engine] Không thể chuyển Business Suite thread vì thiếu page_id:', targetId);
       return false;
+    }
+
+    // 1. Thử Fast DOM click trong sidebar của Business Suite trước
+    try {
+      const clicked = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (tid, name) => {
+          const links = Array.from(document.querySelectorAll('a[href*="selected_item_id="], [role="row"] a, [role="listitem"] a, [data-surface*="thread_list"] a'));
+          let link = links.find(a => {
+            const href = a.getAttribute('href') || a.href || '';
+            return href.includes(`selected_item_id=${tid}`);
+          });
+
+          if (!link && name) {
+            const cleanName = name.trim().toLowerCase();
+            const sidebar = document.querySelector('[role="navigation"]') || 
+                            document.querySelector('[data-surface*="thread_list"]') || 
+                            document.querySelector('div[role="grid"]') || 
+                            document.body;
+            const nodes = Array.from(sidebar.querySelectorAll('span, div'));
+            const matchingNode = nodes.find(el => {
+              const text = (el.textContent || '').trim().toLowerCase();
+              return text === cleanName && el.children.length === 0;
+            });
+            if (matchingNode) {
+              link = matchingNode.closest('a[href]') || matchingNode.closest('[role="row"]') || matchingNode.closest('[role="listitem"]') || matchingNode.closest('div[tabindex]');
+            }
+          }
+
+          if (link) {
+            if (typeof link.click === 'function') link.click();
+            link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            return { ok: true, type: 'dom_biz_sidebar_click' };
+          }
+          return { ok: false };
+        },
+        args: [targetId, contactName]
+      });
+
+      if (clicked?.[0]?.result?.ok) {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          await delay(200);
+          const currentId = await getCurrentThreadIdInTab(tab.id);
+          if (String(currentId) === targetId) {
+            console.log(`[FB Engine] ✅ Navigation Business Suite tới thread ${targetId} thành công (dom_biz_sidebar_click)`);
+            return true;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[FB Engine] Fast Business Suite DOM navigation thất bại, fallback sang tabs.update:', e.message);
     }
 
     const targetBizUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(pId)}&mailbox_id=${encodeURIComponent(pId)}&selected_item_id=${encodeURIComponent(targetId)}&thread_type=FB_MESSAGE`;
@@ -3164,7 +3300,7 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
       const loadPromise = waitForTabComplete(tab.id, 8000);
       await chrome.tabs.update(tab.id, { url: targetBizUrl });
       await Promise.race([loadPromise, delay(4500)]);
-      await delay(1200);
+      await delay(1500);
 
       const currentId = await getCurrentThreadIdInTab(tab.id);
       if (String(currentId) === targetId) return true;
@@ -3455,8 +3591,29 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         mode: mode === 'ondemand_older' ? 'page_scroll_older' : 'page_initial',
         cursor
       }
-    }).catch((err) => {
+    }).catch(async (err) => {
       console.warn('[FB Engine] Không gửi được REQUEST_PAGE_BATCH_SYNC tới page_content:', err.message);
+      if (err.message && err.message.includes('Receiving end does not exist')) {
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ['textFilter.js', 'pageTimestampParser.js', 'threadScanStateMachine.js', 'pageDirection.js', 'pageActiveScroller.js', 'page_content.js']
+          });
+          await new Promise(r => setTimeout(r, 600));
+          return chrome.tabs.sendMessage(tab.id, {
+            type: 'REQUEST_PAGE_BATCH_SYNC',
+            data: {
+              account_id: targetAcc,
+              thread_id,
+              page_id,
+              mode: mode === 'ondemand_older' ? 'page_scroll_older' : 'page_initial',
+              cursor
+            }
+          });
+        } catch (injectErr) {
+          console.warn('[FB Engine] Re-inject page scripts thất bại:', injectErr.message);
+        }
+      }
       sendToBackend('PAGE_SCROLLER_DEBUG', {
         thread_id,
         stage: 'TAB_DISCONNECTED',

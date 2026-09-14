@@ -61,7 +61,7 @@ async function downloadAvatar(avatarUrl, threadId = null) {
 
     if (fs.existsSync(filePath)) {
       const stat = fs.statSync(filePath);
-      if (stat.size > 500) {
+      if (stat.size > 2000) {
         return filename;
       }
     }
@@ -77,7 +77,7 @@ async function downloadAvatar(avatarUrl, threadId = null) {
       fileStream.on('error', reject);
     });
 
-    if (fs.existsSync(filePath) && fs.statSync(filePath).size > 300) {
+    if (fs.existsSync(filePath) && fs.statSync(filePath).size > 2000) {
       if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
       return filename;
     }
@@ -115,7 +115,7 @@ async function saveAvatarFromBase64OrUrl(avatarData, threadId) {
     const filename = threadId ? `avatar_${threadId}_${urlHash}.jpg` : `avatar_${Date.now()}_${urlHash}.jpg`;
     const filePath = path.join(AVATAR_DIR, filename);
 
-    if (fs.existsSync(filePath) && fs.statSync(filePath).size > 300) {
+    if (fs.existsSync(filePath) && fs.statSync(filePath).size > 2000) {
       return filename;
     }
 

@@ -127,6 +127,10 @@
     text = text.replace(/^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?\s*$/i, '').replace(/(?:\n|\r)\s*\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i, '').trim();
     text = text.replace(/^[:\s]+/, '').trim();
 
+    if (/^(?:thích|like|biểu tượng thích|biểu tượng cảm xúc thích|gửi biểu tượng thích|thumbs up)$/i.test(text)) {
+      return '👍';
+    }
+
     if (!text) return '';
 
     if (isSystemOrMetadataText(text)) return '';

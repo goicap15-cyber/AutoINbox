@@ -194,6 +194,18 @@ class QueueWorker {
       return { message, outcome: 'failed' };
     }
 
+    const resolvedContactName = message.expected_contact_name || (() => {
+      try {
+        const db = database || require('../database/db');
+        const row = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(message.thread_id);
+        if (row?.contact_name) return row.contact_name;
+        const contactRow = db.prepare('SELECT name FROM contacts WHERE thread_id = ?').get(message.thread_id);
+        return contactRow?.name || null;
+      } catch (_e) {
+        return null;
+      }
+    })();
+
     const envelope = {
       type: 'SEND_QUEUED_MESSAGE',
       data: {
@@ -202,7 +214,7 @@ class QueueWorker {
         outbound_attempt_id: message.outbound_attempt_id || null,
         thread_id: message.thread_id,
         thread_url: message.thread_url || null,
-        expected_contact_name: message.expected_contact_name || null,
+        expected_contact_name: resolvedContactName || null,
         account_id: message.account_id,
         content: message.content,
         source_type: message.source_type,

@@ -86,6 +86,7 @@ if (isBusiness) {
     let lastThreadSwitchAt = Date.now();
     let currentContactName = null;
     let currentAvatarUrl = null;
+    let currentAvatarSourceTier = 0; // 0: none, 1: sidebar/header, 2: right details pane
 
 
     // Active Crawler state (Feature 055)
@@ -129,16 +130,8 @@ if (isBusiness) {
     let isScanning = false;
 
     function resolveCurrentThreadId() {
-        const href = window.location.href;
-        const urlMatch = href.match(/[?&](?:selected_item_id|thread_id)=(\d+)/) || href.match(/\/messages\/(?:e2ee\/)?t\/(\d+)/);
-        if (urlMatch && urlMatch[1]) {
-            return urlMatch[1];
-        }
-
-        // DOM Fallback: Find currently selected item in Business Suite sidebar
-        const selectedContainer = document.querySelector('[aria-selected="true"]') ||
-                                  document.querySelector('[aria-current="page"]') ||
-                                  document.querySelector('[aria-current="true"]');
+        // DOM First: Find currently selected item in Business Suite sidebar
+        const selectedContainer = document.querySelector('[role="navigation"] [aria-selected="true"], [role="gridcell"] [aria-selected="true"], [data-surface*="thread_list"] [aria-selected="true"], [aria-selected="true"], [aria-current="page"], [aria-current="true"]');
         if (selectedContainer) {
             const links = selectedContainer.tagName === 'A' ? [selectedContainer] : Array.from(selectedContainer.querySelectorAll('a[href]'));
             for (const link of links) {
@@ -146,6 +139,12 @@ if (isBusiness) {
                 const m = linkHref.match(/(?:selected_item_id|thread_id)=(\d+)/) || linkHref.match(/\/messages\/(?:e2ee\/)?t\/(\d+)/);
                 if (m && m[1]) return m[1];
             }
+        }
+
+        const href = window.location.href;
+        const urlMatch = href.match(/[?&](?:selected_item_id|thread_id)=(\d+)/) || href.match(/\/messages\/(?:e2ee\/)?t\/(\d+)/);
+        if (urlMatch && urlMatch[1]) {
+            return urlMatch[1];
         }
 
         const selectors = [
@@ -226,6 +225,7 @@ if (isBusiness) {
             lastThreadSwitchAt = Date.now();
             currentContactName = null;
             currentAvatarUrl = null;
+            currentAvatarSourceTier = 0;
             return true; // just switched/opened this thread; whatever is already mounted is backlog
         }
         return (Date.now() - lastThreadSwitchAt) < THREAD_BACKLOG_WINDOW_MS;
@@ -349,11 +349,90 @@ if (isBusiness) {
             return { direction: null, source: 'unknown', confidence: 'unknown' };
         }
         try {
-            return classifier({
-                containerRect: messageListContainer.getBoundingClientRect(),
-                bubbleRect: messageEl.getBoundingClientRect(),
+            // 1. Kiểm tra aria-label trợ năng trên messageEl hoặc row cha
+            const messageRow = messageEl.closest?.('[role="row"], [role="article"], [data-surface*="message"]') || messageEl.parentElement;
+            const elAria = (messageEl.getAttribute?.('aria-label') || '').toLowerCase();
+            const rowAria = (messageRow?.getAttribute?.('aria-label') || '').toLowerCase();
+            const combinedAria = elAria + ' ' + rowAria;
+
+            if (combinedAria.includes('tin nhắn do bạn gửi') || combinedAria.includes('message from you') || combinedAria.includes('you sent')) {
+                return { direction: true, source: 'aria_label', confidence: 'high' };
+            }
+
+            const sentByMatch = combinedAria.match(/tin nhắn do ([^]+?) gửi lúc/i) || combinedAria.match(/message sent by ([^]+?) at/i);
+            if (sentByMatch) {
+                const rawSender = sentByMatch[1].trim().toLowerCase();
+                if (rawSender === 'bạn' || rawSender === 'you') {
+                    return { direction: true, source: 'aria_label', confidence: 'high' };
+                } else {
+                    return { direction: false, source: 'aria_label', confidence: 'high' };
+                }
+            }
+
+            // 2. Tìm visual element thực sự bên trong (tránh lấy bounding box của thẻ cha width 100%)
+            let targetMeasureEl = messageEl;
+            // Ưu tiên: nếu là nút Like / Sticker, tìm chính xác phần tử Like bên trong thay vì thẻ cha
+            const likeVisual = isLikeElementOrWrapper(messageEl)
+                ? messageEl.querySelector?.('svg:not([aria-label*="tùy chọn" i]):not([aria-label*="bày tỏ" i]):not([aria-label*="khác" i]), [role="img"]:not([aria-label*="đại diện" i]), img:not([alt*="đại diện" i])')
+                : null;
+            if (likeVisual) {
+                targetMeasureEl = likeVisual;
+            } else {
+                const innerVisual = messageEl.querySelector?.('[dir="auto"], svg:not([aria-label*="tùy chọn" i]):not([aria-label*="bày tỏ" i]):not([aria-label*="khác" i]), img:not([alt*="đại diện" i]):not([alt*="profile" i]), [role="img"]:not([aria-label*="đại diện" i])');
+                if (innerVisual) {
+                    const vRect = innerVisual.getBoundingClientRect();
+                    if (vRect.width > 0 && vRect.height > 0) {
+                        targetMeasureEl = innerVisual;
+                    }
+                }
+            }
+
+            // 3. Kiểm tra avatar của khách hàng đi kèm trong cụm tin nhắn
+            let hasContactAvatar = null;
+            if (messageRow) {
+                hasContactAvatar = messageRow.querySelector?.('img[alt*="đại diện" i], img[alt*="profile" i], [aria-label*="ảnh đại diện" i], [aria-label*="profile picture" i]');
+                if (!hasContactAvatar && currentContactName && typeof currentContactName === 'string') {
+                    const cleanName = currentContactName.trim();
+                    if (cleanName.length >= 2) {
+                        const allImgs = Array.from(messageRow.querySelectorAll?.('img[alt], [role="img"][aria-label], img[aria-label]') || []);
+                        for (const img of allImgs) {
+                            const alt = (img.getAttribute('alt') || img.getAttribute('aria-label') || '').toLowerCase();
+                            if (alt.includes(cleanName.toLowerCase())) {
+                                hasContactAvatar = img;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Nếu phát hiện có avatar của khách hàng trong cụm tin nhắn -> 100% là tin khách gửi (incoming)
+            if (hasContactAvatar) {
+                return { direction: false, source: 'avatar_contact_match', confidence: 'high' };
+            }
+
+            // 4. Đo mép container kết hợp đường phân chia trung tâm (Center-line)
+            const cRect = messageListContainer.getBoundingClientRect();
+            const bRect = targetMeasureEl.getBoundingClientRect();
+
+            if (cRect.width > 0 && bRect.width > 0) {
+                const containerCenter = cRect.left + cRect.width * 0.52;
+                const bubbleCenter = bRect.left + bRect.width / 2;
+                if (bubbleCenter < containerCenter - 15) {
+                    return { direction: false, source: 'container_centerline', confidence: 'high' };
+                }
+                if (bubbleCenter > containerCenter + 15) {
+                    return { direction: true, source: 'container_centerline', confidence: 'high' };
+                }
+            }
+
+            const geom = classifier({
+                containerRect: cRect,
+                bubbleRect: bRect,
                 tolerancePx: 12
             });
+
+            return geom;
         } catch (error) {
             console.warn('[PageContent] Direction geometry unavailable:', error.message);
             return { direction: null, source: 'unknown', confidence: 'unknown' };
@@ -562,6 +641,68 @@ if (isBusiness) {
                 timestamp_source: tsSource
             });
         }
+
+        // Bổ sung: Thu thập các nút Like (Thumbs Up) trong container chưa được gom vào messageEls
+        try {
+            const likeCandidates = Array.from(container.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i]'));
+            let syntheticLikeIdx = 0;
+            const currentThread = resolveCurrentThreadId();
+            for (const cand of likeCandidates) {
+                if (cand.closest('[aria-label*="tùy chọn" i], [aria-label*="bày tỏ" i], [aria-label*="chuyển tiếp" i], [aria-label*="trả lời" i], button[aria-label*="menu" i], [data-surface*="composer"], form, footer')) {
+                    continue;
+                }
+                if (!isLikeElementOrWrapper(cand)) continue;
+
+                // Nếu candidate này nằm bên trong một messageEl đã được xử lý trong list -> bỏ qua
+                const parentMsgEl = cand.closest('[data-message-id]');
+                if (parentMsgEl && messageEls.includes(parentMsgEl)) {
+                    const inList = list.some(item => item.fb_message_id === parentMsgEl.getAttribute('data-message-id'));
+                    if (inList) continue;
+                }
+
+                let fbMessageId = parentMsgEl ? parentMsgEl.getAttribute('data-message-id') : null;
+                if (!fbMessageId || list.some(item => item.fb_message_id === fbMessageId)) {
+                    syntheticLikeIdx++;
+                    fbMessageId = `page_like_${currentThread}_${list.length + syntheticLikeIdx}`;
+                }
+
+                const dirEvidence = getDirectionEvidence(cand, container);
+                const rawDir = dirEvidence.direction;
+                const isOutgoing = (rawDir === true || rawDir === 1)
+                    ? true
+                    : ((rawDir === false || rawDir === 0) ? false : null);
+
+                let parsedTs = 0;
+                let tsSource = 'dom_order';
+                if (separators.length > 0) {
+                    for (let sIdx = 0; sIdx < separators.length; sIdx++) {
+                        const sep = separators[sIdx];
+                        if (sep.element.compareDocumentPosition(cand) & Node.DOCUMENT_POSITION_FOLLOWING) {
+                            parsedTs = sep.timestamp_ms + (list.length * 10);
+                            tsSource = 'separator_date_clock';
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                list.push({
+                    fb_message_id: fbMessageId,
+                    content: '👍',
+                    media_type: 'text',
+                    media_url: null,
+                    is_outgoing: isOutgoing,
+                    direction_status: isOutgoing === null ? 'pending' : 'confirmed',
+                    direction_confidence: isOutgoing === null ? 'unknown' : dirEvidence.confidence,
+                    dom_order: list.length,
+                    timestamp_ms: parsedTs,
+                    timestamp_source: tsSource
+                });
+            }
+        } catch (err) {
+            console.warn('[PageContent] Lỗi quét likeCandidates trong batch:', err.message);
+        }
+
         return list;
     }
 
@@ -604,6 +745,7 @@ if (isBusiness) {
                 lastThreadSwitchAt = Date.now();
                 currentContactName = null;
                 currentAvatarUrl = null;
+                currentAvatarSourceTier = 0;
                 lastReportedContactName = null;
                 lastReportedAvatarUrl = null;
                 seedTimestampAnchorsForThread(currentThreadId);
@@ -697,21 +839,67 @@ if (isBusiness) {
                 }
             }
 
-            // 2. Trích xuất Avatar URL (currentAvatarUrl)
-            if (!currentAvatarUrl) {
-                const activeRow = document.querySelector('[role="navigation"] [aria-selected="true"], [role="gridcell"] [aria-selected="true"], [data-surface*="thread_list"] [aria-selected="true"], [aria-selected="true"], [aria-current="page"], [aria-current="true"]');
+            // 2. Trích xuất Avatar URL (currentAvatarUrl) đa tầng:
+            // Tier 2: Cột chi tiết khách hàng bên phải (Right Details Pane) - chứa ảnh Anime thật
+            // Tier 1: Header cuộc trò chuyện hoặc danh sách hội thoại bên trái (thường là silhouette placeholder)
+            let candidateAvatarUrl = null;
+            let candidateTier = 0;
+
+            // Tier 2: Quét cột bên phải (Right Details / Customer Info Pane)
+            const rightPane = document.querySelector('[role="complementary"], [data-surface*="details"], [data-surface*="contact"], [aria-label*="Chi tiết" i], [aria-label*="Details" i]');
+            if (rightPane) {
+                const rightImgs = Array.from(rightPane.querySelectorAll('img[src*="fbcdn.net"], img[src*="scontent"], img.img'));
+                for (const img of rightImgs) {
+                    const src = img.getAttribute('src');
+                    if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
+                        if ((img.naturalWidth && img.naturalWidth <= 24) || (img.width > 0 && img.width <= 24)) continue;
+                        candidateAvatarUrl = src;
+                        candidateTier = 2;
+                        break;
+                    }
+                }
+            }
+
+            // Hoặc vùng chứa liên kết trang cá nhân Facebook (nếu rightPane chưa có role riêng)
+            if (!candidateAvatarUrl) {
+                const profileLink = document.querySelector('a[href*="facebook.com/profile"], a[href*="facebook.com/"][role="link"], a:has(> [aria-label*="Trang cá nhân" i])');
+                if (profileLink) {
+                    const profileContainer = profileLink.closest('div, section');
+                    if (profileContainer) {
+                        const img = profileContainer.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
+                        if (img) {
+                            const src = img.getAttribute('src');
+                            if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
+                                candidateAvatarUrl = src;
+                                candidateTier = 2;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Tier 1: Nếu chưa có avatar hoặc đang ở Tier 1, quét Header và Sidebar bên trái
+            if (!candidateAvatarUrl && currentAvatarSourceTier < 2) {
                 const headerEl = document.querySelector('[role="main"] header');
-                const priorityScopes = [activeRow, headerEl].filter(Boolean);
-                for (const scope of priorityScopes) {
+                const activeRow = document.querySelector('[role="navigation"] [aria-selected="true"], [role="gridcell"] [aria-selected="true"], [data-surface*="thread_list"] [aria-selected="true"], [aria-selected="true"], [aria-current="page"], [aria-current="true"]');
+                const fallbackScopes = [headerEl, activeRow].filter(Boolean);
+                for (const scope of fallbackScopes) {
                     const img = scope.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
                     if (img) {
                         const src = img.getAttribute('src');
                         if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
-                            currentAvatarUrl = src;
+                            candidateAvatarUrl = src;
+                            candidateTier = 1;
                             break;
                         }
                     }
                 }
+            }
+
+            // Nâng cấp avatar nếu tìm thấy nguồn cấp cao hơn (Tier 2 > Tier 1) hoặc avatar mới
+            if (candidateAvatarUrl && (candidateTier > currentAvatarSourceTier || (!currentAvatarUrl && candidateTier >= currentAvatarSourceTier) || (candidateTier === currentAvatarSourceTier && candidateAvatarUrl !== currentAvatarUrl))) {
+                currentAvatarUrl = candidateAvatarUrl;
+                currentAvatarSourceTier = candidateTier;
             }
 
             // Phát hiện metadata mới -> gửi ngay sang background (chỉ gửi khi có thay đổi, khớp ID và qua grace period 1.5s)
@@ -803,6 +991,31 @@ if (isBusiness) {
                 const fbMessageId = wrapperEl.getAttribute('data-message-id');
                 const { isInsideMessageBubble, inChatContainer } = walkBubbleAncestors(wrapperEl, messageListContainer);
                 forwardResolvedMessage(wrapperEl, wrapperEl, fbMessageId, isInsideMessageBubble, inChatContainer, resolvedContent, messageListContainer);
+            }
+
+            // Pass 2b (Direct Thumbs Up / Like Scanner):
+            // Bắt trực tiếp các nút Like của khách hàng trong messageListContainer mà không phụ thuộc vào data-message-id hay TreeWalker SHOW_TEXT
+            if (messageListContainer) {
+                const likeSvgs = Array.from(messageListContainer.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i]'));
+                for (let li = 0; li < likeSvgs.length; li++) {
+                    const candSvg = likeSvgs[li];
+                    if (candSvg.closest('[aria-label*="tùy chọn" i], [aria-label*="bày tỏ" i], [aria-label*="chuyển tiếp" i], [aria-label*="trả lời" i], button[aria-label*="menu" i], [data-surface*="composer"], form, footer')) {
+                        continue;
+                    }
+                    if (!isLikeElementOrWrapper(candSvg)) continue;
+
+                    const parentMsg = candSvg.closest('[data-message-id]');
+                    if (parentMsg && processedWrappersThisTick.has(parentMsg)) {
+                        continue;
+                    }
+                    if (processedWrappersThisTick.has(candSvg)) continue;
+                    processedWrappersThisTick.add(candSvg);
+                    if (parentMsg) processedWrappersThisTick.add(parentMsg);
+
+                    const fbMessageId = parentMsg ? parentMsg.getAttribute('data-message-id') : null;
+                    const { isInsideMessageBubble, inChatContainer } = walkBubbleAncestors(candSvg, messageListContainer);
+                    forwardResolvedMessage(parentMsg || candSvg, candSvg, fbMessageId, isInsideMessageBubble || true, inChatContainer, { kind: 'text', text: '👍' }, messageListContainer);
+                }
             }
 
             // Pass 3 (Call Log): Quét span[dir="auto"] TRONG KHUNG CHAT (messageListContainer)
@@ -902,30 +1115,127 @@ if (isBusiness) {
     // caption sentences Facebook auto-generates for aria-label on the
     // CSS-background case, which are never mistaken for emoji text since
     // aria-label is only read on the role="img" div path below.
-    function resolveMessageContent(messageIdNode) {
-        const fullText = (messageIdNode.innerText || messageIdNode.textContent || '').trim();
+    function isLikeElementOrWrapper(node, rawText) {
+        if (!node) return false;
 
-        // Call Log Guard: Never treat a call notification wrapper (which may contain avatar/icon <img>) as an image attachment!
-        const lowerFullText = fullText.toLowerCase();
-        if (fullText && (lowerFullText.includes('cuộc gọi') || lowerFullText.includes('bỏ lỡ') || lowerFullText.includes('đã nhỡ') || lowerFullText.includes('nhỡ'))) {
-            return { kind: 'text', text: fullText };
+        // 1. Kiểm tra text trực tiếp
+        const trimmed = (rawText || '').trim();
+        if (trimmed === '👍') return true;
+        if (/^(?:thích|like|biểu tượng thích|biểu tượng cảm xúc thích|gửi biểu tượng thích|thumbs up)$/i.test(trimmed)) {
+            return true;
         }
 
-        // Spec 040 T020: a message can combine real caption text with an
-        // attached image in the SAME [data-message-id] wrapper - confirmed
-        // live 2026-08-17/18 for a file-transport image manifest sent with a
-        // caption. The old code returned on fullText alone and never even
-        // checked for an <img>, so this shape was always reported as
-        // kind:'text' with the image silently dropped - the resulting
-        // campaign dispatch could never be recognized as media (safe per the
-        // false-positive fix elsewhere, but never confirmed 'sent' either,
-        // and since QUEUE_CONFIRMATION_TIMEOUT is retryable this meant an
-        // already-successful file send would get resent for real). Checking
-        // for a real (empty-alt) media image BEFORE the fullText early-return
-        // - using fullText as the media's caption when both are present -
-        // fixes this while leaving every other shape (pure text, pure
-        // emoji/sticker, pure photo) unchanged: forwardResolvedMessage
-        // already reads resolvedContent.caption for kind:'media'.
+        // 2. Kiểm tra aria-label trên chính wrapper hoặc phần tử gốc
+        const wrapperAria = (node.getAttribute?.('aria-label') || '').trim().toLowerCase();
+        if (wrapperAria) {
+            if (wrapperAria === 'thích' || wrapperAria === 'like' || wrapperAria === 'thumbs up' || wrapperAria === 'biểu tượng thích' || wrapperAria === 'gửi biểu tượng thích') {
+                return true;
+            }
+            if (/^(?:tin nhắn.*:)?\s*(?:thích|like|biểu tượng thích|thumbs up|nhãn dán thích)$/i.test(wrapperAria)) {
+                return true;
+            }
+            if (wrapperAria.includes('biểu tượng thích') || wrapperAria.includes('thumbs up') || wrapperAria.includes('nhãn dán thích')) {
+                return true;
+            }
+        }
+
+        // 3. QuerySelector các phần tử mang nhãn Like trong cây DOM của bubble
+        const likeSelectorEl = node.querySelector?.(
+            '[aria-label*="biểu tượng thích" i], [aria-label*="thumbs up" i], [aria-label*="nhãn dán thích" i], ' +
+            '[aria-label="Thích" i], [aria-label="Like" i], [aria-label="thích" i], [aria-label="like" i], ' +
+            'svg[aria-label*="Thích" i], svg[aria-label*="Like" i], ' +
+            '[role="img"][aria-label*="Thích" i], [role="img"][aria-label*="Like" i]'
+        );
+        if (node.matches?.(
+            '[aria-label*="biểu tượng thích" i], [aria-label*="thumbs up" i], [aria-label*="nhãn dán thích" i], ' +
+            '[aria-label="Thích" i], [aria-label="Like" i], [aria-label="thích" i], [aria-label="like" i], ' +
+            'svg[aria-label*="Thích" i], svg[aria-label*="Like" i], ' +
+            '[role="img"][aria-label*="Thích" i], [role="img"][aria-label*="Like" i]'
+        )) {
+            return true;
+        }
+        if (likeSelectorEl) {
+            return true;
+        }
+
+        // 4. Kiểm tra SVG thumbs up trong Meta Business Suite
+        const isSvgNode = node.tagName && node.tagName.toLowerCase() === 'svg';
+        const svgs = isSvgNode ? [node] : Array.from(node.querySelectorAll?.('svg') || []);
+        for (const svg of svgs) {
+            // Chỉ loại trừ các nút bấm hành động phụ (bày tỏ, tùy chọn, chuyển tiếp) hoặc composer, không loại trừ role="button" của tin nhắn
+            if (svg.closest('[aria-label*="tùy chọn" i], [aria-label*="bày tỏ" i], [aria-label*="chuyển tiếp" i], [aria-label*="trả lời" i], button[aria-label*="menu" i], [data-surface*="composer"], form, footer')) {
+                continue;
+            }
+            const vb = (svg.getAttribute('viewBox') || '').trim();
+            const title = (svg.querySelector?.('title')?.textContent || '').trim().toLowerCase();
+            if (title === 'thích' || title === 'like' || title.includes('thumbs up') || title.includes('biểu tượng thích')) {
+                return true;
+            }
+
+            const svgAria = (svg.getAttribute('aria-label') || '').toLowerCase();
+            if (svgAria.includes('thích') || svgAria.includes('like') || svgAria.includes('thumbs up')) {
+                return true;
+            }
+
+            const isStandardLikeVb = vb.includes('16') || vb.includes('20') || vb.includes('24') || vb.includes('28') || vb.includes('32') || vb.includes('36') || vb.includes('40') || vb.includes('48') || vb.includes('64');
+            const fill = (svg.getAttribute('fill') || svg.innerHTML || '').toLowerCase();
+            const isBlueLikeSvg = fill.includes('0084ff') || fill.includes('0a7cff') || fill.includes('0099ff') || fill.includes('rgb(0, 132, 255)') || fill.includes('rgb(10, 124, 255)') || fill.includes('rgb(0,132,255)') || fill.includes('currentcolor');
+            if ((isStandardLikeVb || isBlueLikeSvg) && !svg.closest('[data-testid*="status"]') && !svg.closest('[aria-label*="Đã gửi" i]') && !svg.closest('[aria-label*="Đã chuyển" i]')) {
+                return true;
+            }
+        }
+
+        // 5. Kiểm tra Sticker / Image thumbs up
+        const isImgNode = node.tagName && node.tagName.toLowerCase() === 'img';
+        const imgs = isImgNode ? [node] : Array.from(node.querySelectorAll?.('img[src]') || []);
+        for (const img of imgs) {
+            const src = img.getAttribute('src') || '';
+            const alt = (img.getAttribute('alt') || '').trim().toLowerCase();
+
+            if (alt === '👍' || alt === 'thích' || alt === 'like' || alt.includes('biểu tượng thích') || alt.includes('thumbs up') || alt.includes('nhãn dán thích')) {
+                return true;
+            }
+
+            if (src.includes('369239263222822') || src.includes('like_sticker') || src.includes('thumbs-up') || src.includes('thumbsup')) {
+                return true;
+            }
+        }
+
+        // 6. Kiểm tra [role="img"] với CSS background-image
+        const isBgNode = node.getAttribute?.('role') === 'img';
+        const bgEls = isBgNode ? [node] : Array.from(node.querySelectorAll?.('[role="img"]') || []);
+        for (const bgEl of bgEls) {
+            const bgAria = (bgEl.getAttribute('aria-label') || '').toLowerCase();
+            if (bgAria === 'thích' || bgAria === 'like' || bgAria.includes('biểu tượng thích') || bgAria.includes('thumbs up') || bgAria.includes('nhãn dán thích')) {
+                return true;
+            }
+            const style = bgEl.getAttribute('style') || '';
+            if (style.includes('369239263222822') || style.includes('like_sticker')) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function resolveMessageContent(messageIdNode) {
+        const rawText = (messageIdNode.innerText || messageIdNode.textContent || '').trim();
+        const textFilter = globalThis.FbCrmTextFilter || (typeof window !== 'undefined' && window.FbCrmTextFilter);
+        const cleanedText = textFilter && typeof textFilter.cleanMessageText === 'function'
+            ? textFilter.cleanMessageText(rawText)
+            : rawText;
+
+        // Ưu tiên kiểm tra Nút Thích / Like (Thumbs Up 👍) đầu tiên
+        if (isLikeElementOrWrapper(messageIdNode, cleanedText || rawText)) {
+            return { kind: 'text', text: '👍' };
+        }
+
+        // Call Log Guard: Never treat a call notification wrapper (which may contain avatar/icon <img>) as an image attachment!
+        const lowerRawText = rawText.toLowerCase();
+        if (rawText && (lowerRawText.includes('cuộc gọi') || lowerRawText.includes('bỏ lỡ') || lowerRawText.includes('đã nhỡ') || lowerRawText.includes('nhỡ'))) {
+            return { kind: 'text', text: rawText };
+        }
+
         const imgs = messageIdNode.querySelectorAll('img[src]');
         for (const img of imgs) {
             const src = img.getAttribute('src') || '';
@@ -938,7 +1248,7 @@ if (isBusiness) {
             if (isAvatar) continue;
             if ((img.width > 0 && img.width <= 36) || (img.height > 0 && img.height <= 36)) continue;
 
-            return { kind: 'media', mediaUrl: src, caption: fullText || null };
+            return { kind: 'media', mediaUrl: src, caption: (cleanedText || rawText) || null };
         }
 
         const bgEls = messageIdNode.querySelectorAll('[role="img"]');
@@ -950,61 +1260,28 @@ if (isBusiness) {
                 if (url && !url.includes('/emoji.php') && !url.includes('/rsrc.php')) {
                     const aria = (bgEl.getAttribute('aria-label') || '').toLowerCase();
                     if (!aria.includes('ảnh đại diện') && !aria.includes('profile picture') && !aria.includes('biểu tượng cảm xúc')) {
-                        return { kind: 'media', mediaUrl: url, caption: fullText || bgEl.getAttribute('aria-label') || null };
+                        return { kind: 'media', mediaUrl: url, caption: (cleanedText || rawText) || bgEl.getAttribute('aria-label') || null };
                     }
                 }
             }
         }
 
-        // Temporary diagnostic (spec 040 T020, 2026-08-18): a real
-        // file-transport image + caption send still isn't being recognized
-        // as media even after checking both <img> and CSS-background - ran
-        // once live and found imgCount=0 too, so whatever markup Facebook
-        // actually uses for this case is still unknown. Dump the wrapper's
-        // own outerHTML (truncated) so the real shape can be seen directly
-        // instead of guessing a third time. Scoped to this test's own
-        // messages (marker text) to avoid dumping real customer content.
-        if (fullText && /spec 0[34]0/i.test(fullText) && chrome?.runtime?.id) {
-            try {
-                // Run 3 (2026-08-18) climbed 3 ancestor levels and found only
-                // an unrelated read-receipt avatar <img> (real alt text, a
-                // "seen at HH:MM" description) - not the 2 uploaded photos.
-                // Search the WHOLE document instead for real content images
-                // using this file's own established convention (an empty
-                // alt="" marks a real sent/received photo, as opposed to an
-                // avatar/emoji which always has descriptive alt text - see
-                // the isPhotoMessage comment elsewhere in this file), and
-                // report each one's closest [data-message-id] ancestor (or
-                // lack of one) to find out where they actually live.
-                const emptyAltImgs = document.querySelectorAll('img[src][alt=""]');
-                const emptyAltInfo = [...emptyAltImgs].slice(0, 10).map((img) => {
-                    const closestId = img.closest('[data-message-id]');
-                    return {
-                        srcPrefix: (img.getAttribute('src') || '').substring(0, 40),
-                        dataMessageId: closestId ? closestId.getAttribute('data-message-id') : null
-                    };
-                });
-                chrome.runtime.sendMessage({
-                    type: 'CONTENT_DEBUG',
-                    data: {
-                        reason: 'test_message_wrapper_dump_v3',
-                        fullTextSnippet: fullText.substring(0, 60),
-                        thisWrapperId: messageIdNode.getAttribute('data-message-id'),
-                        imgCount: imgs.length,
-                        bgElCount: bgEls.length,
-                        emptyAltImgCountWholeDoc: emptyAltImgs.length,
-                        emptyAltImgs: emptyAltInfo
-                    }
-                });
-            } catch (e) { /* best-effort diagnostic only */ }
-        }
+        // Kiểm tra xem rawText có phải chỉ toàn chuỗi thời gian/hệ thống hay không
+        const isMetadataOnly = textFilter && typeof textFilter.isSystemOrMetadataText === 'function'
+            ? textFilter.isSystemOrMetadataText(rawText)
+            : (/^\d{1,2}:\d{2}/.test(rawText));
 
-        if (fullText) {
-            return { kind: 'text', text: fullText };
+        if (cleanedText && !isMetadataOnly) {
+            return { kind: 'text', text: cleanedText };
+        } else if (rawText && !isMetadataOnly) {
+            return { kind: 'text', text: rawText };
         }
 
         for (const img of imgs) {
             const alt = (img.getAttribute('alt') || '').trim();
+            if (alt && (alt === '👍' || /^(?:thích|like)$/i.test(alt))) {
+                return { kind: 'text', text: '👍' };
+            }
             if (alt && alt.length <= 8 && !/[A-Za-z]/.test(alt)) {
                 return { kind: 'emoji_text', text: alt };
             }
@@ -1091,7 +1368,16 @@ if (isBusiness) {
             text.includes('bỏ lỡ')
         ));
 
-        const dedupKey = fbMessageId || text + '_' + (isOutgoing === null ? 'unknown' : isOutgoing);
+        let effectiveFbMessageId = fbMessageId;
+        if (!effectiveFbMessageId && text === '👍' && messageListContainer) {
+            const allLikes = Array.from(messageListContainer.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i]'));
+            const likeIdx = allLikes.indexOf(anchorElement);
+            if (likeIdx >= 0) {
+                effectiveFbMessageId = `page_like_${threadId}_${likeIdx}`;
+            }
+        }
+
+        const dedupKey = effectiveFbMessageId || text + '_' + (isOutgoing === null ? 'unknown' : isOutgoing);
         const hash = threadId + '_' + dedupKey;
         if (processedHashes.has(hash)) return;
 
@@ -1139,7 +1425,7 @@ if (isBusiness) {
 
         const payloadData = {
             thread_id: threadId,
-            fb_message_id: fbMessageId,
+            fb_message_id: effectiveFbMessageId,
             content: text,
             is_outgoing: isOutgoing,
             direction_status: isOutgoing === null ? 'pending' : 'confirmed',
@@ -1344,6 +1630,17 @@ if (isBusiness) {
                                     break;
                                 }
                             }
+
+                            // Bắt buộc cuộn trả lại đáy để Facebook mount lại các tin nhắn mới nhất
+                            try {
+                                scroller.scrollTop = scroller.scrollHeight;
+                                await scrollerHelper.waitForDomSettle(scroller, {
+                                    maxWaitMs: 1500,
+                                    pollIntervalMs: 50
+                                });
+                                const bottomBatch = collectMountedBatchMessages(container);
+                                accumulator.accumulate(bottomBatch);
+                            } catch (_) {}
                         } else {
                             try {
                                 chrome.runtime.sendMessage({

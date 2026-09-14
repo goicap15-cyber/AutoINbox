@@ -110,6 +110,7 @@ function cleanMessageText(rawText) {
 
   // 1. Strip accessibility prefix (handling 'Tin nhắn do X gửi lúc Thứ Năm 18:00ch:', 'Tin nhắn do X gửi lúc 18:00:', etc.)
   text = text.replace(/^(?:Nhập,\s*)?Tin nhắn do [\s\S]+? gửi lúc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:ch)?:|\b\d{1,2}:\d{2}(?:ch)?\s+)\s*/i, '').trim();
+  text = text.replace(/^(?:Nhập,\s*)?Message sent by [\s\S]+? at [^\n]*?(?::|\b\d{1,2}:\d{2}(?:[ap]m)?:|\b\d{1,2}:\d{2}(?:[ap]m)?\s+)\s*/i, '').trim();
   text = text.replace(/^Nhập,\s*/i, '').trim();
   text = text.replace(/^[:\s]+/, '').trim();
 
@@ -127,6 +128,10 @@ function cleanMessageText(rawText) {
   // 3. Strip leading/trailing timestamps ONLY if isolated/standalone on line
   text = text.replace(/^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?\s*$/i, '').replace(/(?:\n|\r)\s*\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i, '').trim();
   text = text.replace(/^[:\s]+/, '').trim();
+
+  if (/^(?:thích|like|biểu tượng thích|biểu tượng cảm xúc thích|gửi biểu tượng thích|thumbs up)$/i.test(text)) {
+    return '👍';
+  }
 
   if (!text) return '';
 
