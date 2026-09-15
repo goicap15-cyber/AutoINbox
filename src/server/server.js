@@ -3019,6 +3019,7 @@ wss.on('connection', (ws, req) => {
               authoritative: true,
               sync_status: 'SYNCED'
             });
+            inboundMediaHydration.hydrateThread(envelope.thread_id);
           } else {
             // Trường hợp retry_required hoặc rejected, emit lại persisted rows để CRM tắt spinner xoay
             const persistedRows = db.prepare(`

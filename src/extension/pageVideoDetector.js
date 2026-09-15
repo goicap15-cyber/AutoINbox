@@ -127,21 +127,32 @@
       const isVideoLink = /\/(?:videos|reel|watch)\//i.test(href);
       const isVideoLabel = OPEN_VIDEO_LABEL_PATTERN.test(label);
 
-      if (isMp4Direct || (isVideoLink && isVideoLabel) || (isVideoLabel && !isExcludedCall(label))) {
+      if (isMp4Direct || isVideoLink || (isVideoLabel && !isExcludedCall(label))) {
         // Nếu là mp4 thì lấy trực tiếp, nếu là link trang thì tìm poster hoặc ảnh thumbnail đi kèm
         let detectedUrl = isMp4Direct ? href : null;
         if (!detectedUrl) {
           const thumbImg = messageNode.querySelector('img[src]:not([src*="/emoji.php"]):not([src*="/rsrc.php"])');
           if (thumbImg) {
-            const src = thumbImg.getAttribute('src');
+            const src = thumbImg.currentSrc || thumbImg.getAttribute('src');
             if (/^https?:\/\//i.test(src)) detectedUrl = src;
+          }
+        }
+        if (!detectedUrl) {
+          const bgElements = Array.from(messageNode.querySelectorAll('[style*="background-image"]'));
+          for (const bgEl of bgElements) {
+            const style = bgEl.getAttribute('style') || '';
+            const match = style.match(/background-image\s*:\s*url\((['"]?)([^'")]+)\1\)/i);
+            if (match && /^https?:\/\//i.test(match[2])) {
+              detectedUrl = match[2];
+              break;
+            }
           }
         }
 
         return {
           isVideo: true,
           mediaUrl: detectedUrl || href || null,
-          posterUrl: null,
+          posterUrl: detectedUrl || null,
           caption: finalCaption
         };
       }
@@ -167,9 +178,12 @@
       }
     }
 
-    // 4. Quét khi có thanh thời lượng video player (dạng 0:00 / 0:xx) bên trong messageNode
-    const hasPlayerTimeInNode = /\d{1,2}:\d{2}\s*\/\s*\d{1,2}:\d{2}/.test(rawText);
-    if (hasPlayerTimeInNode && !isExcludedCall(rawText)) {
+    // 4. Quét khi có thanh thời lượng video player (dạng 0:00 / 0:xx hoặc 0:xx) hoặc nút play bên trong messageNode
+    const hasDurationFormat = /\d{1,2}:\d{2}\s*\/\s*\d{1,2}:\d{2}/.test(rawText) ||
+      (/^\d{1,2}:\d{2}$/.test(rawText) && Boolean(messageNode.querySelector?.('img[src], [style*="background-image"], [aria-label*="phát" i], [aria-label*="play" i], [aria-label*="video" i]')));
+    const hasPlayControl = Boolean(messageNode.querySelector?.('[aria-label*="phát" i], [aria-label*="play" i], [aria-label*="video" i], [data-surface*="video"]'));
+
+    if ((hasDurationFormat || hasPlayControl) && !isExcludedCall(rawText)) {
       let detectedUrl = null;
       const thumbImg = messageNode.querySelector('img[src]:not([src*="/emoji.php"]):not([src*="/rsrc.php"])');
       if (thumbImg) {
@@ -187,12 +201,14 @@
           }
         }
       }
-      return {
-        isVideo: true,
-        mediaUrl: detectedUrl || null,
-        posterUrl: detectedUrl || null,
-        caption: finalCaption
-      };
+      if (detectedUrl || hasDurationFormat || hasPlayControl) {
+        return {
+          isVideo: true,
+          mediaUrl: detectedUrl || null,
+          posterUrl: detectedUrl || null,
+          caption: finalCaption
+        };
+      }
     }
 
     return { isVideo: false };

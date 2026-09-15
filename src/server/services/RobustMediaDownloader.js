@@ -11,6 +11,8 @@ const EXT_BY_TYPE = {
   'image/gif': '.gif',
   'video/mp4': '.mp4',
   'video/quicktime': '.mov',
+  'video/webm': '.webm',
+  'video/x-msvideo': '.avi',
   'audio/mpeg': '.mp3',
   'audio/mp4': '.m4a'
 };
@@ -26,7 +28,7 @@ class RobustMediaDownloader {
       if (redirectsLeft < 0) return reject(new Error('Too many media redirects'));
       const client = String(targetUrl).startsWith('https:') ? https : http;
       const request = client.get(targetUrl, {
-        timeout: 15000,
+        timeout: 30000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
           Accept: 'image/avif,image/webp,image/apng,image/*,video/*,audio/*,*/*;q=0.8',
