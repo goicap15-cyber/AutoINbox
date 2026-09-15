@@ -29,6 +29,7 @@
     /^Chỉ những người tham gia/i,
     /^Bản quyền Meta/i,
     /^Thêm tin nhắn được cá nhân h(?:óa|oá)\.?$/i,
+    /^(?:Chưa có tin nhắn|ChÃ†Â°a cÃƒÂ° tin nhÃ¡ÂºÂ¯n|No messages?)$/i,
 
     // Right sidebar & header UI elements
     /^(?:Trang cá nhân|View profile)$/i,
@@ -67,6 +68,11 @@
     /^\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM))?$/i,
     /^(?:T[2-7]|CN)$/i,
 
+    // Debug trace and junk text patterns (TRACE_ONE_1509, dsdsdsds, numeric debug strings)
+    /^TRACE_[A-Z0-9_]+$/i,
+    /^(?:ds){2,}$/i,
+    /^\d{9,}$/,
+
     // Media label placeholders (e.g. [Ảnh], [Video], [File], [Attachment])
     /^\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment)\]?$/i,
 
@@ -85,6 +91,7 @@
     if (!text || typeof text !== 'string') return true;
     const trimmed = text.trim();
     if (!trimmed) return true;
+    if (/(?:Chưa\s*có\s*tin\s*nhắn|ChÃ|tin\s*nh[áÃaàáảãạâầấẩẫậăằắẳẵặ]*[n]|No\s*messages?)/i.test(trimmed)) return true;
     if (RELATIVE_TIME_METADATA_RE.test(trimmed)) return true;
 
     for (const pat of SYSTEM_PATTERNS) {

@@ -248,6 +248,7 @@
   }
   const recentNetworkEmits = new Map();
   const recentDomEmits = new Map();
+  const isDedicatedBackgroundTab = /(?:[?&])crm_tab_role=(?:history|discovery|requests|request_action)/i.test(window.location.search);
   // Direction ledger: Messenger may replay a rendered outgoing bubble as an
   // incoming DOM row while React hydrates its aria metadata.
   const recentObservedOutgoing = new Map();
@@ -1310,6 +1311,7 @@
   }
 
   const chatObserver = new MutationObserver((mutations) => {
+    if (isDedicatedBackgroundTab) return;
     const thread_id = extractThreadIdFromUrl();
     if (!thread_id || !/^\d+$/.test(thread_id)) return;
 
@@ -1332,7 +1334,8 @@
       // they appeared in CRM only after our next outgoing send caused another
       // mutation. Server-side stable-id dedup safely handles late history
       // hydration, so keeping this blind window is both unnecessary and lossy.
-      replayStableIncomingTail(thread_id);
+      // The mounted DOM already contains historical bubbles when switching users.
+      // Do not replay that tail through realtime: history sync owns these rows.
       seedBaseline(thread_id);
       observerPaused = false;
     }
@@ -1537,7 +1540,7 @@
   const initialThreadId = extractThreadIdFromUrl();
   if (initialThreadId && /^\d+$/.test(initialThreadId)) {
     currentBaselineThreadId = initialThreadId;
-    replayStableIncomingTail(initialThreadId);
+    // Already-mounted history is seeded, not replayed as realtime.
     seedBaseline(initialThreadId);
   }
   chatObserver.observe(document.body, {

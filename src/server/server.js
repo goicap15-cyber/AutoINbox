@@ -78,7 +78,7 @@ const InitialMessageSweepService = require('./services/InitialMessageSweepServic
 const { isChangedIncomingSidebarPreview } = require('./utils/sidebarIncomingDetection');
 const licenseChecker = require('./services/LicenseChecker');
 
-// Remote License Server URL Ã¢â‚¬â€œ must match CentralAuthClient / LicenseChecker
+// Remote License Server URL ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“ must match CentralAuthClient / LicenseChecker
 const LICENSE_SERVER_BASE_URL = (process.env.LICENSE_SERVER_URL || 'https://genblackmmoonline.online/license_server').replace(/\/$/, '');
 
 const app = express();
@@ -93,7 +93,7 @@ function sendAuthError(res, error) {
   res.status(status).json({
     success: false,
     code: error.code || 'AUTH_ERROR',
-    message: status === 500 ? 'KhÃƒÂ´ng thÃ¡Â»Æ’ xÃ¡Â»Â­ lÃƒÂ½ yÃƒÂªu cÃ¡ÂºÂ§u Ã„â€˜Ã„Æ’ng nhÃ¡ÂºÂ­p.' : error.message
+    message: status === 500 ? 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ xÃƒÂ¡Ã‚Â»Ã‚Â­ lÃƒÆ’Ã‚Â½ yÃƒÆ’Ã‚Âªu cÃƒÂ¡Ã‚ÂºÃ‚Â§u Ãƒâ€žÃ¢â‚¬ËœÃƒâ€žÃ†â€™ng nhÃƒÂ¡Ã‚ÂºÃ‚Â­p.' : error.message
   });
 }
 
@@ -120,7 +120,7 @@ app.post('/api/auth/reset-password-otp', async (req, res) => {
 app.post('/api/auth/reset-password', async (req, res) => {
   try {
     const data = await centralAuthClient.resetPassword(req.body || {});
-    res.json({ success: true, message: data?.message || 'Ã„ÂÃ¡ÂºÂ·t lÃ¡ÂºÂ¡i mÃ¡ÂºÂ­t khÃ¡ÂºÂ©u thÃƒÂ nh cÃƒÂ´ng!' });
+    res.json({ success: true, message: data?.message || 'Ãƒâ€žÃ‚ÂÃƒÂ¡Ã‚ÂºÃ‚Â·t lÃƒÂ¡Ã‚ÂºÃ‚Â¡i mÃƒÂ¡Ã‚ÂºÃ‚Â­t khÃƒÂ¡Ã‚ÂºÃ‚Â©u thÃƒÆ’Ã‚Â nh cÃƒÆ’Ã‚Â´ng!' });
   } catch (error) {
     sendAuthError(res, error);
   }
@@ -175,7 +175,7 @@ app.get('/api/auth/latest-local-session', (req, res) => {
 
 app.post('/api/auth/claim-token', (req, res) => {
   const { token } = req.body || {};
-  if (!token) return res.status(400).json({ success: false, message: 'ThiÃ¡ÂºÂ¿u token' });
+  if (!token) return res.status(400).json({ success: false, message: 'ThiÃƒÂ¡Ã‚ÂºÃ‚Â¿u token' });
   res.setHeader('Set-Cookie', authService.sessionCookie(token));
   res.json({ success: true });
 });
@@ -187,7 +187,7 @@ app.get('/google-auth-external', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>XÃƒÂ¡c thÃ¡Â»Â±c Google - FB Messenger CRM</title>
+      <title>XÃƒÆ’Ã‚Â¡c thÃƒÂ¡Ã‚Â»Ã‚Â±c Google - FB Messenger CRM</title>
       <script src="https://accounts.google.com/gsi/client" async defer onload="initGoogle()"></script>
       <style>
         body { font-family: system-ui, -apple-system, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f8fafc; color: #0f172a; }
@@ -202,11 +202,11 @@ app.get('/google-auth-external', (req, res) => {
     <body>
       <div class="card">
         <h2>MISSPRICE CRM</h2>
-        <p>Vui lÃƒÂ²ng chÃ¡Â»Ân tÃƒÂ i khoÃ¡ÂºÂ£n Google Ã„â€˜Ã¡Â»Æ’ tiÃ¡ÂºÂ¿p tÃ¡Â»Â¥c sÃ¡Â»Â­ dÃ¡Â»Â¥ng Ã¡Â»Â©ng dÃ¡Â»Â¥ng Desktop.</p>
+        <p>Vui lÃƒÆ’Ã‚Â²ng chÃƒÂ¡Ã‚Â»Ã‚Ân tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Google Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ tiÃƒÂ¡Ã‚ÂºÃ‚Â¿p tÃƒÂ¡Ã‚Â»Ã‚Â¥c sÃƒÂ¡Ã‚Â»Ã‚Â­ dÃƒÂ¡Ã‚Â»Ã‚Â¥ng ÃƒÂ¡Ã‚Â»Ã‚Â©ng dÃƒÂ¡Ã‚Â»Ã‚Â¥ng Desktop.</p>
         <div class="btn-container">
           <div id="googleBtn"></div>
         </div>
-        <div id="msg-success" class="success">Ã¢Å“â€œ Ã„ÂÃ„Æ’ng nhÃ¡ÂºÂ­p thÃƒÂ nh cÃƒÂ´ng! CÃ¡Â»Â­a sÃ¡Â»â€¢ nÃƒÂ y sÃ¡ÂºÂ½ tÃ¡Â»Â± Ã„â€˜Ã¡Â»â„¢ng Ã„â€˜ÃƒÂ³ng...</div>
+        <div id="msg-success" class="success">ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ Ãƒâ€žÃ‚ÂÃƒâ€žÃ†â€™ng nhÃƒÂ¡Ã‚ÂºÃ‚Â­p thÃƒÆ’Ã‚Â nh cÃƒÆ’Ã‚Â´ng! CÃƒÂ¡Ã‚Â»Ã‚Â­a sÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¢ nÃƒÆ’Ã‚Â y sÃƒÂ¡Ã‚ÂºÃ‚Â½ tÃƒÂ¡Ã‚Â»Ã‚Â± Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢ng Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â³ng...</div>
         <div id="msg-error" class="error"></div>
       </div>
       <script>
@@ -241,11 +241,11 @@ app.get('/google-auth-external', (req, res) => {
               succDiv.style.display = 'block';
               setTimeout(() => { try { window.close(); } catch(_) {} }, 1500);
             } else {
-              errDiv.textContent = result.message || 'Ã„ÂÃ„Æ’ng nhÃ¡ÂºÂ­p bÃ¡ÂºÂ±ng Google thÃ¡ÂºÂ¥t bÃ¡ÂºÂ¡i.';
+              errDiv.textContent = result.message || 'Ãƒâ€žÃ‚ÂÃƒâ€žÃ†â€™ng nhÃƒÂ¡Ã‚ÂºÃ‚Â­p bÃƒÂ¡Ã‚ÂºÃ‚Â±ng Google thÃƒÂ¡Ã‚ÂºÃ‚Â¥t bÃƒÂ¡Ã‚ÂºÃ‚Â¡i.';
               errDiv.style.display = 'block';
             }
           } catch(e) {
-            errDiv.textContent = 'KhÃƒÂ´ng thÃ¡Â»Æ’ kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i Ã„â€˜Ã¡ÂºÂ¿n mÃƒÂ¡y chÃ¡Â»Â§.';
+            errDiv.textContent = 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚ÂºÃ‚Â¿n mÃƒÆ’Ã‚Â¡y chÃƒÂ¡Ã‚Â»Ã‚Â§.';
             errDiv.style.display = 'block';
           }
         }
@@ -309,7 +309,7 @@ app.use('/api', (req, res, next) => {
   return requireAuthenticatedApi(req, res, next);
 });
 
-// 1. API KiÃ¡Â»Æ’m tra trÃ¡ÂºÂ¡ng thÃƒÂ¡i bÃ¡ÂºÂ£n quyÃ¡Â»Ân cÃ¡Â»Â¥c bÃ¡Â»â„¢
+// 1. API KiÃƒÂ¡Ã‚Â»Ã†â€™m tra trÃƒÂ¡Ã‚ÂºÃ‚Â¡ng thÃƒÆ’Ã‚Â¡i bÃƒÂ¡Ã‚ÂºÃ‚Â£n quyÃƒÂ¡Ã‚Â»Ã‚Ân cÃƒÂ¡Ã‚Â»Ã‚Â¥c bÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢
 app.get('/api/license/status', async (req, res) => {
   try {
     if (isLocalDevRequest(req, 'LOCAL_DEV_SKIP_LICENSE')) {
@@ -318,7 +318,7 @@ app.get('/api/license/status', async (req, res) => {
         data: {
           isLicensed: true,
           reason: 'LOCAL_DEV',
-          message: 'Ã„Âang dÃƒÂ¹ng chÃ¡ÂºÂ¿ Ã„â€˜Ã¡Â»â„¢ kiÃ¡Â»Æ’m thÃ¡Â»Â­ local.',
+          message: 'Ãƒâ€žÃ‚Âang dÃƒÆ’Ã‚Â¹ng chÃƒÂ¡Ã‚ÂºÃ‚Â¿ Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢ kiÃƒÂ¡Ã‚Â»Ã†â€™m thÃƒÂ¡Ã‚Â»Ã‚Â­ local.',
           key: 'LOCAL-DEV'
         }
       });
@@ -326,14 +326,14 @@ app.get('/api/license/status', async (req, res) => {
     const user = authService.getRequestUser(req);
     const savedKey = licenseChecker.getSavedKey();
 
-    // NÃ¡ÂºÂ¿u mÃƒÂ¡y nÃƒÂ y chÃ†Â°a/Ã„â€˜ÃƒÂ£ bÃ¡Â»â€¹ Ã„â€˜Ã„Æ’ng xuÃ¡ÂºÂ¥t Key (khÃƒÂ´ng cÃƒÂ³ savedKey) vÃƒÂ  khÃƒÂ´ng phÃ¡ÂºÂ£i tÃƒÂ i khoÃ¡ÂºÂ£n nhÃƒÂ¢n viÃƒÂªn
+    // NÃƒÂ¡Ã‚ÂºÃ‚Â¿u mÃƒÆ’Ã‚Â¡y nÃƒÆ’Ã‚Â y chÃƒâ€ Ã‚Â°a/Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ bÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ Ãƒâ€žÃ¢â‚¬ËœÃƒâ€žÃ†â€™ng xuÃƒÂ¡Ã‚ÂºÃ‚Â¥t Key (khÃƒÆ’Ã‚Â´ng cÃƒÆ’Ã‚Â³ savedKey) vÃƒÆ’Ã‚Â  khÃƒÆ’Ã‚Â´ng phÃƒÂ¡Ã‚ÂºÃ‚Â£i tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n nhÃƒÆ’Ã‚Â¢n viÃƒÆ’Ã‚Âªn
     if (!savedKey && user?.company_role !== 'EMPLOYEE') {
       return res.json({
         success: true,
         data: {
           isLicensed: false,
           reason: 'NO_KEY',
-          message: 'MÃƒÂ¡y nÃƒÂ y chÃ†Â°a kÃƒÂ­ch hoÃ¡ÂºÂ¡t License Key.'
+          message: 'MÃƒÆ’Ã‚Â¡y nÃƒÆ’Ã‚Â y chÃƒâ€ Ã‚Â°a kÃƒÆ’Ã‚Â­ch hoÃƒÂ¡Ã‚ÂºÃ‚Â¡t License Key.'
         }
       });
     }
@@ -354,15 +354,15 @@ app.get('/api/license/status', async (req, res) => {
     }
     res.json({ success: true, data: { isLicensed: Boolean(result.data?.valid), ...result.data } });
   } catch (error) {
-    res.json({ success: true, data: { isLicensed: false, reason: 'LICENSE_SERVER_UNAVAILABLE', message: 'KhÃƒÂ´ng thÃ¡Â»Æ’ kiÃ¡Â»Æ’m tra gÃƒÂ³i tÃƒÂ i khoÃ¡ÂºÂ£n.' } });
+    res.json({ success: true, data: { isLicensed: false, reason: 'LICENSE_SERVER_UNAVAILABLE', message: 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ kiÃƒÂ¡Ã‚Â»Ã†â€™m tra gÃƒÆ’Ã‚Â³i tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n.' } });
   }
 });
 
-// 2. API KÃƒÂ­ch hoÃ¡ÂºÂ¡t Key mÃ¡Â»â€ºi
+// 2. API KÃƒÆ’Ã‚Â­ch hoÃƒÂ¡Ã‚ÂºÃ‚Â¡t Key mÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi
 app.post('/api/license/activate', async (req, res) => {
   try {
     const { key } = req.body;
-    if (!key) return res.status(400).json({ success: false, message: 'ThiÃ¡ÂºÂ¿u mÃƒÂ£ Key' });
+    if (!key) return res.status(400).json({ success: false, message: 'ThiÃƒÂ¡Ã‚ÂºÃ‚Â¿u mÃƒÆ’Ã‚Â£ Key' });
 
     const normalizedKey = key.trim();
     const { getMachineId } = require('./utils/machineId');
@@ -374,7 +374,7 @@ app.post('/api/license/activate', async (req, res) => {
       body: JSON.stringify({
         key: normalizedKey,
         machineId,
-        deviceName: 'MÃƒÂ¡y CRM Desktop',
+        deviceName: 'MÃƒÆ’Ã‚Â¡y CRM Desktop',
         clientUsername: authService.getRequestUser(req).username
       })
     });
@@ -383,7 +383,7 @@ app.post('/api/license/activate', async (req, res) => {
     if (!centralResponse.ok || !centralResult.success) {
       return res.status(400).json({
         success: false,
-        message: centralResult.message || centralResult.error || 'KhÃƒÂ´ng thÃ¡Â»Æ’ kÃƒÂ­ch hoÃ¡ÂºÂ¡t Key trÃƒÂªn License Server',
+        message: centralResult.message || centralResult.error || 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ kÃƒÆ’Ã‚Â­ch hoÃƒÂ¡Ã‚ÂºÃ‚Â¡t Key trÃƒÆ’Ã‚Âªn License Server',
         data: centralResult
       });
     }
@@ -392,27 +392,27 @@ app.post('/api/license/activate', async (req, res) => {
     const status = await licenseChecker.verify();
 
     if (status.isLicensed) {
-      res.json({ success: true, message: 'KÃƒÂ­ch hoÃ¡ÂºÂ¡t bÃ¡ÂºÂ£n quyÃ¡Â»Ân thÃƒÂ nh cÃƒÂ´ng!', data: status });
+      res.json({ success: true, message: 'KÃƒÆ’Ã‚Â­ch hoÃƒÂ¡Ã‚ÂºÃ‚Â¡t bÃƒÂ¡Ã‚ÂºÃ‚Â£n quyÃƒÂ¡Ã‚Â»Ã‚Ân thÃƒÆ’Ã‚Â nh cÃƒÆ’Ã‚Â´ng!', data: status });
     } else {
       licenseChecker.removeKey();
-      res.status(400).json({ success: false, message: status.message || 'MÃƒÂ£ Key khÃƒÂ´ng hÃ¡Â»Â£p lÃ¡Â»â€¡', data: status });
+      res.status(400).json({ success: false, message: status.message || 'MÃƒÆ’Ã‚Â£ Key khÃƒÆ’Ã‚Â´ng hÃƒÂ¡Ã‚Â»Ã‚Â£p lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡', data: status });
     }
   } catch (e) {
-    res.status(500).json({ success: false, message: 'KhÃƒÂ´ng thÃ¡Â»Æ’ kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i License Server', error: e.message });
+    res.status(500).json({ success: false, message: 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi License Server', error: e.message });
   }
 });
 
-// 2b. LÃ†Â°u tÃƒÂªn cÃƒÂ´ng ty cho chÃƒÂ­nh Key Ã„â€˜ang Ã„â€˜Ã†Â°Ã¡Â»Â£c kÃƒÂ­ch hoÃ¡ÂºÂ¡t trÃƒÂªn mÃƒÂ¡y nÃƒÂ y
+// 2b. LÃƒâ€ Ã‚Â°u tÃƒÆ’Ã‚Âªn cÃƒÆ’Ã‚Â´ng ty cho chÃƒÆ’Ã‚Â­nh Key Ãƒâ€žÃ¢â‚¬Ëœang Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c kÃƒÆ’Ã‚Â­ch hoÃƒÂ¡Ã‚ÂºÃ‚Â¡t trÃƒÆ’Ã‚Âªn mÃƒÆ’Ã‚Â¡y nÃƒÆ’Ã‚Â y
 app.post('/api/license/company', async (req, res) => {
   try {
     const companyName = String(req.body?.companyName || '').trim().replace(/\s+/g, ' ');
     if (companyName.length < 2 || companyName.length > 120) {
-      return res.status(400).json({ success: false, message: 'TÃƒÂªn cÃƒÂ´ng ty phÃ¡ÂºÂ£i tÃ¡Â»Â« 2 Ã„â€˜Ã¡ÂºÂ¿n 120 kÃƒÂ½ tÃ¡Â»Â±' });
+      return res.status(400).json({ success: false, message: 'TÃƒÆ’Ã‚Âªn cÃƒÆ’Ã‚Â´ng ty phÃƒÂ¡Ã‚ÂºÃ‚Â£i tÃƒÂ¡Ã‚Â»Ã‚Â« 2 Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚ÂºÃ‚Â¿n 120 kÃƒÆ’Ã‚Â½ tÃƒÂ¡Ã‚Â»Ã‚Â±' });
     }
 
     const savedKey = licenseChecker.getSavedKey();
     if (!savedKey) {
-      return res.status(400).json({ success: false, message: 'MÃƒÂ¡y chÃ†Â°a cÃƒÂ³ License Key Ã„â€˜ÃƒÂ£ kÃƒÂ­ch hoÃ¡ÂºÂ¡t' });
+      return res.status(400).json({ success: false, message: 'MÃƒÆ’Ã‚Â¡y chÃƒâ€ Ã‚Â°a cÃƒÆ’Ã‚Â³ License Key Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ kÃƒÆ’Ã‚Â­ch hoÃƒÂ¡Ã‚ÂºÃ‚Â¡t' });
     }
 
     const centralResponse = await fetch(`${LICENSE_SERVER_BASE_URL}/api/license/company`, {
@@ -426,11 +426,11 @@ app.post('/api/license/company', async (req, res) => {
     }
     res.json(centralResult);
   } catch (error) {
-    res.status(502).json({ success: false, message: 'KhÃƒÂ´ng thÃ¡Â»Æ’ kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i License Server Ã„â€˜Ã¡Â»Æ’ lÃ†Â°u tÃƒÂªn cÃƒÂ´ng ty', error: error.message });
+    res.status(502).json({ success: false, message: 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi License Server Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ lÃƒâ€ Ã‚Â°u tÃƒÆ’Ã‚Âªn cÃƒÆ’Ã‚Â´ng ty', error: error.message });
   }
 });
 
-// 3. API Ã„ÂÃ„Æ’ng xuÃ¡ÂºÂ¥t Key
+// 3. API Ãƒâ€žÃ‚ÂÃƒâ€žÃ†â€™ng xuÃƒÂ¡Ã‚ÂºÃ‚Â¥t Key
 app.post('/api/license/deactivate', async (req, res) => {
   try {
     const key = licenseChecker.getSavedKey();
@@ -444,7 +444,7 @@ app.post('/api/license/deactivate', async (req, res) => {
       }).catch(() => {});
     }
     licenseChecker.removeKey();
-    res.json({ success: true, message: 'Ã„ÂÃƒÂ£ hÃ¡Â»Â§y Ã„â€˜Ã„Æ’ng kÃƒÂ½ bÃ¡ÂºÂ£n quyÃ¡Â»Ân trÃƒÂªn mÃƒÂ¡y nÃƒÂ y' });
+    res.json({ success: true, message: 'Ãƒâ€žÃ‚ÂÃƒÆ’Ã‚Â£ hÃƒÂ¡Ã‚Â»Ã‚Â§y Ãƒâ€žÃ¢â‚¬ËœÃƒâ€žÃ†â€™ng kÃƒÆ’Ã‚Â½ bÃƒÂ¡Ã‚ÂºÃ‚Â£n quyÃƒÂ¡Ã‚Â»Ã‚Ân trÃƒÆ’Ã‚Âªn mÃƒÆ’Ã‚Â¡y nÃƒÆ’Ã‚Â y' });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
@@ -466,7 +466,7 @@ app.post('/api/payment/sepay-webhook', async (req, res) => {
   }
 });
 
-// ÃƒÂp dÃ¡Â»Â¥ng Middleware BÃ¡ÂºÂ£o VÃ¡Â»â€¡ KhÃƒÂ³a Backend cho tÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ cÃƒÂ¡c API CRM
+// ÃƒÆ’Ã‚Âp dÃƒÂ¡Ã‚Â»Ã‚Â¥ng Middleware BÃƒÂ¡Ã‚ÂºÃ‚Â£o VÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡ KhÃƒÆ’Ã‚Â³a Backend cho tÃƒÂ¡Ã‚ÂºÃ‚Â¥t cÃƒÂ¡Ã‚ÂºÃ‚Â£ cÃƒÆ’Ã‚Â¡c API CRM
 app.use('/api', licenseChecker.middleware());
 
 // Static: React Dashboard UI & Media files
@@ -527,7 +527,7 @@ function dispatchPageSidebarSync(accountId, reason = 'manual') {
 }
 const messageRequestActionOwners = new Map();
 const pendingAccountOwners = new Map();
-// Existing-account "KÃ¡ÂºÂ¿t nÃ¡Â»â€˜i Facebook" launches should become background
+// Existing-account "KÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi Facebook" launches should become background
 // processes only after that account's extension has registered successfully.
 // New-account pending sessions are intentionally excluded so the login window
 // stays visible for the operator.
@@ -609,7 +609,7 @@ function requireLocalCrmRequest(req, res, next) {
   if (isLoopbackAddress(req.socket?.remoteAddress) === false) {
     return res.status(403).json({
       code: 'LOCAL_CRM_REQUIRED',
-      error: 'Rich-message chÃ¡Â»â€° Ã„â€˜Ã†Â°Ã¡Â»Â£c phÃƒÂ©p tÃ¡Â»Â« CRM chÃ¡ÂºÂ¡y trÃƒÂªn mÃƒÂ¡y nÃƒÂ y.'
+      error: 'Rich-message chÃƒÂ¡Ã‚Â»Ã¢â‚¬Â° Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c phÃƒÆ’Ã‚Â©p tÃƒÂ¡Ã‚Â»Ã‚Â« CRM chÃƒÂ¡Ã‚ÂºÃ‚Â¡y trÃƒÆ’Ã‚Âªn mÃƒÆ’Ã‚Â¡y nÃƒÆ’Ã‚Â y.'
     });
   }
   next();
@@ -685,6 +685,14 @@ function isRenderableStoredMessage(message = {}) {
   );
 }
 
+function isUnhydratedSyntheticHistoryRow(row = {}) {
+  const id = String(row.fb_message_id || '');
+  const mediaType = String(row.media_type || 'text').toLowerCase();
+  const timestampSource = String(row.timestamp_source || '').toLowerCase();
+  return mediaType === 'text'
+    && /(?:__bubble_\d+)$/i.test(id)
+    && (!Number(row.timestamp_ms) || timestampSource === 'realtime_fallback');
+}
 function prepareMessagesForClient(rows = []) {
   return rows
     .map((row) => {
@@ -694,6 +702,9 @@ function prepareMessagesForClient(rows = []) {
       return withAttachmentAccessUrl({ ...row, content: cleaned || '' });
     })
     .filter(isRenderableStoredMessage)
+    // Hide legacy unhydrated history bubbles created by older builds. They are
+    // not customer events and are safely replaced by canonical history rows.
+    .filter((row) => !isUnhydratedSyntheticHistoryRow(row))
     // Old malformed observer rows can already be in SQLite when an update is
     // installed. Hide an incoming echo of the operator's just-sent text here
     // too, not only at the WebSocket write boundary.
@@ -743,35 +754,35 @@ const inboundMediaHydration = new InboundMediaHydrationService({
 function sendRichMessageError(res, error) {
   const status = Number(error?.httpStatus) || 400;
   res.status(status).json({
-    error: error?.message || 'KhÃƒÂ´ng thÃ¡Â»Æ’ xÃ¡Â»Â­ lÃƒÂ½ rich-message.',
+    error: error?.message || 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ xÃƒÂ¡Ã‚Â»Ã‚Â­ lÃƒÆ’Ã‚Â½ rich-message.',
     code: error?.code || 'RICH_MESSAGE_ERROR',
     details: error?.details || null
   });
 }
 
-// Router HTTP Upgrade: phÃƒÂ¢n Ã„â€˜Ã¡Â»â€¹nh Socket.io vs Chrome Extension WebSocket
-// Extension kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i tÃ¡ÂºÂ¡i: ws://127.0.0.1:5050/extension
-// Socket.IO kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i tÃ¡ÂºÂ¡i: ws://localhost:5050/socket.io/...
+// Router HTTP Upgrade: phÃƒÆ’Ã‚Â¢n Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹nh Socket.io vs Chrome Extension WebSocket
+// Extension kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi tÃƒÂ¡Ã‚ÂºÃ‚Â¡i: ws://127.0.0.1:5050/extension
+// Socket.IO kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi tÃƒÂ¡Ã‚ÂºÃ‚Â¡i: ws://localhost:5050/socket.io/...
 server.on('upgrade', (request, socket, head) => {
   const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
 
   if (pathname.startsWith('/socket.io')) {
-    // Socket.io tÃ¡Â»Â± xÃ¡Â»Â­ lÃƒÂ½ upgrade cÃ¡Â»Â§a mÃƒÂ¬nh
+    // Socket.io tÃƒÂ¡Ã‚Â»Ã‚Â± xÃƒÂ¡Ã‚Â»Ã‚Â­ lÃƒÆ’Ã‚Â½ upgrade cÃƒÂ¡Ã‚Â»Ã‚Â§a mÃƒÆ’Ã‚Â¬nh
     return;
   }
 
-  // ChÃ¡ÂºÂ¥p nhÃ¡ÂºÂ­n /extension (Chrome Extension) hoÃ¡ÂºÂ·c / (legacy)
+  // ChÃƒÂ¡Ã‚ÂºÃ‚Â¥p nhÃƒÂ¡Ã‚ÂºÃ‚Â­n /extension (Chrome Extension) hoÃƒÂ¡Ã‚ÂºÃ‚Â·c / (legacy)
   if (pathname === '/extension' || pathname === '/') {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
     });
   } else {
-    // TÃ¡Â»Â« chÃ¡Â»â€˜i cÃƒÂ¡c path khÃƒÂ´ng xÃƒÂ¡c Ã„â€˜Ã¡Â»â€¹nh
+    // TÃƒÂ¡Ã‚Â»Ã‚Â« chÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi cÃƒÆ’Ã‚Â¡c path khÃƒÆ’Ã‚Â´ng xÃƒÆ’Ã‚Â¡c Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹nh
     socket.destroy();
   }
 });
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ Helper: gÃ¡Â»Â­i tin nhÃ¡ÂºÂ¯n qua Extension WebSocket Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Helper: gÃƒÂ¡Ã‚Â»Ã‚Â­i tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n qua Extension WebSocket ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 function deleteOutboundMessageRows({ messageId = null, threadId = null, clientMessageId = null, failedOnly = false } = {}) {
   const clauses = [];
   const params = [];
@@ -796,11 +807,11 @@ function deleteOutboundMessageRows({ messageId = null, threadId = null, clientMe
 }
 
 async function sendViaExtension(thread_id, text, client_message_id = null) {
-  // TÃƒÂ¬m account_id cÃ¡Â»Â§a thread
+  // TÃƒÆ’Ã‚Â¬m account_id cÃƒÂ¡Ã‚Â»Ã‚Â§a thread
   const thread = db.prepare(
     'SELECT account_id, contact_name, thread_url FROM threads WHERE id = ?'
   ).get(thread_id);
-  if (!thread) throw new Error(`Thread ${thread_id} khÃƒÂ´ng tÃ¡Â»â€œn tÃ¡ÂºÂ¡i`);
+  if (!thread) throw new Error(`Thread ${thread_id} khÃƒÆ’Ã‚Â´ng tÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“n tÃƒÂ¡Ã‚ÂºÃ‚Â¡i`);
 
   // Match the stable project behaviour: a sleeping MV3 worker is allowed time
   // to reconnect, but a send operation must never restart its Chrome profile.
@@ -813,7 +824,7 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
     }
   }
   if (!extWs || extWs.readyState !== WebSocket.OPEN) {
-    throw new Error(`Extension cho tÃƒÂ i khoÃ¡ÂºÂ£n ${thread.account_id} khÃƒÂ´ng kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i`);
+    throw new Error(`Extension cho tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n ${thread.account_id} khÃƒÆ’Ã‚Â´ng kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi`);
   }
 
   // Route Page threads through the already-built queue pipeline (feature 009:
@@ -839,7 +850,7 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
   const trace = (stage, extra = {}) => console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage, thread_id: String(thread_id), client_message_id: clientMsgId, route: isPageThread ? 'page_queue' : 'direct_extension', at: new Date().toISOString(), ...extra }));
   trace('BACKEND_SEND_REQUEST', queueId ? { queue_id: queueId } : {});
 
-  // LÃ†Â°u tin nhÃ¡ÂºÂ¯n outgoing dÃ¡ÂºÂ¡ng pending vÃƒÂ o CSDL
+  // LÃƒâ€ Ã‚Â°u tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n outgoing dÃƒÂ¡Ã‚ÂºÃ‚Â¡ng pending vÃƒÆ’Ã‚Â o CSDL
   const result = db.prepare(`
     INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, is_outgoing, delivery_status)
     VALUES (?, ?, ?, 'SYSTEM', ?, 1, 'pending')
@@ -854,8 +865,8 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
     // QueueWorker (already running) picks this up and dispatches SEND_QUEUED_MESSAGE.
     trace('BACKEND_QUEUED_FOR_PAGE_SEND');
   } else {
-    // Persist trÃ†Â°Ã¡Â»â€ºc khi dispatch Ã„â€˜Ã¡Â»Æ’ DOM/network confirmation khÃƒÂ´ng chÃ¡ÂºÂ¡y vÃƒÂ o race
-    // window vÃƒÂ  luÃƒÂ´n tÃƒÂ¬m thÃ¡ÂºÂ¥y bÃ¡ÂºÂ£n ghi pending Ã„â€˜Ã¡Â»Æ’ ghÃƒÂ©p Ã„â€˜ÃƒÂºng client_message_id.
+    // Persist trÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºc khi dispatch Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ DOM/network confirmation khÃƒÆ’Ã‚Â´ng chÃƒÂ¡Ã‚ÂºÃ‚Â¡y vÃƒÆ’Ã‚Â o race
+    // window vÃƒÆ’Ã‚Â  luÃƒÆ’Ã‚Â´n tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y bÃƒÂ¡Ã‚ÂºÃ‚Â£n ghi pending Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ ghÃƒÆ’Ã‚Â©p Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Âºng client_message_id.
     extWs.send(JSON.stringify({
       type: 'SEND_MESSAGE',
       data: {
@@ -877,7 +888,7 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
         WHERE client_message_id = ? AND delivery_status = 'pending'
       `).get(clientMsgId);
       if (!pending) return;
-      const timeoutError = 'Extension khÃƒÂ´ng xÃƒÂ¡c nhÃ¡ÂºÂ­n kÃ¡ÂºÂ¿t quÃ¡ÂºÂ£ gÃ¡Â»Â­i trong 30 giÃƒÂ¢y';
+      const timeoutError = 'Extension khÃƒÆ’Ã‚Â´ng xÃƒÆ’Ã‚Â¡c nhÃƒÂ¡Ã‚ÂºÃ‚Â­n kÃƒÂ¡Ã‚ÂºÃ‚Â¿t quÃƒÂ¡Ã‚ÂºÃ‚Â£ gÃƒÂ¡Ã‚Â»Ã‚Â­i trong 30 giÃƒÆ’Ã‚Â¢y';
       deleteOutboundMessageRows({ messageId: pending.id });
       io.emit('MESSAGE_SEND_FAILED', {
         thread_id,
@@ -925,12 +936,12 @@ function enqueueCampaignMessage({ campaign, recipient, attempt, content, attachm
 
   const config = CampaignService.getConfig();
   if (config.testMode && effectiveSourceId && !config.testSourceIds.includes(String(effectiveSourceId))) {
-    const error = new Error('Source khÃƒÂ´ng nÃ¡ÂºÂ±m trong CAMPAIGN_TEST_SOURCE_IDS');
+    const error = new Error('Source khÃƒÆ’Ã‚Â´ng nÃƒÂ¡Ã‚ÂºÃ‚Â±m trong CAMPAIGN_TEST_SOURCE_IDS');
     error.code = 'SOURCE_UNAVAILABLE';
     throw error;
   }
   if (CampaignRepository.countAccountSentToday(recipient.account_id) >= config.accountDailyCap) {
-    const error = new Error("TÃƒÂ i khoÃ¡ÂºÂ£n Ã„â€˜ÃƒÂ£ Ã„â€˜Ã¡ÂºÂ¡t giÃ¡Â»â€ºi hÃ¡ÂºÂ¡n gÃ¡Â»Â­i trong ngÃƒÂ y");
+    const error = new Error("TÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚ÂºÃ‚Â¡t giÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi hÃƒÂ¡Ã‚ÂºÃ‚Â¡n gÃƒÂ¡Ã‚Â»Ã‚Â­i trong ngÃƒÆ’Ã‚Â y");
     error.code = "SEND_LIMIT_REACHED";
     throw error;
   }
@@ -977,9 +988,9 @@ function updateQueueStatusFromClientMessage(clientMessageId, status, errorReason
   return MessageQueueRepository.updateStatus(queueId, status, errorReason);
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 // Extension WebSocket Handler
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 wss.on('connection', (ws, req) => {
   console.log('[WS] Extension connected from:', req.socket.remoteAddress);
   ws.lastHeartbeatAt = Date.now();
@@ -987,7 +998,7 @@ wss.on('connection', (ws, req) => {
   ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
-      console.log('[WS] Ã°Å¸â€œÂ¨ NhÃ¡ÂºÂ­n message:', msg.type, '| WS ID:', req.socket.remoteAddress);
+      console.log('[WS] ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã‚Â¨ NhÃƒÂ¡Ã‚ÂºÃ‚Â­n message:', msg.type, '| WS ID:', req.socket.remoteAddress);
 
       switch (msg.type) {
         case 'HEARTBEAT':
@@ -1003,14 +1014,14 @@ wss.on('connection', (ws, req) => {
           // reject it here too so a stale/unpatched extension can never create
           // a bogus "FB Account (0)" row.
           if (!account_id || String(account_id).trim() === '0') {
-            console.warn(`[WS] BÃ¡Â»Â qua REGISTER_ACCOUNT vÃ¡Â»â€ºi account_id khÃƒÂ´ng hÃ¡Â»Â£p lÃ¡Â»â€¡: ${JSON.stringify(account_id)}`);
+            console.warn(`[WS] BÃƒÂ¡Ã‚Â»Ã‚Â qua REGISTER_ACCOUNT vÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi account_id khÃƒÆ’Ã‚Â´ng hÃƒÂ¡Ã‚Â»Ã‚Â£p lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡: ${JSON.stringify(account_id)}`);
             break;
           }
           const removedAccount = db.prepare(
             'SELECT account_id FROM removed_accounts WHERE account_id = ?'
           ).get(String(account_id));
           if (removedAccount && !pending_key) {
-            console.warn(`[WS] TÃ¡Â»Â« chÃ¡Â»â€˜i stale REGISTER_ACCOUNT cÃ¡Â»Â§a tÃƒÂ i khoÃ¡ÂºÂ£n Ã„â€˜ÃƒÂ£ xÃƒÂ³a: ${account_id}`);
+            console.warn(`[WS] TÃƒÂ¡Ã‚Â»Ã‚Â« chÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi stale REGISTER_ACCOUNT cÃƒÂ¡Ã‚Â»Ã‚Â§a tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ xÃƒÆ’Ã‚Â³a: ${account_id}`);
             ws.close(1000, 'ACCOUNT_REMOVED');
             break;
           }
@@ -1092,7 +1103,7 @@ wss.on('connection', (ws, req) => {
             } catch (_) {}
           }
 
-          console.log(`[WS] REGISTER_ACCOUNT thÃƒÂ nh cÃƒÂ´ng: account_id=${account_id}, profile_dir=${profileDir}`);
+          console.log(`[WS] REGISTER_ACCOUNT thÃƒÆ’Ã‚Â nh cÃƒÆ’Ã‚Â´ng: account_id=${account_id}, profile_dir=${profileDir}`);
           try {
             InboxSourceService.createPersonalSource(account_id, accName, db);
           } catch (_) {}
@@ -1109,7 +1120,7 @@ wss.on('connection', (ws, req) => {
             console.log(`[BACKGROUND_SYNC] account=${account_id} hidden_immediately=true`);
           }
 
-          // GÃ¡Â»Â­i ACK vÃ¡Â»Â Extension xÃƒÂ¡c nhÃ¡ÂºÂ­n Ã„â€˜Ã„Æ’ng kÃƒÂ½ thÃƒÂ nh cÃƒÂ´ng
+          // GÃƒÂ¡Ã‚Â»Ã‚Â­i ACK vÃƒÂ¡Ã‚Â»Ã‚Â Extension xÃƒÆ’Ã‚Â¡c nhÃƒÂ¡Ã‚ÂºÃ‚Â­n Ãƒâ€žÃ¢â‚¬ËœÃƒâ€žÃ†â€™ng kÃƒÆ’Ã‚Â½ thÃƒÆ’Ã‚Â nh cÃƒÆ’Ã‚Â´ng
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
               type: 'REGISTER_ACCOUNT_ACK',
@@ -1188,7 +1199,7 @@ wss.on('connection', (ws, req) => {
               io.emit('MESSAGE_SEND_FAILED', { thread_id, client_message_id, success: false, status: 'failed', error: failError });
               console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DISPATCHED_ALREADY_FAILED', thread_id: String(thread_id), client_message_id, at: new Date().toISOString() }));
             } else {
-              console.log(`[WS] Composer Ã„â€˜ÃƒÂ£ dispatch tin; giÃ¡Â»Â¯ pending chÃ¡Â»Â DOM/network confirmation: ${client_message_id}`);
+              console.log(`[WS] Composer Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ dispatch tin; giÃƒÂ¡Ã‚Â»Ã‚Â¯ pending chÃƒÂ¡Ã‚Â»Ã‚Â DOM/network confirmation: ${client_message_id}`);
               // A cleared text composer is a successful transport hand-off.
               // Persist the provisional sent state so the independent 30s ACK
               // watchdog cannot turn a real Messenger send into "Retry". The
@@ -1233,7 +1244,7 @@ wss.on('connection', (ws, req) => {
               console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_LATE_FAILURE_IGNORED', thread_id: String(thread_id), client_message_id, error_code: error_code || null, at: new Date().toISOString() }));
               break;
             }
-            console.error('[WS] Ã¢ÂÅ’ SEND_MESSAGE_RESULT failed or missing fb_msg_id:', {
+            console.error('[WS] ÃƒÂ¢Ã‚ÂÃ…â€™ SEND_MESSAGE_RESULT failed or missing fb_msg_id:', {
               thread_id,
               client_message_id,
               success,
@@ -1241,11 +1252,11 @@ wss.on('connection', (ws, req) => {
               fbRes: JSON.stringify(fbRes)?.substring(0, 500)
             });
 
-            const failureText = error || 'Facebook khÃƒÂ´ng xÃƒÂ¡c nhÃ¡ÂºÂ­n message_id';
-            const canArriveLateFromComposer = /response rÃ¡Â»â€”ng|khÃƒÂ´ng nhÃ¡ÂºÂ­n message_id|GraphQL/i.test(failureText);
+            const failureText = error || 'Facebook khÃƒÆ’Ã‚Â´ng xÃƒÆ’Ã‚Â¡c nhÃƒÂ¡Ã‚ÂºÃ‚Â­n message_id';
+            const canArriveLateFromComposer = /response rÃƒÂ¡Ã‚Â»Ã¢â‚¬â€ng|khÃƒÆ’Ã‚Â´ng nhÃƒÂ¡Ã‚ÂºÃ‚Â­n message_id|GraphQL/i.test(failureText);
             if (canArriveLateFromComposer) {
-              // GraphQL cÃƒÂ³ thÃ¡Â»Æ’ lÃ¡Â»â€”i trÃ†Â°Ã¡Â»â€ºc khi composer/DOM kÃ¡Â»â€¹p xÃƒÂ¡c nhÃ¡ÂºÂ­n. GiÃ¡Â»Â¯ pending
-              // mÃ¡Â»â„¢t grace window Ã„â€˜Ã¡Â»Æ’ event Ã„â€˜Ã¡ÂºÂ¿n muÃ¡Â»â„¢n vÃ¡ÂºÂ«n ghÃƒÂ©p Ã„â€˜Ã†Â°Ã¡Â»Â£c Ã„â€˜ÃƒÂºng attempt.
+              // GraphQL cÃƒÆ’Ã‚Â³ thÃƒÂ¡Ã‚Â»Ã†â€™ lÃƒÂ¡Ã‚Â»Ã¢â‚¬â€i trÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºc khi composer/DOM kÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹p xÃƒÆ’Ã‚Â¡c nhÃƒÂ¡Ã‚ÂºÃ‚Â­n. GiÃƒÂ¡Ã‚Â»Ã‚Â¯ pending
+              // mÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢t grace window Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ event Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚ÂºÃ‚Â¿n muÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢n vÃƒÂ¡Ã‚ÂºÃ‚Â«n ghÃƒÆ’Ã‚Â©p Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Âºng attempt.
               db.prepare(`
                 UPDATE messages SET delivery_status = 'pending', delivery_error = ?
                 WHERE (client_message_id = ? OR fb_message_id = ?) AND is_outgoing = 1
@@ -1258,7 +1269,7 @@ wss.on('connection', (ws, req) => {
                 io.emit('MESSAGE_SEND_FAILED', { thread_id, client_message_id, success: false, status: 'failed', error: failureText, error_code: error_code || 'CONFIRMATION_TIMEOUT' });
               }, 5000);
             } else {
-              // LÃ¡Â»â€”i chÃ¡ÂºÂ¯c chÃ¡ÂºÂ¯n khÃƒÂ´ng thÃ¡Â»Æ’ gÃ¡Â»Â­i: giÃ¡Â»Â¯ lÃ¡Â»â€¹ch sÃ¡Â»Â­ nhÃ†Â°ng chuyÃ¡Â»Æ’n failed ngay.
+              // LÃƒÂ¡Ã‚Â»Ã¢â‚¬â€i chÃƒÂ¡Ã‚ÂºÃ‚Â¯c chÃƒÂ¡Ã‚ÂºÃ‚Â¯n khÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ gÃƒÂ¡Ã‚Â»Ã‚Â­i: giÃƒÂ¡Ã‚Â»Ã‚Â¯ lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ch sÃƒÂ¡Ã‚Â»Ã‚Â­ nhÃƒâ€ Ã‚Â°ng chuyÃƒÂ¡Ã‚Â»Ã†â€™n failed ngay.
               db.prepare(`DELETE FROM messages
                 WHERE (client_message_id = ? OR fb_message_id = ?) AND is_outgoing = 1
               `).run(client_message_id, `pending_${client_message_id}`);
@@ -1279,7 +1290,7 @@ wss.on('connection', (ws, req) => {
               JSON.stringify({ at: new Date().toISOString(), source: 'CONTENT_DEBUG', ...msg.data }) + '\n'
             );
           } catch (error) {
-            console.error('[CONTENT_DEBUG] Ghi log thÃ¡ÂºÂ¥t bÃ¡ÂºÂ¡i:', error.message);
+            console.error('[CONTENT_DEBUG] Ghi log thÃƒÂ¡Ã‚ÂºÃ‚Â¥t bÃƒÂ¡Ã‚ÂºÃ‚Â¡i:', error.message);
           }
           break;
         }
@@ -1296,7 +1307,7 @@ wss.on('connection', (ws, req) => {
               JSON.stringify({ at: new Date().toISOString(), ...msg.data }) + '\n'
             );
           } catch (error) {
-            console.error('[COMPOSER_DEBUG] Ghi log thÃ¡ÂºÂ¥t bÃ¡ÂºÂ¡i:', error.message);
+            console.error('[COMPOSER_DEBUG] Ghi log thÃƒÂ¡Ã‚ÂºÃ‚Â¥t bÃƒÂ¡Ã‚ÂºÃ‚Â¡i:', error.message);
           }
           break;
         }
@@ -1337,7 +1348,7 @@ wss.on('connection', (ws, req) => {
                   VALUES (?, ?, ?)
                   ON CONFLICT(thread_id) DO UPDATE SET
                     avatar_url = excluded.avatar_url
-                `).run(tidStr, updatedName || 'KhÃƒÂ¡ch hÃƒÂ ng', localAvatarPath);
+                `).run(tidStr, updatedName || 'KhÃƒÆ’Ã‚Â¡ch hÃƒÆ’Ã‚Â ng', localAvatarPath);
               }
             } catch (e) {
               console.warn('[WS] Avatar save failed:', e.message);
@@ -1359,27 +1370,27 @@ wss.on('connection', (ws, req) => {
           // slow on the first message of a thread; they must not delay the
           // chat bubble or make the first realtime event appear to be lost.
           let realtimeMessageEmittedEarly = false;
-          console.log(`[WS] Ã°Å¸â€œÂ© NhÃ¡ÂºÂ­n NEW_MESSAGE_RECEIVED | Source: ${m.source || 'unknown'} | Thread: ${threadId} | FB Message ID: ${m.fb_message_id} | Content: "${sanitizeLog(m.content, 80)}"`);
+          console.log(`[WS] ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã‚Â© NhÃƒÂ¡Ã‚ÂºÃ‚Â­n NEW_MESSAGE_RECEIVED | Source: ${m.source || 'unknown'} | Thread: ${threadId} | FB Message ID: ${m.fb_message_id} | Content: "${sanitizeLog(m.content, 80)}"`);
           if (!threadId || threadId === 'unknown_dom' || threadId.trim() === '') {
-            console.warn(`[WS] Ã¢Å¡Â Ã¯Â¸Â BÃ¡Â»Â qua tin nhÃ¡ÂºÂ¯n tÃ¡Â»Â« Thread ID khÃƒÂ´ng hÃ¡Â»Â£p lÃ¡Â»â€¡: "${threadId}"`);
+            console.warn(`[WS] ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â BÃƒÂ¡Ã‚Â»Ã‚Â qua tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n tÃƒÂ¡Ã‚Â»Ã‚Â« Thread ID khÃƒÆ’Ã‚Â´ng hÃƒÂ¡Ã‚Â»Ã‚Â£p lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡: "${threadId}"`);
             break;
           }
           const _rawContentLower = (m.content || '').toLowerCase();
-          const isCallLog = _rawContentLower.includes('cuÃ¡Â»â„¢c gÃ¡Â»Âi') || _rawContentLower.includes('bÃ¡Â»Â lÃ¡Â»Â¡') || _rawContentLower.includes('Ã„â€˜ÃƒÂ£ nhÃ¡Â»Â¡') || _rawContentLower.includes('nhÃ¡Â»Â¡ cuÃ¡Â»â„¢c') || _rawContentLower.includes('chat video')
+          const isCallLog = _rawContentLower.includes('cuÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢c gÃƒÂ¡Ã‚Â»Ã‚Âi') || _rawContentLower.includes('bÃƒÂ¡Ã‚Â»Ã‚Â lÃƒÂ¡Ã‚Â»Ã‚Â¡') || _rawContentLower.includes('Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ nhÃƒÂ¡Ã‚Â»Ã‚Â¡') || _rawContentLower.includes('nhÃƒÂ¡Ã‚Â»Ã‚Â¡ cuÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢c') || _rawContentLower.includes('chat video')
             || _rawContentLower.includes('audio call') || _rawContentLower.includes('video call') || _rawContentLower.includes('missed call')
             || _rawContentLower.includes('missed audio') || _rawContentLower.includes('missed video') || _rawContentLower.includes('call ended')
             || (m.media_type === 'call');
           if (isCallLog) {
-            console.log(`[CALL_DEBUG] Ã°Å¸â€œÅ¾ Backend nhÃ¡ÂºÂ­n CALL LOG tÃ¡Â»Â« Extension: content="${sanitizeLog(m.content)}", thread=${threadId}, fb_id=${m.fb_message_id}, isCallLog=true`);
+            console.log(`[CALL_DEBUG] ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã…Â¾ Backend nhÃƒÂ¡Ã‚ÂºÃ‚Â­n CALL LOG tÃƒÂ¡Ã‚Â»Ã‚Â« Extension: content="${sanitizeLog(m.content)}", thread=${threadId}, fb_id=${m.fb_message_id}, isCallLog=true`);
           }
           if (!threadId || threadId === 'unknown_dom') {
-            console.warn(`[WS] Ã¢Å¡Â Ã¯Â¸Â BÃ¡Â»Â qua tin nhÃ¡ÂºÂ¯n tÃ¡Â»Â« Thread ID khÃƒÂ´ng hÃ¡Â»Â£p lÃ¡Â»â€¡: "${threadId}"`);
+            console.warn(`[WS] ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â BÃƒÂ¡Ã‚Â»Ã‚Â qua tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n tÃƒÂ¡Ã‚Â»Ã‚Â« Thread ID khÃƒÆ’Ã‚Â´ng hÃƒÂ¡Ã‚Â»Ã‚Â£p lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡: "${threadId}"`);
             break;
           }
           const targetAccountId = m.account_id || ws.accountId || null;
           const canonicalThreadId = resolveInternalThreadId(db, targetAccountId, threadId);
           if (!canonicalThreadId) {
-            console.warn(`[WS] BÃ¡Â»Â qua tin nhÃ¡ÂºÂ¯n chÃ†Â°a ÃƒÂ¡nh xÃ¡ÂºÂ¡ Ã„â€˜Ã†Â°Ã¡Â»Â£c thread: raw=${threadId} account=${targetAccountId || 'unknown'}`);
+            console.warn(`[WS] BÃƒÂ¡Ã‚Â»Ã‚Â qua tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n chÃƒâ€ Ã‚Â°a ÃƒÆ’Ã‚Â¡nh xÃƒÂ¡Ã‚ÂºÃ‚Â¡ Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c thread: raw=${threadId} account=${targetAccountId || 'unknown'}`);
           }
           // Preserve Facebook's raw id for diagnostics, but use the CRM's
           // canonical id throughout the existing persistence/UI pipeline.
@@ -1393,7 +1404,7 @@ wss.on('connection', (ws, req) => {
             ConversationRepository.upsertThread({
               id: callThreadId,
               account_id: targetAccountIdForCall,
-              contact_name: m.contact_name || 'KhÃƒÂ¡ch hÃƒÂ ng',
+              contact_name: m.contact_name || 'KhÃƒÆ’Ã‚Â¡ch hÃƒÆ’Ã‚Â ng',
               last_message: m.content,
               is_unread: true
             });
@@ -1407,7 +1418,7 @@ wss.on('connection', (ws, req) => {
                 ORDER BY id DESC LIMIT 1
               `).get(callThreadId, m.content, callTimestamp, callTimestamp);
             const normalizedCallContent = String(m.content || '').toLocaleLowerCase('vi-VN');
-            const isExplicitMissedIncoming = /(?:nhÃ¡Â»Â¡|bÃ¡Â»Â lÃ¡Â»Â¡|missed)/i.test(normalizedCallContent);
+            const isExplicitMissedIncoming = /(?:nhÃƒÂ¡Ã‚Â»Ã‚Â¡|bÃƒÂ¡Ã‚Â»Ã‚Â lÃƒÂ¡Ã‚Â»Ã‚Â¡|missed)/i.test(normalizedCallContent);
             const hasRawAvatarEvidence = m.direction_evidence === 'call_article_avatar'
               && (m.has_row_avatar === true || m.has_row_avatar === false);
             const callIsOutgoing = isExplicitMissedIncoming
@@ -1416,7 +1427,7 @@ wss.on('connection', (ws, req) => {
                 ? (m.has_row_avatar ? 0 : 1)
                 : ((m.is_outgoing === true || m.is_outgoing === 1) ? 1 : 0);
             const callSenderId = m.sender_id || (callIsOutgoing ? String(targetAccountIdForCall || 'STAFF') : 'CONTACT');
-            console.log(`[CALL_DEBUG] Ã°Å¸Â§Âµ callThreadId=${callThreadId} | m.thread_id=${m.thread_id} | canonicalThreadId=${canonicalThreadId} | callIsOutgoing=${callIsOutgoing}`);
+            console.log(`[CALL_DEBUG] ÃƒÂ°Ã…Â¸Ã‚Â§Ã‚Âµ callThreadId=${callThreadId} | m.thread_id=${m.thread_id} | canonicalThreadId=${canonicalThreadId} | callIsOutgoing=${callIsOutgoing}`);
             if (!existingCall) {
               const insertCall = db.prepare(`
                 INSERT OR IGNORE INTO messages
@@ -1431,28 +1442,28 @@ wss.on('connection', (ws, req) => {
                 m.created_at || new Date().toISOString()
               );
               if (insertCall.changes > 0) {
-                console.log(`[CALL_DEBUG] Ã¢Å“â€¦ Ã„ÂÃƒÂ£ lÃ†Â°u call log vÃƒÂ o DB: "${sanitizeLog(m.content)}" (id: ${stableCallId}) | thread: ${callThreadId} | is_outgoing: ${callIsOutgoing}`);
+                console.log(`[CALL_DEBUG] ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Ãƒâ€žÃ‚ÂÃƒÆ’Ã‚Â£ lÃƒâ€ Ã‚Â°u call log vÃƒÆ’Ã‚Â o DB: "${sanitizeLog(m.content)}" (id: ${stableCallId}) | thread: ${callThreadId} | is_outgoing: ${callIsOutgoing}`);
                 const newMsg = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(stableCallId);
                 if (newMsg) {
                   io.emit('NEW_MESSAGE', { ...newMsg, thread_id: callThreadId, account_id: targetAccountIdForCall });
                   io.emit('THREAD_MESSAGES_UPDATED', { thread_id: callThreadId, account_id: targetAccountIdForCall });
                 }
               } else {
-                // INSERT OR IGNORE bÃ¡Â»â€¹ ignore (trÃƒÂ¹ng fb_message_id): patch media_type vÃƒÂ  is_outgoing nÃ¡ÂºÂ¿u cÃ¡ÂºÂ§n
+                // INSERT OR IGNORE bÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ ignore (trÃƒÆ’Ã‚Â¹ng fb_message_id): patch media_type vÃƒÆ’Ã‚Â  is_outgoing nÃƒÂ¡Ã‚ÂºÃ‚Â¿u cÃƒÂ¡Ã‚ÂºÃ‚Â§n
                 db.prepare(`UPDATE messages SET media_type = 'call', is_outgoing = ? WHERE fb_message_id = ?`).run(callIsOutgoing, stableCallId);
                 const existingMsg = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(stableCallId);
                 if (existingMsg) {
-                  console.log(`[CALL_DEBUG] Ã°Å¸â€â€ž Patch media_type='call' cho tin Ã„â€˜ÃƒÂ£ tÃ¡Â»â€œn tÃ¡ÂºÂ¡i: ${stableCallId}`);
+                  console.log(`[CALL_DEBUG] ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ¢â‚¬Å¾ Patch media_type='call' cho tin Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ tÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“n tÃƒÂ¡Ã‚ÂºÃ‚Â¡i: ${stableCallId}`);
                   io.emit('NEW_MESSAGE', { ...existingMsg, thread_id: callThreadId, account_id: targetAccountIdForCall });
                   io.emit('THREAD_MESSAGES_UPDATED', { thread_id: callThreadId, account_id: targetAccountIdForCall });
                 }
               }
             } else {
-              // existingCall tÃ¡Â»â€œn tÃ¡ÂºÂ¡i: patch media_type & is_outgoing rÃ¡Â»â€œi re-emit
+              // existingCall tÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“n tÃƒÂ¡Ã‚ÂºÃ‚Â¡i: patch media_type & is_outgoing rÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“i re-emit
               db.prepare(`UPDATE messages SET media_type = 'call', is_outgoing = ? WHERE id = ?`).run(callIsOutgoing, existingCall.id);
               const existingMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(existingCall.id);
               if (existingMsg) {
-                console.log(`[CALL_DEBUG] Ã°Å¸â€â€ž existingCall: patch + re-emit thread=${callThreadId}: ${stableCallId}`);
+                console.log(`[CALL_DEBUG] ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ¢â‚¬Å¾ existingCall: patch + re-emit thread=${callThreadId}: ${stableCallId}`);
                 io.emit('NEW_MESSAGE', { ...existingMsg, thread_id: callThreadId, account_id: targetAccountIdForCall });
                 io.emit('THREAD_MESSAGES_UPDATED', { thread_id: callThreadId, account_id: targetAccountIdForCall });
               }
@@ -1533,21 +1544,21 @@ wss.on('connection', (ws, req) => {
             && normalizedObservedContent
             && observedPersonLabels.some((label) => normalizedObservedContent === label.toLocaleLowerCase('vi-VN'));
           if (senderLabelOnly) {
-            console.log(`[WS] Backend Guard: bÃ¡Â»Â qua tÃƒÂªn ngÃ†Â°Ã¡Â»Âi gÃ¡Â»Â­i bÃ¡Â»â€¹ parse thÃƒÂ nh nÃ¡Â»â„¢i dung: "${sanitizeLog(cleanedContent, 60)}"`);
+            console.log(`[WS] Backend Guard: bÃƒÂ¡Ã‚Â»Ã‚Â qua tÃƒÆ’Ã‚Âªn ngÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Âi gÃƒÂ¡Ã‚Â»Ã‚Â­i bÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ parse thÃƒÆ’Ã‚Â nh nÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i dung: "${sanitizeLog(cleanedContent, 60)}"`);
             break;
           }
           if (!hasMediaPayload && isKnownPageSystemNotice(cleanedContent)) {
-            console.log(`[WS] Ã¢â€žÂ¹Ã¯Â¸Â Backend Guard: BÃ¡Â»Â qua thÃƒÂ´ng bÃƒÂ¡o hÃ¡Â»â€¡ thÃ¡Â»â€˜ng Meta lÃ¡ÂºÂ·p lÃ¡ÂºÂ¡i tÃ¡Â»Â« thread ${threadId}`);
+            console.log(`[WS] ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¹ÃƒÂ¯Ã‚Â¸Ã‚Â Backend Guard: BÃƒÂ¡Ã‚Â»Ã‚Â qua thÃƒÆ’Ã‚Â´ng bÃƒÆ’Ã‚Â¡o hÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡ thÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœng Meta lÃƒÂ¡Ã‚ÂºÃ‚Â·p lÃƒÂ¡Ã‚ÂºÃ‚Â¡i tÃƒÂ¡Ã‚Â»Ã‚Â« thread ${threadId}`);
             break;
           }
           if (!hasMediaPayload && (!cleanedContent || isSystemOrMetadataText(cleanedContent))) {
-            console.log(`[WS] Ã¢â€žÂ¹Ã¯Â¸Â Backend Guard: BÃ¡Â»Â qua tin nhÃ¡ÂºÂ¯n rÃƒÂ¡c/hÃ¡Â»â€¡ thÃ¡Â»â€˜ng: "${sanitizeLog(m.content, 40)}" tÃ¡Â»Â« thread ${threadId}`);
+            console.log(`[WS] ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¹ÃƒÂ¯Ã‚Â¸Ã‚Â Backend Guard: BÃƒÂ¡Ã‚Â»Ã‚Â qua tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n rÃƒÆ’Ã‚Â¡c/hÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡ thÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœng: "${sanitizeLog(m.content, 40)}" tÃƒÂ¡Ã‚Â»Ã‚Â« thread ${threadId}`);
             break;
           }
 
-          // NÃ¡ÂºÂ¿u raw content chÃ¡Â»Â©a chuÃ¡Â»â€”i quÃƒÂ¡ lÃ¡Â»â€ºn (scrap rÃ¡Â»â„¢ng), reject Ã¡Â»Å¸ backend
+          // NÃƒÂ¡Ã‚ÂºÃ‚Â¿u raw content chÃƒÂ¡Ã‚Â»Ã‚Â©a chuÃƒÂ¡Ã‚Â»Ã¢â‚¬â€i quÃƒÆ’Ã‚Â¡ lÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºn (scrap rÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢ng), reject ÃƒÂ¡Ã‚Â»Ã…Â¸ backend
           if ((m.content || '').split('\n').length > 8 && isSystemOrMetadataText(m.content)) {
-            console.log(`[WS] Ã¢â€žÂ¹Ã¯Â¸Â Backend Guard: BÃ¡Â»Â qua cÃ¡Â»Â¥m text scrap rÃ¡Â»â„¢ng tÃ¡Â»Â« thread ${threadId}`);
+            console.log(`[WS] ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¹ÃƒÂ¯Ã‚Â¸Ã‚Â Backend Guard: BÃƒÂ¡Ã‚Â»Ã‚Â qua cÃƒÂ¡Ã‚Â»Ã‚Â¥m text scrap rÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢ng tÃƒÂ¡Ã‚Â»Ã‚Â« thread ${threadId}`);
             break;
           }
 
@@ -1557,7 +1568,7 @@ wss.on('connection', (ws, req) => {
           let finalIsOutgoing = 0;
           let threadAccountId = targetAccountId;
 
-          // LÃ¡ÂºÂ¥y account_id cÃ¡Â»Â§a thread nÃ¡ÂºÂ¿u cÃƒÂ³
+          // LÃƒÂ¡Ã‚ÂºÃ‚Â¥y account_id cÃƒÂ¡Ã‚Â»Ã‚Â§a thread nÃƒÂ¡Ã‚ÂºÃ‚Â¿u cÃƒÆ’Ã‚Â³
           const existingThreadForAcct = db.prepare('SELECT account_id FROM threads WHERE id=?').get(threadId);
           if (existingThreadForAcct && existingThreadForAcct.account_id) {
             threadAccountId = existingThreadForAcct.account_id;
@@ -1565,7 +1576,7 @@ wss.on('connection', (ws, req) => {
 
           if (m.is_outgoing === true || m.is_outgoing === 1) {
             finalIsOutgoing = 1;
-          } else if (m.sender_name === 'BÃ¡ÂºÂ¡n') {
+          } else if (m.sender_name === 'BÃƒÂ¡Ã‚ÂºÃ‚Â¡n') {
             finalIsOutgoing = 1;
           } else if (m.sender_id && targetAccountId && String(m.sender_id) === String(targetAccountId)) {
             finalIsOutgoing = 1;
@@ -1573,8 +1584,8 @@ wss.on('connection', (ws, req) => {
             finalIsOutgoing = 1;
           }
 
-          // 2. BÃ¡Â»â€¢ sung log backend
-          console.log(`[WS] Ã°Å¸â€Â Debug Outgoing | Thread: ${threadId} | Source: ${m.source} | account_id: ${targetAccountId} | thread_account_id: ${threadAccountId} | sender_id: ${m.sender_id} | sender_name: ${m.sender_name} | raw is_outgoing: ${m.is_outgoing} | final is_outgoing: ${finalIsOutgoing}`);
+          // 2. BÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¢ sung log backend
+          console.log(`[WS] ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â Debug Outgoing | Thread: ${threadId} | Source: ${m.source} | account_id: ${targetAccountId} | thread_account_id: ${threadAccountId} | sender_id: ${m.sender_id} | sender_name: ${m.sender_name} | raw is_outgoing: ${m.is_outgoing} | final is_outgoing: ${finalIsOutgoing}`);
 
           const isPageDomObservation = m.source === 'page_dom_observer';
           // Composer confirmations are the authoritative Facebook echo for a
@@ -1604,6 +1615,24 @@ wss.on('connection', (ws, req) => {
           const incomingHistoryBubble = !isOutgoing
             && String(m.media_type || 'text').toLowerCase() === 'text'
             && /(?:__bubble_\\d+|^dom_|^history_)/i.test(String(m.fb_message_id || ''));
+          // A thread switch mounts old DOM rows before the history scraper has
+          // produced its canonical batch. The content observer may still emit
+          // those rows as realtime with ids such as mid.*__bubble_1 and no
+          // timestamp. They are not new customer messages; accepting them
+          // appends stale text to the end of CRM. Let the history batch own
+          // these rows and keep realtime limited to hydrated/new observations.
+          const unhydratedHistoryReplay = incomingHistoryBubble
+            && /(?:__bubble_\d+)$/i.test(String(m.fb_message_id || ''))
+            && ['dom_observer', 'page_dom_observer'].includes(String(m.source || '').toLowerCase())
+            && (!Number(m.timestamp_ms) || String(m.timestamp_source || '').toLowerCase() === 'realtime_fallback');
+          if (unhydratedHistoryReplay) {
+            console.log('[WS] Backend Guard: skip unhydrated history bubble replay', {
+              thread_id: canonicalThreadId || m.thread_id,
+              fb_message_id: m.fb_message_id || null,
+              content: sanitizeLog(m.content, 60)
+            });
+            break;
+          }
           if (incomingHistoryBubble && ConversationRepository.hasRecentMatchingOutgoing(
             canonicalThreadId || m.thread_id,
             m.content,
@@ -1646,26 +1675,26 @@ wss.on('connection', (ws, req) => {
             `).get(threadId);
             const suppressUntil = domReplaySuppressUntil.get(targetAccountId) || 0;
             if (!hasRecentPending && Date.now() < suppressUntil) {
-              console.log(`[WS] Ã¢â€žÂ¹Ã¯Â¸Â Suppress outgoing DOM replay during startup/sync window: thread=${threadId} content="${sanitizeLog(m.content, 40)}"`);
+              console.log(`[WS] ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¹ÃƒÂ¯Ã‚Â¸Ã‚Â Suppress outgoing DOM replay during startup/sync window: thread=${threadId} content="${sanitizeLog(m.content, 40)}"`);
               console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_REPLAY_SUPPRESSED', thread_id: String(threadId), at: new Date().toISOString() }));
               break;
             }
           }
 
-          // TÃ¡ÂºÂ£i media vÃ¡Â»Â local nÃ¡ÂºÂ¿u tin mÃ¡Â»â€ºi cÃƒÂ³ Ã„â€˜ÃƒÂ­nh kÃƒÂ¨m
+          // TÃƒÂ¡Ã‚ÂºÃ‚Â£i media vÃƒÂ¡Ã‚Â»Ã‚Â local nÃƒÂ¡Ã‚ÂºÃ‚Â¿u tin mÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi cÃƒÆ’Ã‚Â³ Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â­nh kÃƒÆ’Ã‚Â¨m
           // Persist/emit remote media immediately. Local hydration is queued
           // after the row exists so a slow video cannot block later messages.
 
-          // FIX FOREIGN KEY: Ã„ÂÃ¡ÂºÂ£m bÃ¡ÂºÂ£o thread tÃ¡Â»â€œn tÃ¡ÂºÂ¡i/Ã„â€˜Ã†Â°Ã¡Â»Â£c upsert TRÃ†Â¯Ã¡Â»Å¡C KHI insert message
+          // FIX FOREIGN KEY: Ãƒâ€žÃ‚ÂÃƒÂ¡Ã‚ÂºÃ‚Â£m bÃƒÂ¡Ã‚ÂºÃ‚Â£o thread tÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“n tÃƒÂ¡Ã‚ÂºÃ‚Â¡i/Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c upsert TRÃƒâ€ Ã‚Â¯ÃƒÂ¡Ã‚Â»Ã…Â¡C KHI insert message
           ConversationRepository.upsertThread({
             id: m.thread_id,
             account_id: targetAccountId,
-            contact_name: m.contact_name || 'KhÃƒÂ¡ch hÃƒÂ ng',
+            contact_name: m.contact_name || 'KhÃƒÆ’Ã‚Â¡ch hÃƒÆ’Ã‚Â ng',
             last_message: m.content,
             is_unread: true
           });
 
-          // Auto-register Page source & rebind thread khi Ã„â€˜Ã¡ÂºÂ¿n tÃ¡Â»Â« Business Suite
+          // Auto-register Page source & rebind thread khi Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚ÂºÃ‚Â¿n tÃƒÂ¡Ã‚Â»Ã‚Â« Business Suite
           if (m.source === 'page_dom_observer' && m.page_id) {
             try {
               InboxSourceService.ensurePageSource({
@@ -1675,7 +1704,7 @@ wss.on('connection', (ws, req) => {
                 pageName: m.page_name || null
               }, db);
             } catch (pageSourceErr) {
-              console.warn('[PAGE_SOURCE] LÃ¡Â»â€”i auto-register page source:', pageSourceErr.message);
+              console.warn('[PAGE_SOURCE] LÃƒÂ¡Ã‚Â»Ã¢â‚¬â€i auto-register page source:', pageSourceErr.message);
             }
           }
 
@@ -1698,16 +1727,16 @@ wss.on('connection', (ws, req) => {
             }));
             break;
           }
-          // Composer fallback khÃƒÂ´ng cÃƒÂ³ official GraphQL ID; ghÃƒÂ©p confirmation DOM
-          // vÃƒÂ o bÃ¡ÂºÂ£n pending gÃ¡ÂºÂ§n nhÃ¡ÂºÂ¥t cÃƒÂ¹ng thread/nÃ¡Â»â„¢i dung thay vÃƒÂ¬ tÃ¡ÂºÂ¡o bubble thÃ¡Â»Â© hai.
+          // Composer fallback khÃƒÆ’Ã‚Â´ng cÃƒÆ’Ã‚Â³ official GraphQL ID; ghÃƒÆ’Ã‚Â©p confirmation DOM
+          // vÃƒÆ’Ã‚Â o bÃƒÂ¡Ã‚ÂºÃ‚Â£n pending gÃƒÂ¡Ã‚ÂºÃ‚Â§n nhÃƒÂ¡Ã‚ÂºÃ‚Â¥t cÃƒÆ’Ã‚Â¹ng thread/nÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i dung thay vÃƒÆ’Ã‚Â¬ tÃƒÂ¡Ã‚ÂºÃ‚Â¡o bubble thÃƒÂ¡Ã‚Â»Ã‚Â© hai.
           if (isOutgoing && isTrustedOutgoingObservation && (m.content || m.media_url || (m.media_type && m.media_type !== 'text'))) {
             console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_OUTGOING_RECEIVED', thread_id: String(threadId), fb_message_id: m.fb_message_id || null, at: new Date().toISOString() }));
             let skipPendingCorrelation = false;
-            // Fix: TrÃƒÂ¡nh crash UNIQUE constraint khi DOM observer gÃ¡Â»Â­i lÃ¡ÂºÂ¡i tin nhÃ¡ÂºÂ¯n cÃ…Â© cÃƒÂ³ trÃƒÂ¹ng content
+            // Fix: TrÃƒÆ’Ã‚Â¡nh crash UNIQUE constraint khi DOM observer gÃƒÂ¡Ã‚Â»Ã‚Â­i lÃƒÂ¡Ã‚ÂºÃ‚Â¡i tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n cÃƒâ€¦Ã‚Â© cÃƒÆ’Ã‚Â³ trÃƒÆ’Ã‚Â¹ng content
             if (m.fb_message_id) {
                const existingFbId = db.prepare('SELECT id, is_outgoing, delivery_status FROM messages WHERE fb_message_id = ?').get(m.fb_message_id);
                if (existingFbId && existingFbId.is_outgoing === 1 && existingFbId.delivery_status === 'sent') {
-                   console.log(`[WS] DOM observer sent an already known confirmed fb_message_id (${m.fb_message_id}). BÃ¡Â»Â qua event Ã„â€˜Ã¡Â»Æ’ trÃƒÂ¡nh ghi Ã„â€˜ÃƒÂ¨ pending.`);
+                   console.log(`[WS] DOM observer sent an already known confirmed fb_message_id (${m.fb_message_id}). BÃƒÂ¡Ã‚Â»Ã‚Â qua event Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ trÃƒÆ’Ã‚Â¡nh ghi Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â¨ pending.`);
                    // Do not skip yet: a replay of an already-persisted media
                    // id may still be the confirmation for a pending CRM upload.
                }
@@ -1815,7 +1844,7 @@ wss.on('connection', (ws, req) => {
                  );
                 if (recentSent) {
                   db.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?').run(m.fb_message_id, recentSent.id);
-                  console.log(`[WS] NÃƒÂ¢ng cÃ¡ÂºÂ¥p fb_message_id tÃ¡ÂºÂ¡m ${recentSent.fb_message_id} -> ${m.fb_message_id} (id ${recentSent.id}), cÃƒÂ¹ng 1 tin gÃ¡Â»Â­i Ã„â€˜i`);
+                  console.log(`[WS] NÃƒÆ’Ã‚Â¢ng cÃƒÂ¡Ã‚ÂºÃ‚Â¥p fb_message_id tÃƒÂ¡Ã‚ÂºÃ‚Â¡m ${recentSent.fb_message_id} -> ${m.fb_message_id} (id ${recentSent.id}), cÃƒÆ’Ã‚Â¹ng 1 tin gÃƒÂ¡Ã‚Â»Ã‚Â­i Ãƒâ€žÃ¢â‚¬Ëœi`);
                   console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_ID_UPGRADED', thread_id: String(canonicalThreadId), from_fb_message_id: recentSent.fb_message_id, to_fb_message_id: m.fb_message_id, at: new Date().toISOString() }));
                   break;
                 }
@@ -1839,22 +1868,22 @@ wss.on('connection', (ws, req) => {
                 const looksLikeSameAttempt = pendingContent && domContent &&
                   (domContent.includes(pendingContent) || pendingContent.includes(domContent));
                 if (looksLikeSameAttempt) {
-                  console.warn(`[WS] Ã¢Å¡Â Ã¯Â¸Â COMPOSER_CONTENT_MISMATCH: pending content="${pendingContent.substring(0, 40)}" vs DOM content="${domContent.substring(0, 40)}" | thread=${canonicalThreadId}`);
+                  console.warn(`[WS] ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â COMPOSER_CONTENT_MISMATCH: pending content="${pendingContent.substring(0, 40)}" vs DOM content="${domContent.substring(0, 40)}" | thread=${canonicalThreadId}`);
                   console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_CONTENT_MISMATCH', thread_id: String(canonicalThreadId), client_message_id: mismatchPending.client_message_id, pending_len: pendingContent.length, dom_len: domContent.length, at: new Date().toISOString() }));
                   deleteOutboundMessageRows({ messageId: mismatchPending.id });
                   io.emit('MESSAGE_SEND_FAILED', { thread_id: canonicalThreadId, client_message_id: mismatchPending.client_message_id, success: false, status: 'failed', error: 'COMPOSER_CONTENT_MISMATCH', error_code: 'COMPOSER_CONTENT_MISMATCH' });
-                  // Discard the mismatched DOM bubble entirely Ã¢â‚¬â€ do not insert it
+                  // Discard the mismatched DOM bubble entirely ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â do not insert it
                   break;
                 }
               }
             }
           }
-          // ===== ANTI-GHOST GUARD (chÃ¡Â»â€° ÃƒÂ¡p dÃ¡Â»Â¥ng cho tin Ã„â€˜Ã†Â°Ã¡Â»Â£c xÃƒÂ¡c nhÃ¡ÂºÂ­n outgoing) =====
-          // DOM observer Ã„â€˜ÃƒÂ´i khi bÃ¡ÂºÂ¯t lÃ¡ÂºÂ¡i tin nhÃ¡ÂºÂ¯n do CRM gÃ¡Â»Â­i (Ã„â€˜ÃƒÂ£ cÃƒÂ³ is_outgoing=1 trong DB).
-          // NÃ¡ÂºÂ¿u Ã„â€˜Ã¡Â»Æ’ chÃ¡ÂºÂ¡y tiÃ¡ÂºÂ¿p sÃ¡ÂºÂ½ tÃ¡ÂºÂ¡o bubble ghost bÃƒÂªn trÃƒÂ¡i vÃ¡Â»â€ºi is_outgoing=0.
-          // KhÃƒÂ´ng Ã„â€˜Ã†Â°Ã¡Â»Â£c dÃƒÂ¹ng mÃ¡Â»â„¢t media outgoing bÃ¡ÂºÂ¥t kÃ¡Â»Â³ trong 5 phÃƒÂºt Ã„â€˜Ã¡Â»Æ’ loÃ¡ÂºÂ¡i mÃ¡Â»â„¢t
-          // media customer mÃ¡Â»â€ºi. Ã„ÂiÃ¡Â»Âu kiÃ¡Â»â€¡n cÃ…Â© lÃƒÂ m Ã¡ÂºÂ£nh/video khÃƒÂ¡ch gÃ¡Â»Â­i biÃ¡ÂºÂ¿n mÃ¡ÂºÂ¥t
-          // chÃ¡Â»â€° vÃƒÂ¬ CRM vÃ¡Â»Â«a gÃ¡Â»Â­i Ã¡ÂºÂ£nh/video trong cÃƒÂ¹ng hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i.
+          // ===== ANTI-GHOST GUARD (chÃƒÂ¡Ã‚Â»Ã¢â‚¬Â° ÃƒÆ’Ã‚Â¡p dÃƒÂ¡Ã‚Â»Ã‚Â¥ng cho tin Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c xÃƒÆ’Ã‚Â¡c nhÃƒÂ¡Ã‚ÂºÃ‚Â­n outgoing) =====
+          // DOM observer Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â´i khi bÃƒÂ¡Ã‚ÂºÃ‚Â¯t lÃƒÂ¡Ã‚ÂºÃ‚Â¡i tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n do CRM gÃƒÂ¡Ã‚Â»Ã‚Â­i (Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ cÃƒÆ’Ã‚Â³ is_outgoing=1 trong DB).
+          // NÃƒÂ¡Ã‚ÂºÃ‚Â¿u Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ chÃƒÂ¡Ã‚ÂºÃ‚Â¡y tiÃƒÂ¡Ã‚ÂºÃ‚Â¿p sÃƒÂ¡Ã‚ÂºÃ‚Â½ tÃƒÂ¡Ã‚ÂºÃ‚Â¡o bubble ghost bÃƒÆ’Ã‚Âªn trÃƒÆ’Ã‚Â¡i vÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi is_outgoing=0.
+          // KhÃƒÆ’Ã‚Â´ng Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c dÃƒÆ’Ã‚Â¹ng mÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢t media outgoing bÃƒÂ¡Ã‚ÂºÃ‚Â¥t kÃƒÂ¡Ã‚Â»Ã‚Â³ trong 5 phÃƒÆ’Ã‚Âºt Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ loÃƒÂ¡Ã‚ÂºÃ‚Â¡i mÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢t
+          // media customer mÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi. Ãƒâ€žÃ‚ÂiÃƒÂ¡Ã‚Â»Ã‚Âu kiÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡n cÃƒâ€¦Ã‚Â© lÃƒÆ’Ã‚Â m ÃƒÂ¡Ã‚ÂºÃ‚Â£nh/video khÃƒÆ’Ã‚Â¡ch gÃƒÂ¡Ã‚Â»Ã‚Â­i biÃƒÂ¡Ã‚ÂºÃ‚Â¿n mÃƒÂ¡Ã‚ÂºÃ‚Â¥t
+          // chÃƒÂ¡Ã‚Â»Ã¢â‚¬Â° vÃƒÆ’Ã‚Â¬ CRM vÃƒÂ¡Ã‚Â»Ã‚Â«a gÃƒÂ¡Ã‚Â»Ã‚Â­i ÃƒÂ¡Ã‚ÂºÃ‚Â£nh/video trong cÃƒÆ’Ã‚Â¹ng hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i.
           if (isTrustedOutgoingObservation && isOutgoing) {
             const isMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
             let outgoingMatch = null;
@@ -1877,7 +1906,7 @@ wss.on('connection', (ws, req) => {
             }
 
             if (outgoingMatch) {
-              console.log(`[WS] Ã°Å¸Å¡Â« Anti-ghost FINAL: DOM observer bÃ¡ÂºÂ¯t lÃ¡ÂºÂ¡i tin outgoing (id=${outgoingMatch.id}, status=${outgoingMatch.delivery_status}). Discard hoÃƒÂ n toÃƒÂ n.`);
+              console.log(`[WS] ÃƒÂ°Ã…Â¸Ã…Â¡Ã‚Â« Anti-ghost FINAL: DOM observer bÃƒÂ¡Ã‚ÂºÃ‚Â¯t lÃƒÂ¡Ã‚ÂºÃ‚Â¡i tin outgoing (id=${outgoingMatch.id}, status=${outgoingMatch.delivery_status}). Discard hoÃƒÆ’Ã‚Â n toÃƒÆ’Ã‚Â n.`);
               if (outgoingMatch.delivery_status === 'pending') {
                 OutboundDomCorrelationService.confirmPendingOutbound(db, io, outgoingMatch, {
                   fbMessageId: m.fb_message_id,
@@ -1891,7 +1920,7 @@ wss.on('connection', (ws, req) => {
           }
 
 
-          // LÃ†Â°u tin nhÃ¡ÂºÂ¯n vÃƒÂ o bÃ¡ÂºÂ£ng messages
+          // LÃƒâ€ Ã‚Â°u tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n vÃƒÆ’Ã‚Â o bÃƒÂ¡Ã‚ÂºÃ‚Â£ng messages
           let stableMessageId = m.fb_message_id || m.client_message_id || ConversationRepository.fingerprint(m.thread_id, m);
           if (!isOutgoing && m.fb_message_id) {
             const promotedPreview = ConversationRepository.promoteSidebarPreview({
@@ -1988,8 +2017,8 @@ wss.on('connection', (ws, req) => {
                 m.content || null, m.content || null, stableMessageId);
               mediaWasUpdated = mediaUpdate.changes > 0;
             }
-            // Tin Ã„â€˜ÃƒÂ£ tÃ¡Â»â€œn tÃ¡ÂºÂ¡i: nhÃ¡Â»Â ConversationRepository quyÃ¡ÂºÂ¿t Ã„â€˜Ã¡Â»â€¹nh cÃƒÂ³ cÃ¡ÂºÂ§n nÃƒÂ¢ng cÃ¡ÂºÂ¥p
-            // timestamp/is_outgoing khÃƒÂ´ng (logic dÃƒÂ¹ng chung, cÃƒÂ³ test riÃƒÂªng).
+            // Tin Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ tÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“n tÃƒÂ¡Ã‚ÂºÃ‚Â¡i: nhÃƒÂ¡Ã‚Â»Ã‚Â ConversationRepository quyÃƒÂ¡Ã‚ÂºÃ‚Â¿t Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹nh cÃƒÆ’Ã‚Â³ cÃƒÂ¡Ã‚ÂºÃ‚Â§n nÃƒÆ’Ã‚Â¢ng cÃƒÂ¡Ã‚ÂºÃ‚Â¥p
+            // timestamp/is_outgoing khÃƒÆ’Ã‚Â´ng (logic dÃƒÆ’Ã‚Â¹ng chung, cÃƒÆ’Ã‚Â³ test riÃƒÆ’Ã‚Âªng).
             const reconcile = ConversationRepository.reconcileExistingMessage(
               stableMessageId,
               {
@@ -2005,14 +2034,14 @@ wss.on('connection', (ws, req) => {
               db
             );
             if (reconcile.reason === 'not_found') {
-              break; // Duplicate vÃƒÂ¬ client_message_id hoÃ¡ÂºÂ·c lÃƒÂ½ do khÃƒÂ¡c
+              break; // Duplicate vÃƒÆ’Ã‚Â¬ client_message_id hoÃƒÂ¡Ã‚ÂºÃ‚Â·c lÃƒÆ’Ã‚Â½ do khÃƒÆ’Ã‚Â¡c
             }
             if (!reconcile.updated && !mediaWasUpdated) {
-              console.log(`[WS] BÃ¡Â»Â qua tin nhÃ¡ÂºÂ¯n Ã„â€˜ÃƒÂ£ tÃ¡Â»â€œn tÃ¡ÂºÂ¡i (fb_message_id: ${m.fb_message_id})`);
+              console.log(`[WS] BÃƒÂ¡Ã‚Â»Ã‚Â qua tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ tÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“n tÃƒÂ¡Ã‚ÂºÃ‚Â¡i (fb_message_id: ${m.fb_message_id})`);
               break;
             }
             if (reconcile.timestampUpdated) {
-              console.log(`[WS] Ã¢ÂÂ³ NÃƒÂ¢ng cÃ¡ÂºÂ¥p Timestamp Rank cho fb_message_id ${m.fb_message_id}: ${reconcile.previousTimestampSource} -> ${tsSource}`);
+              console.log(`[WS] ÃƒÂ¢Ã‚ÂÃ‚Â³ NÃƒÆ’Ã‚Â¢ng cÃƒÂ¡Ã‚ÂºÃ‚Â¥p Timestamp Rank cho fb_message_id ${m.fb_message_id}: ${reconcile.previousTimestampSource} -> ${tsSource}`);
             }
             if (reconcile.directionUpdated) {
               directionWasUpdated = true;
@@ -2048,7 +2077,7 @@ wss.on('connection', (ws, req) => {
           if (m.contact_name && !isInvalidContactName(m.contact_name)) {
             const cleanName = m.contact_name.trim();
             const existing = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(m.thread_id);
-            if (!existing || isInvalidContactName(existing.contact_name) || (existing.contact_name || '').startsWith('KhÃƒÂ¡ch hÃƒÂ ng')) {
+            if (!existing || isInvalidContactName(existing.contact_name) || (existing.contact_name || '').startsWith('KhÃƒÆ’Ã‚Â¡ch hÃƒÆ’Ã‚Â ng')) {
               db.prepare('UPDATE threads SET contact_name = ? WHERE id = ?').run(cleanName, m.thread_id);
               db.prepare(`
                 INSERT INTO contacts (thread_id, name)
@@ -2093,7 +2122,7 @@ wss.on('connection', (ws, req) => {
                 VALUES (?, ?, ?)
                 ON CONFLICT(thread_id) DO UPDATE SET
                   email = COALESCE(NULLIF(excluded.email,''), contacts.email)
-              `).run(m.thread_id, m.contact_name || 'KhÃƒÂ¡ch hÃƒÂ ng', emails[0] || null);
+              `).run(m.thread_id, m.contact_name || 'KhÃƒÆ’Ã‚Â¡ch hÃƒÆ’Ã‚Â ng', emails[0] || null);
             }
 
             // Phone capture (spec 035): exact-prefix detection, immutable
@@ -2207,7 +2236,7 @@ wss.on('connection', (ws, req) => {
             followupService.restoreOnIncoming(m.thread_id);
           }
 
-          // Emit payload Ã„â€˜Ã¡ÂºÂ§y Ã„â€˜Ã¡Â»Â§ lÃƒÂªn frontend
+          // Emit payload Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚ÂºÃ‚Â§y Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã‚Â§ lÃƒÆ’Ã‚Âªn frontend
           const persistedMessage = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(stableMessageId);
           if (wasNewMessage && isConfirmedIncoming && persistedMessage?.id) {
             const campaignResponse = CampaignResponseStatsService.recordIncomingResponse({
@@ -2304,7 +2333,7 @@ wss.on('connection', (ws, req) => {
           const knownThread = internalThreadId
             ? db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(internalThreadId)
             : null;
-          const callerName = String(data.caller_name || knownThread?.contact_name || '').trim() || 'KhÃƒÂ¡ch hÃƒÂ ng';
+          const callerName = String(data.caller_name || knownThread?.contact_name || '').trim() || 'KhÃƒÆ’Ã‚Â¡ch hÃƒÆ’Ã‚Â ng';
           io.emit('INCOMING_CALL_RINGING', { ...data, caller_name: callerName, thread_id: internalThreadId || data.thread_id || null, external_thread_id: data.thread_id || null, account_id: accountId });
           break;
         }
@@ -2343,7 +2372,7 @@ wss.on('connection', (ws, req) => {
         case 'SYNC_THREADS_RESULT': {
           const { account_id, threads, partial, sync_status, checkpoint } = msg.data;
           const isRealtimeSidebarHint = sync_status === 'realtime_hint' || sync_status === 'realtime_requests';
-          console.log(`[WS] NhÃ¡ÂºÂ­n ${threads?.length || 0} threads tÃ¡Â»Â« extension tÃƒÂ i khoÃ¡ÂºÂ£n: ${account_id}`);
+          console.log(`[WS] NhÃƒÂ¡Ã‚ÂºÃ‚Â­n ${threads?.length || 0} threads tÃƒÂ¡Ã‚Â»Ã‚Â« extension tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n: ${account_id}`);
           // Progressive UI batches are not the end of the combined Inbox +
           // Requests scan. Only its final aggregate frame releases inFlight.
           if (partial !== true) {
@@ -2381,10 +2410,10 @@ wss.on('connection', (ws, req) => {
                   const existing = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(existingInternalThreadId);
                   let existingName = existing?.contact_name;
                   if (isInvalidContactName(existingName)) existingName = null;
-                  name = existingName || 'KhÃƒÂ¡ch hÃƒÂ ng';
+                  name = existingName || 'KhÃƒÆ’Ã‚Â¡ch hÃƒÆ’Ã‚Â ng';
                 }
                 let cleanLastMsg = cleanMessageText(t.last_message);
-                if (!cleanLastMsg || isSystemOrMetadataText(cleanLastMsg) || cleanLastMsg === 'Ã„Âang tÃ¡ÂºÂ£i...') {
+                if (!cleanLastMsg || isSystemOrMetadataText(cleanLastMsg) || cleanLastMsg === 'Ãƒâ€žÃ‚Âang tÃƒÂ¡Ã‚ÂºÃ‚Â£i...') {
                   const dbMsgs = db.prepare(`
                     SELECT content, media_url FROM messages
                     WHERE thread_id = ?
@@ -2393,17 +2422,17 @@ wss.on('connection', (ws, req) => {
                   `).all(existingInternalThreadId);
 
                   // A media message with no caption is a valid "last message" too -
-                  // preview it as [Ã¡ÂºÂ¢nh] instead of falling through to an older text
-                  // message or "ChÃ†Â°a cÃƒÂ³ tin nhÃ¡ÂºÂ¯n".
+                  // preview it as [ÃƒÂ¡Ã‚ÂºÃ‚Â¢nh] instead of falling through to an older text
+                  // message or "ChÃƒâ€ Ã‚Â°a cÃƒÆ’Ã‚Â³ tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n".
                   const validInDb = dbMsgs.find(m => {
                     if (m.media_url) return true;
                     const c = cleanMessageText(m.content);
-                    return c && !isSystemOrMetadataText(c) && c !== 'Ã„Âang tÃ¡ÂºÂ£i...';
+                    return c && !isSystemOrMetadataText(c) && c !== 'Ãƒâ€žÃ‚Âang tÃƒÂ¡Ã‚ÂºÃ‚Â£i...';
                   });
 
                   cleanLastMsg = validInDb
-                    ? (cleanMessageText(validInDb.content) || (validInDb.media_url ? '[Ã¡ÂºÂ¢nh]' : ''))
-                    : 'ChÃ†Â°a cÃƒÂ³ tin nhÃ¡ÂºÂ¯n';
+                    ? (cleanMessageText(validInDb.content) || (validInDb.media_url ? '[ÃƒÂ¡Ã‚ÂºÃ‚Â¢nh]' : ''))
+                    : 'ChÃƒâ€ Ã‚Â°a cÃƒÆ’Ã‚Â³ tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n';
                 }
 
                 const normalizedPreviousThread = previousThread
@@ -2459,7 +2488,7 @@ wss.on('connection', (ws, req) => {
                   });
                 }
 
-                // Auto-bind Page source nÃ¡ÂºÂ¿u thread Ã„â€˜Ã¡ÂºÂ¿n tÃ¡Â»Â« Business Suite
+                // Auto-bind Page source nÃƒÂ¡Ã‚ÂºÃ‚Â¿u thread Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚ÂºÃ‚Â¿n tÃƒÂ¡Ã‚Â»Ã‚Â« Business Suite
                 if (t.page_id || t.source_type === 'page_messenger') {
                   try {
                     InboxSourceService.ensurePageSource({
@@ -2469,7 +2498,7 @@ wss.on('connection', (ws, req) => {
                       pageName: t.page_name || null
                     }, db);
                   } catch (psErr) {
-                    console.warn('[PAGE_SOURCE] LÃ¡Â»â€”i bind thread tÃ¡Â»Â« sync:', psErr.message);
+                    console.warn('[PAGE_SOURCE] LÃƒÂ¡Ã‚Â»Ã¢â‚¬â€i bind thread tÃƒÂ¡Ã‚Â»Ã‚Â« sync:', psErr.message);
                   }
                 }
                 
@@ -2609,7 +2638,7 @@ wss.on('connection', (ws, req) => {
               )
             : allThreads;
           io.emit('THREADS_SYNCED', { account_id, threads: emittedThreads });
-          console.log(`[WS] Ã„ÂÃƒÂ£ emit THREADS_SYNCED lÃƒÂªn frontend: ${allThreads.length} threads`);
+          console.log(`[WS] Ãƒâ€žÃ‚ÂÃƒÆ’Ã‚Â£ emit THREADS_SYNCED lÃƒÆ’Ã‚Âªn frontend: ${allThreads.length} threads`);
           // Keep the existing full sweep available as an opt-in fallback.
           // Normal operation synchronizes history only when CRM opens/scrolls a thread.
           if (process.env.FB_CRM_ENABLE_INITIAL_HISTORY_SWEEP === '1' && partial !== true) {
@@ -2673,15 +2702,15 @@ wss.on('connection', (ws, req) => {
                     allow_navigation: true
                   }
                 }));
-                console.log(`[WS] Retry sync tin nhÃ¡ÂºÂ¯n cho thread ${thread_id} (account ${account_id}) mode=${mode}`);
+                console.log(`[WS] Retry sync tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n cho thread ${thread_id} (account ${account_id}) mode=${mode}`);
               });
               if (!scheduled) {
-                console.log(`[WS] KhÃƒÂ´ng retry Ã„â€˜iÃ¡Â»Âu hÃ†Â°Ã¡Â»â€ºng thread ${thread_id} (reason=${reason}, Ã„â€˜ÃƒÂ£ hÃ¡ÂºÂ¿t lÃ†Â°Ã¡Â»Â£t); chÃ¡Â»Â click/yÃƒÂªu cÃ¡ÂºÂ§u mÃ¡Â»â€ºi.`);
+                console.log(`[WS] KhÃƒÆ’Ã‚Â´ng retry Ãƒâ€žÃ¢â‚¬ËœiÃƒÂ¡Ã‚Â»Ã‚Âu hÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºng thread ${thread_id} (reason=${reason}, Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ hÃƒÂ¡Ã‚ÂºÃ‚Â¿t lÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£t); chÃƒÂ¡Ã‚Â»Ã‚Â click/yÃƒÆ’Ã‚Âªu cÃƒÂ¡Ã‚ÂºÃ‚Â§u mÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi.`);
               }
             } else {
-              console.log(`[WS] KhÃƒÂ´ng retry Ã„â€˜iÃ¡Â»Âu hÃ†Â°Ã¡Â»â€ºng thread ${thread_id} (reason=${reason}, lÃ¡Â»â€”i vÃ„Â©nh viÃ¡Â»â€¦n); chÃ¡Â»Â click/yÃƒÂªu cÃ¡ÂºÂ§u mÃ¡Â»â€ºi.`);
+              console.log(`[WS] KhÃƒÆ’Ã‚Â´ng retry Ãƒâ€žÃ¢â‚¬ËœiÃƒÂ¡Ã‚Â»Ã‚Âu hÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºng thread ${thread_id} (reason=${reason}, lÃƒÂ¡Ã‚Â»Ã¢â‚¬â€i vÃƒâ€žÃ‚Â©nh viÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¦n); chÃƒÂ¡Ã‚Â»Ã‚Â click/yÃƒÆ’Ã‚Âªu cÃƒÂ¡Ã‚ÂºÃ‚Â§u mÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi.`);
             }
-            return; // KhÃƒÂ´ng ghi Ã„â€˜ÃƒÂ¨ hoÃ¡ÂºÂ·c emit UI
+            return; // KhÃƒÆ’Ã‚Â´ng ghi Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â¨ hoÃƒÂ¡Ã‚ÂºÃ‚Â·c emit UI
           }
 
           HistorySyncRetryPolicy.cancelRetry(thread_id);
@@ -2781,7 +2810,7 @@ wss.on('connection', (ws, req) => {
               ConversationRepository.upsertThread({
                 id: String(thread_id),
                 account_id,
-                contact_name: 'KhÃƒÂ¡ch hÃƒÂ ng',
+                contact_name: 'KhÃƒÆ’Ã‚Â¡ch hÃƒÆ’Ã‚Â ng',
                 is_unread: false
               });
             }
@@ -3095,8 +3124,8 @@ wss.on('connection', (ws, req) => {
               external_thread_id: pageThreadId,
               account_id: authenticatedAccountId,
               source_id: source.id,
-              contact_name: envelope.contact_name || 'KhÃƒÂ¡ch hÃƒÂ ng',
-              last_message: Array.isArray(envelope.messages) && envelope.messages.length ? (envelope.messages[envelope.messages.length - 1].content || 'ChÃ†Â°a cÃƒÂ³ tin nhÃ¡ÂºÂ¯n') : 'ChÃ†Â°a cÃƒÂ³ tin nhÃ¡ÂºÂ¯n',
+              contact_name: envelope.contact_name || 'KhÃƒÆ’Ã‚Â¡ch hÃƒÆ’Ã‚Â ng',
+              last_message: Array.isArray(envelope.messages) && envelope.messages.length ? (envelope.messages[envelope.messages.length - 1].content || 'ChÃƒâ€ Ã‚Â°a cÃƒÆ’Ã‚Â³ tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n') : 'ChÃƒâ€ Ã‚Â°a cÃƒÆ’Ã‚Â³ tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n',
               is_unread: 0,
               inbox_folder: 'INBOX'
             }, db);
@@ -3149,7 +3178,7 @@ wss.on('connection', (ws, req) => {
           // with no case for it here it fell to `default: break` - silently
           // dropped. That's why every message_queue row, going back days, was
           // stuck at status='processing' forever, and any genuine send
-          // failure left the CRM bubble hung in "Ã„Âang gÃ¡Â»Â­i" with no way to
+          // failure left the CRM bubble hung in "Ãƒâ€žÃ‚Âang gÃƒÂ¡Ã‚Â»Ã‚Â­i" with no way to
           // ever learn it failed.
           const { queue_id, success, error, client_message_id, outcome } = msg.data;
           queueWorker.acknowledgeDispatch(queue_id);
@@ -3235,7 +3264,7 @@ wss.on('connection', (ws, req) => {
                         attempt_id: watchdogAttemptId,
                         status: 'failed',
                         fb_message_id: null,
-                        error: { code: 'CONFIRMATION_TIMEOUT', message: 'KhÃƒÂ´ng nhÃ¡ÂºÂ­n Ã„â€˜Ã†Â°Ã¡Â»Â£c xÃƒÂ¡c nhÃ¡ÂºÂ­n tÃ¡Â»Â« Facebook sau 3 phÃƒÂºt' },
+                        error: { code: 'CONFIRMATION_TIMEOUT', message: 'KhÃƒÆ’Ã‚Â´ng nhÃƒÂ¡Ã‚ÂºÃ‚Â­n Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c xÃƒÆ’Ã‚Â¡c nhÃƒÂ¡Ã‚ÂºÃ‚Â­n tÃƒÂ¡Ã‚Â»Ã‚Â« Facebook sau 3 phÃƒÆ’Ã‚Âºt' },
                         updated_at: new Date().toISOString()
                       });
                     }
@@ -3337,11 +3366,11 @@ wss.on('connection', (ws, req) => {
 
           const internalThreadId = resolveInternalThreadId(db, callAccountId || ws.accountId, callThreadId);
           if (!internalThreadId) {
-            console.warn(`[WS] CALL_ENDED: KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y thread ${callThreadId}`);
+            console.warn(`[WS] CALL_ENDED: KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y thread ${callThreadId}`);
             break;
           }
 
-          const callContent = call_label || (callCallType === 'video' ? 'CuÃ¡Â»â„¢c gÃ¡Â»Âi video' : 'CuÃ¡Â»â„¢c gÃ¡Â»Âi thoÃ¡ÂºÂ¡i');
+          const callContent = call_label || (callCallType === 'video' ? 'CuÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢c gÃƒÂ¡Ã‚Â»Ã‚Âi video' : 'CuÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢c gÃƒÂ¡Ã‚Â»Ã‚Âi thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i');
           const callFbId = `call_ended_${internalThreadId}_${callTs || Date.now()}`;
           const callTsMs = callTs || Date.now();
 
@@ -3353,10 +3382,10 @@ wss.on('connection', (ws, req) => {
               VALUES (?, ?, ?, ?, 1, 'confirmed', ?, CURRENT_TIMESTAMP)
             `).run(internalThreadId, callFbId, String(callAccountId || ws.accountId || 'CURRENT_USER'), callContent, callTsMs);
           } catch (dbErr) {
-            console.warn('[WS] CALL_ENDED: LÃ¡Â»â€”i lÃ†Â°u DB:', dbErr.message);
+            console.warn('[WS] CALL_ENDED: LÃƒÂ¡Ã‚Â»Ã¢â‚¬â€i lÃƒâ€ Ã‚Â°u DB:', dbErr.message);
           }
 
-          console.log(`[WS] Ã°Å¸â€œÅ¾ CALL_ENDED: ${callContent} (${duration_text || '?'}) thread=${callThreadId}`);
+          console.log(`[WS] ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã…Â¾ CALL_ENDED: ${callContent} (${duration_text || '?'}) thread=${callThreadId}`);
 
           const storedCallMessage = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(callFbId);
           // Emit to CRM immediately
@@ -3401,9 +3430,9 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-// Socket.io: NhÃƒÂ¢n viÃƒÂªn gÃ¡Â»Â­i tin nhÃ¡ÂºÂ¯n Ã¢â€ â€™ AI auto-pause 30 phÃƒÂºt
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+// Socket.io: NhÃƒÆ’Ã‚Â¢n viÃƒÆ’Ã‚Âªn gÃƒÂ¡Ã‚Â»Ã‚Â­i tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ AI auto-pause 30 phÃƒÆ’Ã‚Âºt
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 io.on('connection', (socket) => {
   socket.on('REQUEST_BULK_HISTORY_SYNC', ({ job_id, threads = [] } = {}) => {
     const requested = Array.isArray(threads) ? threads : [];
@@ -3468,7 +3497,7 @@ io.on('connection', (socket) => {
   socket.on('REQUEST_SYNC_THREADS', ({ account_id }) => {
     if (!account_id) return;
     if (!InboxSyncScheduler.requestSidebarSync(account_id, 'crm_manual', { force: true })) {
-      console.warn(`[Socket.io] Extension cho account ${account_id} chÃ†Â°a sÃ¡ÂºÂµn sÃƒÂ ng WebSocket.`);
+      console.warn(`[Socket.io] Extension cho account ${account_id} chÃƒâ€ Ã‚Â°a sÃƒÂ¡Ã‚ÂºÃ‚Âµn sÃƒÆ’Ã‚Â ng WebSocket.`);
     }
   });
 
@@ -3483,21 +3512,21 @@ io.on('connection', (socket) => {
     const threadId = String(thread_id || '');
     const requestedAction = String(action || 'query');
     if (!requestId || !threadId || !['query', 'accept', 'continue', 'delete', 'block'].includes(requestedAction)) {
-      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'YÃƒÂªu cÃ¡ÂºÂ§u khÃƒÂ´ng hÃ¡Â»Â£p lÃ¡Â»â€¡.' });
+      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'YÃƒÆ’Ã‚Âªu cÃƒÂ¡Ã‚ÂºÃ‚Â§u khÃƒÆ’Ã‚Â´ng hÃƒÂ¡Ã‚Â»Ã‚Â£p lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡.' });
       return;
     }
     if (!enterpriseAccess.canAccessThread(socket.user, threadId)) {
-      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'KhÃƒÂ´ng cÃƒÂ³ quyÃ¡Â»Ân truy cÃ¡ÂºÂ­p hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i.' });
+      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'KhÃƒÆ’Ã‚Â´ng cÃƒÆ’Ã‚Â³ quyÃƒÂ¡Ã‚Â»Ã‚Ân truy cÃƒÂ¡Ã‚ÂºÃ‚Â­p hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i.' });
       return;
     }
     const thread = db.prepare('SELECT id, external_thread_id, account_id, thread_url, contact_name, inbox_folder FROM threads WHERE id = ?').get(threadId);
     if (!thread?.account_id || !['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(thread.inbox_folder)) {
-      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'HÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i khÃƒÂ´ng cÃƒÂ²n Ã¡Â»Å¸ Tin nhÃ¡ÂºÂ¯n chÃ¡Â»Â.' });
+      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'HÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i khÃƒÆ’Ã‚Â´ng cÃƒÆ’Ã‚Â²n ÃƒÂ¡Ã‚Â»Ã…Â¸ Tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n chÃƒÂ¡Ã‚Â»Ã‚Â.' });
       return;
     }
     const extension = extensionConnections.get(String(thread.account_id));
     if (!extension || extension.readyState !== WebSocket.OPEN) {
-      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'Extension Facebook chÃ†Â°a kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i.' });
+      socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'Extension Facebook chÃƒâ€ Ã‚Â°a kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi.' });
       return;
     }
     messageRequestActionOwners.set(requestId, { socket, threadId, createdAt: Date.now() });
@@ -3505,7 +3534,7 @@ io.on('connection', (socket) => {
       const pending = messageRequestActionOwners.get(requestId);
       if (!pending) return;
       messageRequestActionOwners.delete(requestId);
-      pending.socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'Messenger phÃ¡ÂºÂ£n hÃ¡Â»â€œi quÃƒÂ¡ thÃ¡Â»Âi gian.' });
+      pending.socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { request_id: requestId, thread_id: threadId, action: requestedAction, success: false, error: 'Messenger phÃƒÂ¡Ã‚ÂºÃ‚Â£n hÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“i quÃƒÆ’Ã‚Â¡ thÃƒÂ¡Ã‚Â»Ã‚Âi gian.' });
     }, 15000).unref?.();
     extension.send(JSON.stringify({
       type: 'MESSAGE_REQUEST_ACTION',
@@ -3606,7 +3635,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('TRIGGER_CALL', ({ thread_id, call_type = 'audio', account_id, call_request_id }) => {
-    if (!enterpriseAccess.canAccessThread(socket.user, thread_id)) return socket.emit('CALL_ERROR', { error: 'KhÃƒÂ´ng cÃƒÂ³ quyÃ¡Â»Ân sÃ¡Â»Â­ dÃ¡Â»Â¥ng hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i nÃƒÂ y.' });
+    if (!enterpriseAccess.canAccessThread(socket.user, thread_id)) return socket.emit('CALL_ERROR', { error: 'KhÃƒÆ’Ã‚Â´ng cÃƒÆ’Ã‚Â³ quyÃƒÂ¡Ã‚Â»Ã‚Ân sÃƒÂ¡Ã‚Â»Ã‚Â­ dÃƒÂ¡Ã‚Â»Ã‚Â¥ng hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i nÃƒÆ’Ã‚Â y.' });
     let targetAccId = account_id;
     if (!targetAccId && thread_id) {
       const thread = db.prepare('SELECT account_id FROM threads WHERE id = ?').get(thread_id);
@@ -3616,7 +3645,7 @@ io.on('connection', (socket) => {
       targetAccId = extensionConnections.keys().next().value;
     }
     if (!targetAccId || !thread_id) {
-      socket.emit('CALL_TRIGGER_RESPONSE', { success: false, error: 'ThiÃ¡ÂºÂ¿u thÃƒÂ´ng tin tÃƒÂ i khoÃ¡ÂºÂ£n hoÃ¡ÂºÂ·c hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i' });
+      socket.emit('CALL_TRIGGER_RESPONSE', { success: false, error: 'ThiÃƒÂ¡Ã‚ÂºÃ‚Â¿u thÃƒÆ’Ã‚Â´ng tin tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n hoÃƒÂ¡Ã‚ÂºÃ‚Â·c hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i' });
       return;
     }
 
@@ -3627,7 +3656,7 @@ io.on('connection', (socket) => {
     })) {
       socket.emit('CALL_TRIGGER_RESPONSE', {
         success: false,
-        error: 'CuÃ¡Â»â„¢c gÃ¡Â»Âi nÃƒÂ y vÃ¡Â»Â«a Ã„â€˜Ã†Â°Ã¡Â»Â£c kÃƒÂ­ch hoÃ¡ÂºÂ¡t. Vui lÃƒÂ²ng chÃ¡Â»Â trong giÃƒÂ¢y lÃƒÂ¡t.'
+        error: 'CuÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢c gÃƒÂ¡Ã‚Â»Ã‚Âi nÃƒÆ’Ã‚Â y vÃƒÂ¡Ã‚Â»Ã‚Â«a Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c kÃƒÆ’Ã‚Â­ch hoÃƒÂ¡Ã‚ÂºÃ‚Â¡t. Vui lÃƒÆ’Ã‚Â²ng chÃƒÂ¡Ã‚Â»Ã‚Â trong giÃƒÆ’Ã‚Â¢y lÃƒÆ’Ã‚Â¡t.'
       });
       return;
     }
@@ -3635,15 +3664,15 @@ io.on('connection', (socket) => {
     const requestId = String(call_request_id || require('crypto').randomUUID());
     const extWs = extensionConnections.get(targetAccId);
     if (extWs && extWs.readyState === WebSocket.OPEN) {
-      console.log(`[Socket.io] Ã°Å¸â€œÅ¾ YÃƒÂªu cÃ¡ÂºÂ§u kÃƒÂ­ch hoÃ¡ÂºÂ¡t cuÃ¡Â»â„¢c gÃ¡Â»Âi Messenger ${call_type} cho thread ${thread_id} (account ${targetAccId})`);
+      console.log(`[Socket.io] ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã…Â¾ YÃƒÆ’Ã‚Âªu cÃƒÂ¡Ã‚ÂºÃ‚Â§u kÃƒÆ’Ã‚Â­ch hoÃƒÂ¡Ã‚ÂºÃ‚Â¡t cuÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢c gÃƒÂ¡Ã‚Â»Ã‚Âi Messenger ${call_type} cho thread ${thread_id} (account ${targetAccId})`);
       extWs.send(JSON.stringify({
         type: 'TRIGGER_MESSENGER_CALL',
         data: { account_id: targetAccId, thread_id, call_type, call_request_id: requestId }
       }));
-      socket.emit('CALL_TRIGGER_RESPONSE', { success: true, message: 'Ã„ÂÃƒÂ£ gÃ¡Â»Â­i lÃ¡Â»â€¡nh kÃƒÂ­ch hoÃ¡ÂºÂ¡t cuÃ¡Â»â„¢c gÃ¡Â»Âi tÃ¡Â»â€ºi Extension' });
+      socket.emit('CALL_TRIGGER_RESPONSE', { success: true, message: 'Ãƒâ€žÃ‚ÂÃƒÆ’Ã‚Â£ gÃƒÂ¡Ã‚Â»Ã‚Â­i lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡nh kÃƒÆ’Ã‚Â­ch hoÃƒÂ¡Ã‚ÂºÃ‚Â¡t cuÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢c gÃƒÂ¡Ã‚Â»Ã‚Âi tÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi Extension' });
     } else {
-      console.warn(`[Socket.io] Extension cho account ${targetAccId} chÃ†Â°a sÃ¡ÂºÂµn sÃƒÂ ng WebSocket.`);
-      socket.emit('CALL_TRIGGER_RESPONSE', { success: false, error: 'Extension Facebook chÃ†Â°a Ã„â€˜Ã†Â°Ã¡Â»Â£c kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i' });
+      console.warn(`[Socket.io] Extension cho account ${targetAccId} chÃƒâ€ Ã‚Â°a sÃƒÂ¡Ã‚ÂºÃ‚Âµn sÃƒÆ’Ã‚Â ng WebSocket.`);
+      socket.emit('CALL_TRIGGER_RESPONSE', { success: false, error: 'Extension Facebook chÃƒâ€ Ã‚Â°a Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi' });
     }
   });
 
@@ -3666,10 +3695,10 @@ io.on('connection', (socket) => {
     const { thread_id, content, client_message_id, attachment_id, contract_version } = payload;
     const isRichMessage = Number(contract_version) === 2 || Boolean(attachment_id);
     if (!enterpriseAccess.canAccessThread(socket.user, thread_id)) {
-      return socket.emit('SEND_ERROR', { client_message_id, code: 'ACCOUNT_NOT_ASSIGNED', error: 'TÃƒÂ i khoÃ¡ÂºÂ£n Facebook chÃ†Â°a Ã„â€˜Ã†Â°Ã¡Â»Â£c Admin cÃ¡ÂºÂ¥p cho bÃ¡ÂºÂ¡n.' });
+      return socket.emit('SEND_ERROR', { client_message_id, code: 'ACCOUNT_NOT_ASSIGNED', error: 'TÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook chÃƒâ€ Ã‚Â°a Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c Admin cÃƒÂ¡Ã‚ÂºÃ‚Â¥p cho bÃƒÂ¡Ã‚ÂºÃ‚Â¡n.' });
     }
 
-    // NhÃƒÂ¢n viÃƒÂªn gÃƒÂµ tay Ã¢â€ â€™ tÃ¡ÂºÂ¡m dÃ¡Â»Â«ng AI 30 phÃƒÂºt
+    // NhÃƒÆ’Ã‚Â¢n viÃƒÆ’Ã‚Âªn gÃƒÆ’Ã‚Âµ tay ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ tÃƒÂ¡Ã‚ÂºÃ‚Â¡m dÃƒÂ¡Ã‚Â»Ã‚Â«ng AI 30 phÃƒÆ’Ã‚Âºt
     const pauseResult = aiMediator.pauseForThread(thread_id);
     io.emit('AI_PAUSED', { thread_id, until: pauseResult.until });
 
@@ -3678,7 +3707,7 @@ io.on('connection', (socket) => {
         if (isLoopbackAddress(socket.handshake?.address) === false) {
           throw new RichMessageService.Error(
             'LOCAL_CRM_REQUIRED',
-            'Rich-message chÃ¡Â»â€° Ã„â€˜Ã†Â°Ã¡Â»Â£c phÃƒÂ©p tÃ¡Â»Â« CRM chÃ¡ÂºÂ¡y trÃƒÂªn mÃƒÂ¡y nÃƒÂ y.',
+            'Rich-message chÃƒÂ¡Ã‚Â»Ã¢â‚¬Â° Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c phÃƒÆ’Ã‚Â©p tÃƒÂ¡Ã‚Â»Ã‚Â« CRM chÃƒÂ¡Ã‚ÂºÃ‚Â¡y trÃƒÆ’Ã‚Âªn mÃƒÆ’Ã‚Â¡y nÃƒÆ’Ã‚Â y.',
             403
           );
         }
@@ -3686,7 +3715,7 @@ io.on('connection', (socket) => {
         if (forbiddenRoutingFields.some((field) => Object.prototype.hasOwnProperty.call(payload, field))) {
           throw new RichMessageService.Error(
             'ROUTING_FIELDS_FORBIDDEN',
-            'CRM khÃƒÂ´ng Ã„â€˜Ã†Â°Ã¡Â»Â£c tÃ¡Â»Â± chÃ¡Â»â€° Ã„â€˜Ã¡Â»â€¹nh tÃƒÂ i khoÃ¡ÂºÂ£n hoÃ¡ÂºÂ·c nguÃ¡Â»â€œn gÃ¡Â»Â­i.',
+            'CRM khÃƒÆ’Ã‚Â´ng Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c tÃƒÂ¡Ã‚Â»Ã‚Â± chÃƒÂ¡Ã‚Â»Ã¢â‚¬Â° Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹nh tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n hoÃƒÂ¡Ã‚ÂºÃ‚Â·c nguÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“n gÃƒÂ¡Ã‚Â»Ã‚Â­i.',
             400
           );
         }
@@ -3719,7 +3748,7 @@ io.on('connection', (socket) => {
 
       await sendViaExtension(thread_id, content, client_message_id);
     } catch (err) {
-      console.error('[Socket] LÃ¡Â»â€”i gÃ¡Â»Â­i tin nhÃ¡ÂºÂ¯n:', err.message);
+      console.error('[Socket] LÃƒÂ¡Ã‚Â»Ã¢â‚¬â€i gÃƒÂ¡Ã‚Â»Ã‚Â­i tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n:', err.message);
       try {
         fs.appendFileSync(
           path.join(APP_DATA_ROOT, 'composer-debug.log'),
@@ -3751,11 +3780,11 @@ io.on('connection', (socket) => {
 
   socket.on('RETRY_MESSAGE', (payload = {}) => {
     try {
-      if (!enterpriseAccess.canAccessThread(socket.user, payload.thread_id)) throw Object.assign(new Error('TÃƒÂ i khoÃ¡ÂºÂ£n Facebook chÃ†Â°a Ã„â€˜Ã†Â°Ã¡Â»Â£c Admin cÃ¡ÂºÂ¥p cho bÃ¡ÂºÂ¡n.'), { code: 'ACCOUNT_NOT_ASSIGNED' });
+      if (!enterpriseAccess.canAccessThread(socket.user, payload.thread_id)) throw Object.assign(new Error('TÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook chÃƒâ€ Ã‚Â°a Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c Admin cÃƒÂ¡Ã‚ÂºÃ‚Â¥p cho bÃƒÂ¡Ã‚ÂºÃ‚Â¡n.'), { code: 'ACCOUNT_NOT_ASSIGNED' });
       if (isLoopbackAddress(socket.handshake?.address) === false) {
         throw new RichMessageService.Error(
           'LOCAL_CRM_REQUIRED',
-          'Rich-message chÃ¡Â»â€° Ã„â€˜Ã†Â°Ã¡Â»Â£c phÃƒÂ©p tÃ¡Â»Â« CRM chÃ¡ÂºÂ¡y trÃƒÂªn mÃƒÂ¡y nÃƒÂ y.',
+          'Rich-message chÃƒÂ¡Ã‚Â»Ã¢â‚¬Â° Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c phÃƒÆ’Ã‚Â©p tÃƒÂ¡Ã‚Â»Ã‚Â« CRM chÃƒÂ¡Ã‚ÂºÃ‚Â¡y trÃƒÆ’Ã‚Âªn mÃƒÆ’Ã‚Â¡y nÃƒÆ’Ã‚Â y.',
           403
         );
       }
@@ -3789,13 +3818,13 @@ io.on('connection', (socket) => {
   });
 });
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 // REST API
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
 function requireCompanyAdmin(req, res, next) {
   if (enterpriseAccess.isCompanyAdmin(req.user) || (req.user.role === 'ADMIN' && req.user.username === 'admin')) return next();
-  return res.status(403).json({ success: false, error: 'ChÃ¡Â»â€° Admin doanh nghiÃ¡Â»â€¡p Ã„â€˜Ã†Â°Ã¡Â»Â£c sÃ¡Â»Â­ dÃ¡Â»Â¥ng chÃ¡Â»Â©c nÃ„Æ’ng nÃƒÂ y.' });
+  return res.status(403).json({ success: false, error: 'ChÃƒÂ¡Ã‚Â»Ã¢â‚¬Â° Admin doanh nghiÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡p Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c sÃƒÂ¡Ã‚Â»Ã‚Â­ dÃƒÂ¡Ã‚Â»Ã‚Â¥ng chÃƒÂ¡Ã‚Â»Ã‚Â©c nÃƒâ€žÃ†â€™ng nÃƒÆ’Ã‚Â y.' });
 }
 
 app.get('/api/company/employees', requireCompanyAdmin, (req, res) => {
@@ -3809,23 +3838,23 @@ app.post('/api/company/employees', requireCompanyAdmin, async (req, res) => {
       body: JSON.stringify({ adminUsername: req.user.username, username: req.body?.username, password: req.body?.password })
     });
     const central = await centralResponse.json().catch(() => ({}));
-    if (!centralResponse.ok || !central.success) return res.status(centralResponse.status).json({ success: false, error: central.message || 'License Server tÃ¡Â»Â« chÃ¡Â»â€˜i tÃ¡ÂºÂ¡o nhÃƒÂ¢n viÃƒÂªn.' });
+    if (!centralResponse.ok || !central.success) return res.status(centralResponse.status).json({ success: false, error: central.message || 'License Server tÃƒÂ¡Ã‚Â»Ã‚Â« chÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi tÃƒÂ¡Ã‚ÂºÃ‚Â¡o nhÃƒÆ’Ã‚Â¢n viÃƒÆ’Ã‚Âªn.' });
     const employee = enterpriseAccess.createEmployee(req.user, req.body || {});
     res.status(201).json({ success: true, employee });
   } catch (error) {
-    res.status(error.status || 500).json({ success: false, error: error.message || 'KhÃƒÂ´ng thÃ¡Â»Æ’ tÃ¡ÂºÂ¡o nhÃƒÂ¢n viÃƒÂªn.' });
+    res.status(error.status || 500).json({ success: false, error: error.message || 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ tÃƒÂ¡Ã‚ÂºÃ‚Â¡o nhÃƒÆ’Ã‚Â¢n viÃƒÆ’Ã‚Âªn.' });
   }
 });
 
 app.delete('/api/company/employees/:id', requireCompanyAdmin, async (req, res) => {
   const employee = db.prepare("SELECT username FROM users WHERE id=? AND company_id=? AND company_role='EMPLOYEE'").get(Number(req.params.id), req.user.company_id);
-  if (!employee) return res.status(404).json({ success: false, error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y nhÃƒÂ¢n viÃƒÂªn.' });
+  if (!employee) return res.status(404).json({ success: false, error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y nhÃƒÆ’Ã‚Â¢n viÃƒÆ’Ã‚Âªn.' });
   try {
     const centralResponse = await fetch(`${LICENSE_SERVER_BASE_URL}/api/client-auth/company-employees`, {
       method: 'DELETE', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ adminUsername: req.user.username, username: employee.username })
     });
-    if (!centralResponse.ok && centralResponse.status !== 404) throw new Error('KhÃƒÂ´ng thÃ¡Â»Æ’ xÃƒÂ³a nhÃƒÂ¢n viÃƒÂªn trÃƒÂªn License Server.');
+    if (!centralResponse.ok && centralResponse.status !== 404) throw new Error('KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ xÃƒÆ’Ã‚Â³a nhÃƒÆ’Ã‚Â¢n viÃƒÆ’Ã‚Âªn trÃƒÆ’Ã‚Âªn License Server.');
     enterpriseAccess.deleteEmployee(req.user, req.params.id);
     res.json({ success: true });
   } catch (error) { res.status(502).json({ success: false, error: error.message }); }
@@ -3851,7 +3880,7 @@ app.get('/api/accounts', (req, res) => {
 });
 app.post('/api/accounts/:id/start', async (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
-    return res.status(404).json({ success: false, error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y tÃƒÂ i khoÃ¡ÂºÂ£n Facebook' });
+    return res.status(404).json({ success: false, error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook' });
   }
   const accountId = String(req.params.id);
   backgroundAfterConnectRequests.set(accountId, Date.now());
@@ -3879,7 +3908,7 @@ app.post('/api/accounts/:id/start', async (req, res) => {
 });
 app.post('/api/accounts/:id/stop', (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
-    return res.status(404).json({ success: false, error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y tÃƒÂ i khoÃ¡ÂºÂ£n Facebook' });
+    return res.status(404).json({ success: false, error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook' });
   }
   backgroundAfterConnectRequests.delete(String(req.params.id));
   const stopped = processManager.stopAccountProcess(req.params.id);
@@ -3895,32 +3924,32 @@ app.post('/api/extension/reload', (req, res) => {
       } catch (_) {}
     }
   });
-  console.log(`[WS] Ã°Å¸â€â€ž Ã„ÂÃƒÂ£ gÃ¡Â»Â­i tÃƒÂ­n hiÃ¡Â»â€¡u RELOAD_EXTENSION tÃ¡Â»â€ºi ${count} kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i Extension WebSocket.`);
+  console.log(`[WS] ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ¢â‚¬Å¾ Ãƒâ€žÃ‚ÂÃƒÆ’Ã‚Â£ gÃƒÂ¡Ã‚Â»Ã‚Â­i tÃƒÆ’Ã‚Â­n hiÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡u RELOAD_EXTENSION tÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi ${count} kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi Extension WebSocket.`);
   res.json({ success: true, reloaded: count });
 });
 app.post('/api/accounts/:id/open', (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
-    return res.status(404).json({ success: false, error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y tÃƒÂ i khoÃ¡ÂºÂ£n Facebook' });
+    return res.status(404).json({ success: false, error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook' });
   }
   if (processManager.getStatus(req.params.id) !== 'RUNNING') {
-    return res.status(409).json({ success: false, error: 'HÃƒÂ£y kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i tÃƒÂ i khoÃ¡ÂºÂ£n Facebook trÃ†Â°Ã¡Â»â€ºc khi bÃ¡ÂºÂ­t hiÃ¡Â»Æ’n thÃ¡Â»â€¹ Chrome.' });
+    return res.status(409).json({ success: false, error: 'HÃƒÆ’Ã‚Â£y kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook trÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºc khi bÃƒÂ¡Ã‚ÂºÃ‚Â­t hiÃƒÂ¡Ã‚Â»Ã†â€™n thÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ Chrome.' });
   }
   const visible = processManager.unhideWindow(req.params.id);
   res.json({ success: visible });
 });
 app.post('/api/accounts/:id/background', (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
-    return res.status(404).json({ success: false, error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y tÃƒÂ i khoÃ¡ÂºÂ£n Facebook' });
+    return res.status(404).json({ success: false, error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook' });
   }
   if (processManager.getStatus(req.params.id) !== 'RUNNING') {
-    return res.status(409).json({ success: false, error: 'TÃƒÂ i khoÃ¡ÂºÂ£n Facebook chÃ†Â°a Ã„â€˜Ã†Â°Ã¡Â»Â£c kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i.' });
+    return res.status(409).json({ success: false, error: 'TÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook chÃƒâ€ Ã‚Â°a Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi.' });
   }
   const hidden = processManager.hideAccountProcess(req.params.id);
   res.json({ success: hidden });
 });
 app.post('/api/accounts/new-session', async (req, res) => {
   if (!enterpriseAccess.isCompanyAdmin(req.user) && !(req.user.role === 'ADMIN' && req.user.username === 'admin')) {
-    return res.status(403).json({ success: false, error: 'ChÃ¡Â»â€° Admin doanh nghiÃ¡Â»â€¡p Ã„â€˜Ã†Â°Ã¡Â»Â£c thÃƒÂªm tÃƒÂ i khoÃ¡ÂºÂ£n Facebook.' });
+    return res.status(403).json({ success: false, error: 'ChÃƒÂ¡Ã‚Â»Ã¢â‚¬Â° Admin doanh nghiÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡p Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c thÃƒÆ’Ã‚Âªm tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook.' });
   }
   // Reuse this operator's unfinished login window. A new pending profile on
   // every click loses Facebook's device cookies, makes each retry look like a
@@ -3978,7 +4007,7 @@ app.post('/api/accounts/new-session', async (req, res) => {
     JSON.stringify({ owner_user_id: req.user.id, created_at: new Date().toISOString() })
   );
 
-  console.log(`[API] TÃ¡ÂºÂ¡o phiÃƒÂªn Ã„â€˜Ã„Æ’ng kÃƒÂ½ tÃƒÂ i khoÃ¡ÂºÂ£n Facebook mÃ¡Â»â€ºi: ${pendingKey}`);
+  console.log(`[API] TÃƒÂ¡Ã‚ÂºÃ‚Â¡o phiÃƒÆ’Ã‚Âªn Ãƒâ€žÃ¢â‚¬ËœÃƒâ€žÃ†â€™ng kÃƒÆ’Ã‚Â½ tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook mÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi: ${pendingKey}`);
   const success = await processManager.startNewAccountProcess(pendingKey);
   if (!success) pendingAccountOwners.delete(pendingKey);
   res.json({ success, pending_key: pendingKey });
@@ -3990,10 +4019,10 @@ app.delete('/api/accounts/:id', (req, res) => {
     const account = enterpriseAccess.canAccessAccount(req.user, accountId)
       ? db.prepare('SELECT id FROM accounts WHERE id = ?').get(accountId) : null;
     if (!enterpriseAccess.isCompanyAdmin(req.user) && !(req.user.role === 'ADMIN' && req.user.username === 'admin')) {
-      return res.status(403).json({ success: false, error: 'ChÃ¡Â»â€° Admin doanh nghiÃ¡Â»â€¡p Ã„â€˜Ã†Â°Ã¡Â»Â£c xÃƒÂ³a tÃƒÂ i khoÃ¡ÂºÂ£n Facebook.' });
+      return res.status(403).json({ success: false, error: 'ChÃƒÂ¡Ã‚Â»Ã¢â‚¬Â° Admin doanh nghiÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡p Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c xÃƒÆ’Ã‚Â³a tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook.' });
     }
     if (!account) {
-      return res.status(404).json({ success: false, error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y tÃƒÂ i khoÃ¡ÂºÂ£n Facebook' });
+      return res.status(404).json({ success: false, error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook' });
     }
 
     // Block late REGISTER_ACCOUNT frames before terminating the detached
@@ -4016,8 +4045,8 @@ app.delete('/api/accounts/:id', (req, res) => {
     io.emit('INBOX_SOURCE_REMOVED', { id: 'src_personal_' + accountId });
     res.json({ success: true, data: result });
   } catch (error) {
-    console.error('[API] KhÃƒÂ´ng thÃ¡Â»Æ’ xÃƒÂ³a tÃƒÂ i khoÃ¡ÂºÂ£n Facebook:', error);
-    res.status(500).json({ success: false, error: 'KhÃƒÂ´ng thÃ¡Â»Æ’ xÃƒÂ³a tÃƒÂ i khoÃ¡ÂºÂ£n Facebook', detail: error.message });
+    console.error('[API] KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ xÃƒÆ’Ã‚Â³a tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook:', error);
+    res.status(500).json({ success: false, error: 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ xÃƒÆ’Ã‚Â³a tÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook', detail: error.message });
   }
 });
 
@@ -4052,7 +4081,7 @@ app.get('/api/threads', (req, res) => {
 
 
 function sendFollowupError(res, error) {
-  return res.status(error.statusCode || 500).json({ error: error.message || 'KhÃƒÂ´ng thÃ¡Â»Æ’ cÃ¡ÂºÂ­p nhÃ¡ÂºÂ­t follow-up.' });
+  return res.status(error.statusCode || 500).json({ error: error.message || 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ cÃƒÂ¡Ã‚ÂºÃ‚Â­p nhÃƒÂ¡Ã‚ÂºÃ‚Â­t follow-up.' });
 }
 
 app.put('/api/threads/:id/reminder', (req, res) => {
@@ -4117,7 +4146,7 @@ app.get(
   requireLocalCrmRequest,
   (req, res) => {
     try {
-      if (!enterpriseAccess.canAccessThread(req.user, req.params.threadId)) return res.status(404).json({ error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i.' });
+      if (!enterpriseAccess.canAccessThread(req.user, req.params.threadId)) return res.status(404).json({ error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i.' });
       res.json(RichMessageCapabilityService.getForThread(
         req.params.threadId,
         getRichMessageCapabilityOptions()
@@ -4134,10 +4163,10 @@ app.post(
   express.raw({ type: 'multipart/form-data', limit: '105mb' }),
   (req, res) => {
     try {
-      if (!enterpriseAccess.canAccessThread(req.user, req.params.threadId)) return res.status(404).json({ error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i.' });
+      if (!enterpriseAccess.canAccessThread(req.user, req.params.threadId)) return res.status(404).json({ error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i.' });
       const operatorId = req.user.id;
       if (operatorId == null) {
-        return res.status(401).json({ code: 'AUTH_REQUIRED', error: 'CRM chÃ†Â°a cÃƒÂ³ operator hÃ¡Â»Â£p lÃ¡Â»â€¡.' });
+        return res.status(401).json({ code: 'AUTH_REQUIRED', error: 'CRM chÃƒâ€ Ã‚Â°a cÃƒÆ’Ã‚Â³ operator hÃƒÂ¡Ã‚Â»Ã‚Â£p lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡.' });
       }
       const parsed = OutboundAttachmentService.parseMultipartBody(
         req.body,
@@ -4172,10 +4201,10 @@ app.delete(
   requireLocalCrmRequest,
   (req, res) => {
     try {
-      if (!enterpriseAccess.canAccessThread(req.user, req.params.threadId)) return res.status(404).json({ error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i.' });
+      if (!enterpriseAccess.canAccessThread(req.user, req.params.threadId)) return res.status(404).json({ error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i.' });
       const operatorId = req.user.id;
       if (operatorId == null) {
-        return res.status(401).json({ code: 'AUTH_REQUIRED', error: 'CRM chÃ†Â°a cÃƒÂ³ operator hÃ¡Â»Â£p lÃ¡Â»â€¡.' });
+        return res.status(401).json({ code: 'AUTH_REQUIRED', error: 'CRM chÃƒâ€ Ã‚Â°a cÃƒÆ’Ã‚Â³ operator hÃƒÂ¡Ã‚Â»Ã‚Â£p lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡.' });
       }
       const discarded = OutboundAttachmentService.discard(
         req.params.threadId,
@@ -4186,7 +4215,7 @@ app.delete(
       if (discarded === false) {
         return res.status(409).json({
           code: 'ATTACHMENT_NOT_DISCARDABLE',
-          error: 'File khÃƒÂ´ng thuÃ¡Â»â„¢c hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i nÃƒÂ y hoÃ¡ÂºÂ·c khÃƒÂ´ng cÃƒÂ²n Ã¡Â»Å¸ trÃ¡ÂºÂ¡ng thÃƒÂ¡i chÃ¡Â»Â gÃ¡Â»Â­i.'
+          error: 'File khÃƒÆ’Ã‚Â´ng thuÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢c hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i nÃƒÆ’Ã‚Â y hoÃƒÂ¡Ã‚ÂºÃ‚Â·c khÃƒÆ’Ã‚Â´ng cÃƒÆ’Ã‚Â²n ÃƒÂ¡Ã‚Â»Ã…Â¸ trÃƒÂ¡Ã‚ÂºÃ‚Â¡ng thÃƒÆ’Ã‚Â¡i chÃƒÂ¡Ã‚Â»Ã‚Â gÃƒÂ¡Ã‚Â»Ã‚Â­i.'
         });
       }
       res.status(204).end();
@@ -4209,7 +4238,7 @@ app.get('/api/campaign-attachments/:filename', requireLocalCrmRequest, (req, res
     res.set('Cache-Control', 'private, max-age=86400');
     res.sendFile(filePath);
   } catch (err) {
-    res.status(404).json({ error: 'File khÃƒÂ´ng tÃ¡Â»â€œn tÃ¡ÂºÂ¡i' });
+    res.status(404).json({ error: 'File khÃƒÆ’Ã‚Â´ng tÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“n tÃƒÂ¡Ã‚ÂºÃ‚Â¡i' });
   }
 });
 
@@ -4225,7 +4254,7 @@ app.get(
       ) === false) {
         return res.status(403).json({
           code: 'ATTACHMENT_TOKEN_INVALID',
-          error: 'LiÃƒÂªn kÃ¡ÂºÂ¿t file khÃƒÂ´ng hÃ¡Â»Â£p lÃ¡Â»â€¡ hoÃ¡ÂºÂ·c Ã„â€˜ÃƒÂ£ hÃ¡ÂºÂ¿t hÃ¡ÂºÂ¡n.'
+          error: 'LiÃƒÆ’Ã‚Âªn kÃƒÂ¡Ã‚ÂºÃ‚Â¿t file khÃƒÆ’Ã‚Â´ng hÃƒÂ¡Ã‚Â»Ã‚Â£p lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡ hoÃƒÂ¡Ã‚ÂºÃ‚Â·c Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ hÃƒÂ¡Ã‚ÂºÃ‚Â¿t hÃƒÂ¡Ã‚ÂºÃ‚Â¡n.'
         });
       }
       const attachment = OutboundAttachmentService.resolveContent(
@@ -4233,7 +4262,7 @@ app.get(
         { database: db }
       );
       if (attachment == null) {
-        return res.status(404).json({ code: 'ATTACHMENT_NOT_FOUND', error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y file.' });
+        return res.status(404).json({ code: 'ATTACHMENT_NOT_FOUND', error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y file.' });
       }
       const disposition = attachment.media_type === 'image' ? 'inline' : 'attachment';
       res.set('Cache-Control', 'private, no-store');
@@ -4250,14 +4279,14 @@ app.get(
 );
 
 app.get('/api/contacts/:thread_id', (req, res) => {
-  if (!enterpriseAccess.canAccessThread(req.user, req.params.thread_id)) return res.status(404).json({ error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i' });
+  if (!enterpriseAccess.canAccessThread(req.user, req.params.thread_id)) return res.status(404).json({ error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i' });
   const contact = db.prepare('SELECT * FROM contacts WHERE thread_id=?').get(req.params.thread_id) || {};
   const phoneView = PhoneCaptureService.getContactPhoneView(req.params.thread_id, db);
   res.json({ ...contact, phone_candidates: phoneView.phone_candidates, phone_capture: phoneView.phone_capture });
 });
 
 app.put('/api/contacts/:thread_id', (req, res) => {
-  if (!enterpriseAccess.canAccessThread(req.user, req.params.thread_id)) return res.status(404).json({ error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i' });
+  if (!enterpriseAccess.canAccessThread(req.user, req.params.thread_id)) return res.status(404).json({ error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i' });
   let updatedContact;
   try {
     updatedContact = ContactService.update(req.params.thread_id, req.body, db);
@@ -4284,7 +4313,7 @@ app.put('/api/contacts/:thread_id', (req, res) => {
   res.json({ success: true, contact });
 });
 
-// Inbox Sources Ã¢â‚¬â€ Personal and Page connected sources
+// Inbox Sources ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Personal and Page connected sources
 app.get('/api/inbox-sources', (req, res) => {
   try {
     const accountIds = enterpriseAccess.listAccounts(req.user).map(account => String(account.id));
@@ -4295,15 +4324,15 @@ app.get('/api/inbox-sources', (req, res) => {
     res.json(sources);
   } catch (error) {
     console.error('[InboxSource] Fetch failed:', error);
-    res.status(500).json({ error: error.message || 'KhÃƒÂ´ng thÃ¡Â»Æ’ lÃ¡ÂºÂ¥y danh sÃƒÂ¡ch nguÃ¡Â»â€œn hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i' });
+    res.status(500).json({ error: error.message || 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ lÃƒÂ¡Ã‚ÂºÃ‚Â¥y danh sÃƒÆ’Ã‚Â¡ch nguÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“n hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i' });
   }
 });
 
-// Manual "KÃ¡ÂºÂ¿t nÃ¡Â»â€˜i Page" flow (AccountManagerModal) Ã¢â‚¬â€ this only ever accepted a
+// Manual "KÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi Page" flow (AccountManagerModal) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â this only ever accepted a
 // raw Page ID or a profile.php?id= link (per the UI's own placeholder text;
 // no Graph API token is actually needed since the extension does DOM
 // automation, not the Graph API), but no route ever backed the POST the
-// frontend sends here Ã¢â‚¬â€ every submit 404'd and Express's default handler
+// frontend sends here ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â every submit 404'd and Express's default handler
 // returned an HTML page, which broke on the client's res.json() with
 // "Unexpected token '<' ... is not valid JSON". Reuses ensurePageSource(),
 // the same idempotent upsert the automatic page_dom_observer path already
@@ -4315,30 +4344,30 @@ app.post('/api/inbox-sources/page', (req, res) => {
     const ownerAccountId = requestedOwnerAccountId && enterpriseAccess.canAccessAccount(req.user, requestedOwnerAccountId)
       ? String(requestedOwnerAccountId)
       : null;
-    if (!raw) return res.status(400).json({ error: 'ThiÃ¡ÂºÂ¿u Link Page hoÃ¡ÂºÂ·c ID Page' });
+    if (!raw) return res.status(400).json({ error: 'ThiÃƒÂ¡Ã‚ÂºÃ‚Â¿u Link Page hoÃƒÂ¡Ã‚ÂºÃ‚Â·c ID Page' });
 
     const pageId = parsePageIdFromInput(raw);
     if (!pageId) {
-      return res.status(400).json({ error: 'KhÃƒÂ´ng nhÃ¡ÂºÂ­n diÃ¡Â»â€¡n Ã„â€˜Ã†Â°Ã¡Â»Â£c ID Page. DÃƒÂ¹ng ID sÃ¡Â»â€˜ hoÃ¡ÂºÂ·c link dÃ¡ÂºÂ¡ng facebook.com/profile.php?id=...' });
+      return res.status(400).json({ error: 'KhÃƒÆ’Ã‚Â´ng nhÃƒÂ¡Ã‚ÂºÃ‚Â­n diÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡n Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c ID Page. DÃƒÆ’Ã‚Â¹ng ID sÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœ hoÃƒÂ¡Ã‚ÂºÃ‚Â·c link dÃƒÂ¡Ã‚ÂºÃ‚Â¡ng facebook.com/profile.php?id=...' });
     }
 
-    if (!ownerAccountId) return res.status(403).json({ error: 'TÃƒÂ i khoÃ¡ÂºÂ£n Facebook sÃ¡Â»Å¸ hÃ¡Â»Â¯u Page khÃƒÂ´ng hÃ¡Â»Â£p lÃ¡Â»â€¡ hoÃ¡ÂºÂ·c bÃ¡ÂºÂ¡n khÃƒÂ´ng cÃƒÂ³ quyÃ¡Â»Ân truy cÃ¡ÂºÂ­p.' });
+    if (!ownerAccountId) return res.status(403).json({ error: 'TÃƒÆ’Ã‚Â i khoÃƒÂ¡Ã‚ÂºÃ‚Â£n Facebook sÃƒÂ¡Ã‚Â»Ã…Â¸ hÃƒÂ¡Ã‚Â»Ã‚Â¯u Page khÃƒÆ’Ã‚Â´ng hÃƒÂ¡Ã‚Â»Ã‚Â£p lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡ hoÃƒÂ¡Ã‚ÂºÃ‚Â·c bÃƒÂ¡Ã‚ÂºÃ‚Â¡n khÃƒÆ’Ã‚Â´ng cÃƒÆ’Ã‚Â³ quyÃƒÂ¡Ã‚Â»Ã‚Ân truy cÃƒÂ¡Ã‚ÂºÃ‚Â­p.' });
     const source = InboxSourceService.ensurePageSource({ pageId, accountId: ownerAccountId, pageName: null }, db);
     // Launch asynchronously after the source is persisted. Personal Messenger
     // keeps its existing Chrome process; Page receives a separate profile/window
     // with the extension installed and opens Business Suite for this page.
     processManager.startPageProcess(pageId, ownerAccountId).catch((launchError) => {
-      console.warn(`[InboxSource] KhÃƒÂ´ng thÃ¡Â»Æ’ mÃ¡Â»Å¸ Chrome riÃƒÂªng cho Page ${pageId}:`, launchError.message);
+      console.warn(`[InboxSource] KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ mÃƒÂ¡Ã‚Â»Ã…Â¸ Chrome riÃƒÆ’Ã‚Âªng cho Page ${pageId}:`, launchError.message);
     });
     io.emit('INBOX_SOURCE_ADDED', { id: source.id, source_type: 'page_messenger', display_name: source.display_name });
     res.json(source);
   } catch (error) {
-    console.error('[InboxSource] KÃ¡ÂºÂ¿t nÃ¡Â»â€˜i Page thÃ¡Â»Â§ cÃƒÂ´ng thÃ¡ÂºÂ¥t bÃ¡ÂºÂ¡i:', error);
-    res.status(500).json({ error: error.message || 'KhÃƒÂ´ng thÃ¡Â»Æ’ kÃ¡ÂºÂ¿t nÃ¡Â»â€˜i Page' });
+    console.error('[InboxSource] KÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi Page thÃƒÂ¡Ã‚Â»Ã‚Â§ cÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚ÂºÃ‚Â¥t bÃƒÂ¡Ã‚ÂºÃ‚Â¡i:', error);
+    res.status(500).json({ error: error.message || 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ kÃƒÂ¡Ã‚ÂºÃ‚Â¿t nÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœi Page' });
   }
 });
 
-// Lead Statuses Ã¢â‚¬â€ staff-created, reusable, color-coded (feature 022)
+// Lead Statuses ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â staff-created, reusable, color-coded (feature 022)
 app.get('/api/lead-statuses', (req, res) => {
   res.json(db.prepare('SELECT id, name, color FROM lead_statuses ORDER BY id ASC').all());
 });
@@ -4351,13 +4380,13 @@ app.post('/api/lead-statuses', (req, res) => {
       return res.status(400).json({ error: error.message });
     }
     console.error('[LeadStatus] Create failed:', error);
-    return res.status(500).json({ error: 'KhÃƒÂ´ng thÃ¡Â»Æ’ tÃ¡ÂºÂ¡o trÃ¡ÂºÂ¡ng thÃƒÂ¡i mÃ¡Â»â€ºi.' });
+    return res.status(500).json({ error: 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ tÃƒÂ¡Ã‚ÂºÃ‚Â¡o trÃƒÂ¡Ã‚ÂºÃ‚Â¡ng thÃƒÆ’Ã‚Â¡i mÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi.' });
   }
 });
 
 app.delete('/api/lead-statuses/:id', (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isInteger(id)) return res.status(400).json({ error: 'id khÃƒÂ´ng hÃ¡Â»Â£p lÃ¡Â»â€¡' });
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'id khÃƒÆ’Ã‚Â´ng hÃƒÂ¡Ã‚Â»Ã‚Â£p lÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡' });
   const txn = db.transaction(() => {
     const { changes: unassignedCount } = db.prepare('UPDATE contacts SET status_id = NULL WHERE status_id = ?').run(id);
     // campaigns.phone_capture_status_id deliberately has no FK constraint
@@ -4377,7 +4406,7 @@ app.get('/api/avatars/:filename', serveAvatar);
 // Search
 app.get('/api/search', (req, res) => {
   const { q, limit } = req.query;
-  if (!q) return res.status(400).json({ error: 'ThiÃ¡ÂºÂ¿u query q' });
+  if (!q) return res.status(400).json({ error: 'ThiÃƒÂ¡Ã‚ÂºÃ‚Â¿u query q' });
   res.json(searchService.searchMessages(q, Number(limit) || 50));
 });
 
@@ -4392,7 +4421,7 @@ app.post('/api/leads/export/csv', (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ Task 4.1: Auto-Reply CRUD Ã¢â€â‚¬Ã¢â€â‚¬
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Task 4.1: Auto-Reply CRUD ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 app.get('/api/accounts/:id/auto-replies', (req, res) => {
   res.json(autoReplyEngine.getRules(req.params.id));
 });
@@ -4479,18 +4508,18 @@ app.post("/api/campaigns", (req, res) => {
 
 app.get("/api/campaigns/:id", (req, res) => {
   const campaign = CampaignRepository.getCampaign(req.params.id);
-  if (!campaign) return sendCampaignError(res, { code: "CAMPAIGN_NOT_FOUND", message: "KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y chiÃ¡ÂºÂ¿n dÃ¡Â»â€¹ch." });
+  if (!campaign) return sendCampaignError(res, { code: "CAMPAIGN_NOT_FOUND", message: "KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y chiÃƒÂ¡Ã‚ÂºÃ‚Â¿n dÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ch." });
   res.json(campaign);
 });
 
 app.get('/api/campaigns/:id/response-stats', (req, res) => {
   try {
     const statistics = CampaignResponseStatsService.get(req.params.id, db);
-    if (!statistics) return sendCampaignError(res, { code: 'CAMPAIGN_NOT_FOUND', message: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y chiÃ¡ÂºÂ¿n dÃ¡Â»â€¹ch.' });
+    if (!statistics) return sendCampaignError(res, { code: 'CAMPAIGN_NOT_FOUND', message: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y chiÃƒÂ¡Ã‚ÂºÃ‚Â¿n dÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ch.' });
     res.json(statistics);
   } catch (error) {
     console.error('[Campaign response stats]', error);
-    res.status(500).json({ error: { code: 'CAMPAIGN_STATS_ERROR', message: 'KhÃƒÂ´ng thÃ¡Â»Æ’ tÃ¡ÂºÂ£i thÃ¡Â»â€˜ng kÃƒÂª phÃ¡ÂºÂ£n hÃ¡Â»â€œi.' } });
+    res.status(500).json({ error: { code: 'CAMPAIGN_STATS_ERROR', message: 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ tÃƒÂ¡Ã‚ÂºÃ‚Â£i thÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœng kÃƒÆ’Ã‚Âª phÃƒÂ¡Ã‚ÂºÃ‚Â£n hÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“i.' } });
   }
 });
 
@@ -4576,7 +4605,7 @@ app.post("/api/campaigns/:id/start", (req, res) => {
     CampaignService.validateReadyForStart(req.params.id);
     const transitioned = CampaignRepository.updateCampaignStatus(req.params.id, "ready", "running");
     if (!transitioned) {
-      throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'Campaign Ã„â€˜ÃƒÂ£ Ã„â€˜Ã†Â°Ã¡Â»Â£c xÃ¡Â»Â­ lÃƒÂ½ bÃ¡Â»Å¸i yÃƒÂªu cÃ¡ÂºÂ§u khÃƒÂ¡c.');
+      throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'Campaign Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c xÃƒÂ¡Ã‚Â»Ã‚Â­ lÃƒÆ’Ã‚Â½ bÃƒÂ¡Ã‚Â»Ã…Â¸i yÃƒÆ’Ã‚Âªu cÃƒÂ¡Ã‚ÂºÃ‚Â§u khÃƒÆ’Ã‚Â¡c.');
     }
     addOperatorCampaignAudit(req.params.id, 'started', { status: 'running' });
     campaignRunner.start(req.params.id);
@@ -4592,7 +4621,7 @@ app.post("/api/campaigns/:id/pause", (req, res) => {
     CampaignService.assertFeatureEnabled();
     const campaign = CampaignService.assertTransition(req.params.id, "pause");
     if (!CampaignRepository.updateCampaignStatus(req.params.id, "running", "pausing")) {
-      throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'YÃƒÂªu cÃ¡ÂºÂ§u pause bÃ¡Â»â€¹ trÃƒÂ¹ng.');
+      throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'YÃƒÆ’Ã‚Âªu cÃƒÂ¡Ã‚ÂºÃ‚Â§u pause bÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ trÃƒÆ’Ã‚Â¹ng.');
     }
     addOperatorCampaignAudit(req.params.id, 'pause_requested', { status: 'pausing' });
     CampaignEventService.emit(io, CampaignRepository.getCampaign(req.params.id));
@@ -4622,7 +4651,7 @@ app.post("/api/campaigns/:id/resume", (req, res) => {
         }
       });
     if (!CampaignRepository.updateCampaignStatus(req.params.id, "paused", "running")) {
-      throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'YÃƒÂªu cÃ¡ÂºÂ§u resume bÃ¡Â»â€¹ trÃƒÂ¹ng.');
+      throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'YÃƒÆ’Ã‚Âªu cÃƒÂ¡Ã‚ÂºÃ‚Â§u resume bÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ trÃƒÆ’Ã‚Â¹ng.');
     }
     addOperatorCampaignAudit(req.params.id, 'resumed', { status: 'running' });
     campaignRunner.start(req.params.id);
@@ -4638,7 +4667,7 @@ app.post("/api/campaigns/:id/cancel", (req, res) => {
     CampaignService.assertFeatureEnabled();
     const campaign = CampaignService.assertTransition(req.params.id, "cancel");
     if (!CampaignRepository.updateCampaignStatus(req.params.id, campaign.status, "cancelling")) {
-      throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'YÃƒÂªu cÃ¡ÂºÂ§u cancel bÃ¡Â»â€¹ trÃƒÂ¹ng.');
+      throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'YÃƒÆ’Ã‚Âªu cÃƒÂ¡Ã‚ÂºÃ‚Â§u cancel bÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ trÃƒÆ’Ã‚Â¹ng.');
     }
     addOperatorCampaignAudit(req.params.id, 'cancel_requested', { status: 'cancelling' });
     campaignRunner.start(req.params.id);
@@ -4653,19 +4682,19 @@ app.post("/api/campaigns/:id/recipients/:recipientId/retry", (req, res) => {
   try {
     CampaignService.assertFeatureEnabled();
     let campaign = CampaignRepository.getCampaign(req.params.id);
-    if (!campaign) return sendCampaignError(res, { code: "CAMPAIGN_NOT_FOUND", message: "KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y chiÃ¡ÂºÂ¿n dÃ¡Â»â€¹ch." });
+    if (!campaign) return sendCampaignError(res, { code: "CAMPAIGN_NOT_FOUND", message: "KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y chiÃƒÂ¡Ã‚ÂºÃ‚Â¿n dÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ch." });
     if (["running", "pausing", "cancelling"].includes(campaign.status)) {
-      return sendCampaignError(res, { code: "CAMPAIGN_STATE_CONFLICT", message: "HÃƒÂ£y tÃ¡ÂºÂ¡m dÃ¡Â»Â«ng chiÃ¡ÂºÂ¿n dÃ¡Â»â€¹ch trÃ†Â°Ã¡Â»â€ºc khi retry thÃ¡Â»Â§ cÃƒÂ´ng." });
+      return sendCampaignError(res, { code: "CAMPAIGN_STATE_CONFLICT", message: "HÃƒÆ’Ã‚Â£y tÃƒÂ¡Ã‚ÂºÃ‚Â¡m dÃƒÂ¡Ã‚Â»Ã‚Â«ng chiÃƒÂ¡Ã‚ÂºÃ‚Â¿n dÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹ch trÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºc khi retry thÃƒÂ¡Ã‚Â»Ã‚Â§ cÃƒÆ’Ã‚Â´ng." });
     }
     const recipient = campaign.recipients.find((item) => item.id === req.params.recipientId);
     if (!recipient) {
-      throw new CampaignService.CampaignError('INVALID_RECIPIENT', 'Recipient khÃƒÂ´ng thuÃ¡Â»â„¢c campaign.');
+      throw new CampaignService.CampaignError('INVALID_RECIPIENT', 'Recipient khÃƒÆ’Ã‚Â´ng thuÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢c campaign.');
     }
     if (recipient.status === 'sent') {
-      throw new CampaignService.CampaignError('RECIPIENT_ALREADY_SENT', 'Recipient Ã„â€˜ÃƒÂ£ gÃ¡Â»Â­i thÃƒÂ nh cÃƒÂ´ng.');
+      throw new CampaignService.CampaignError('RECIPIENT_ALREADY_SENT', 'Recipient Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ gÃƒÂ¡Ã‚Â»Ã‚Â­i thÃƒÆ’Ã‚Â nh cÃƒÆ’Ã‚Â´ng.');
     }
     if (recipient.status !== 'failed') {
-      throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'ChÃ¡Â»â€° recipient failed mÃ¡Â»â€ºi cÃƒÂ³ thÃ¡Â»Æ’ retry.');
+      throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'ChÃƒÂ¡Ã‚Â»Ã¢â‚¬Â° recipient failed mÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi cÃƒÆ’Ã‚Â³ thÃƒÂ¡Ã‚Â»Ã†â€™ retry.');
     }
     CampaignEligibilityService.revalidateSnapshotRecipient(recipient, db, {
       getConnection: (accountId) => extensionConnections.get(accountId)
@@ -4675,11 +4704,11 @@ app.post("/api/campaigns/:id/recipients/:recipientId/retry", (req, res) => {
     const shouldRun = ['completed_with_errors', 'failed', 'cancelled'].includes(campaign.status);
     if (shouldRun) {
       if (!CampaignRepository.updateCampaignStatus(req.params.id, campaign.status, 'ready')) {
-        throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'Retry Ã„â€˜ÃƒÂ£ Ã„â€˜Ã†Â°Ã¡Â»Â£c xÃ¡Â»Â­ lÃƒÂ½ bÃ¡Â»Å¸i yÃƒÂªu cÃ¡ÂºÂ§u khÃƒÂ¡c.');
+        throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'Retry Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c xÃƒÂ¡Ã‚Â»Ã‚Â­ lÃƒÆ’Ã‚Â½ bÃƒÂ¡Ã‚Â»Ã…Â¸i yÃƒÆ’Ã‚Âªu cÃƒÂ¡Ã‚ÂºÃ‚Â§u khÃƒÆ’Ã‚Â¡c.');
       }
       CampaignService.validateReadyForStart(req.params.id);
       if (!CampaignRepository.updateCampaignStatus(req.params.id, 'ready', 'running')) {
-        throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'KhÃƒÂ´ng thÃ¡Â»Æ’ khÃ¡Â»Å¸i Ã„â€˜Ã¡Â»â„¢ng retry.');
+        throw new CampaignService.CampaignError('CAMPAIGN_STATE_CONFLICT', 'KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ khÃƒÂ¡Ã‚Â»Ã…Â¸i Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢ng retry.');
       }
     }
     addOperatorCampaignAudit(
@@ -4698,7 +4727,7 @@ app.post("/api/campaigns/:id/recipients/:recipientId/retry", (req, res) => {
 });
 
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ Task 4.2: Broadcast Ã¢â€â‚¬Ã¢â€â‚¬
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Task 4.2: Broadcast ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 app.get('/api/accounts/:id/broadcast/quota', (req, res) => {
   res.json(broadcastEngine.getDailyQuota(req.params.id));
 });
@@ -4706,7 +4735,7 @@ app.get('/api/accounts/:id/broadcast/quota', (req, res) => {
 app.post('/api/accounts/:id/broadcast', async (req, res) => {
   const { thread_ids, message } = req.body;
   if (!thread_ids?.length || !message) {
-    return res.status(400).json({ error: 'ThiÃ¡ÂºÂ¿u thread_ids hoÃ¡ÂºÂ·c message' });
+    return res.status(400).json({ error: 'ThiÃƒÂ¡Ã‚ÂºÃ‚Â¿u thread_ids hoÃƒÂ¡Ã‚ÂºÃ‚Â·c message' });
   }
   try {
     const campaignId = await broadcastEngine.startCampaign({
@@ -4726,10 +4755,10 @@ app.post('/api/broadcast/:campaignId/cancel', (req, res) => {
   res.json(broadcastEngine.cancelCampaign(req.params.campaignId));
 });
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ Task 4.3: AI Config CRUD Ã¢â€â‚¬Ã¢â€â‚¬
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Task 4.3: AI Config CRUD ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 app.get('/api/accounts/:id/ai-config', (req, res) => {
   const config = aiMediator.getConfig(req.params.id);
-  // Mask API key trÃ†Â°Ã¡Â»â€ºc khi trÃ¡ÂºÂ£ vÃ¡Â»Â
+  // Mask API key trÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºc khi trÃƒÂ¡Ã‚ÂºÃ‚Â£ vÃƒÂ¡Ã‚Â»Ã‚Â
   if (config?.api_key) config.api_key = config.api_key.slice(0, 8) + '***';
   res.json(config || {});
 });
@@ -4757,7 +4786,7 @@ app.get('/api/ollama/health', async (req, res) => {
 
 // Messages REST API - With UI Guard Filter
 app.get('/api/threads/:id/messages', async (req, res) => {
-  if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i' });
+  if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i' });
   try {
     OutboundDomCorrelationService.collapseStoredMediaCompanions(db, req.params.id);
     OutboundDomCorrelationService.collapseStoredTemporaryIdUpgrades(db, req.params.id);
@@ -4783,7 +4812,7 @@ app.get('/api/threads/:id/messages', async (req, res) => {
 // content/media - used by page_content.js/content.js to re-seed their
 // client-side timestamp-anchor map after a script restart (feature 014).
 app.get('/api/threads/:id/message-timestamps', (req, res) => {
-  if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'KhÃƒÂ´ng tÃƒÂ¬m thÃ¡ÂºÂ¥y hÃ¡Â»â„¢i thoÃ¡ÂºÂ¡i' });
+  if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'KhÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y hÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢i thoÃƒÂ¡Ã‚ÂºÃ‚Â¡i' });
   res.json(ConversationRepository.getMessageTimestamps(req.params.id));
 });
 
@@ -4792,7 +4821,7 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(clientDistPath, 'index.html'));
 });
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 const PORT = process.env.PORT || 5050;
 function startServer() {
   const allowedProfileDirs = db.prepare('SELECT profile_dir FROM accounts WHERE profile_dir IS NOT NULL').all()
@@ -4817,34 +4846,34 @@ function startServer() {
     server.listen(PORT, '0.0.0.0');
   });
 
-  // DÃ¡Â»Ân dÃ¡ÂºÂ¹p cÃƒÂ¡c tÃƒÂªn rÃƒÂ¡c hÃ¡Â»â€¡ thÃ¡Â»â€˜ng (vÃƒÂ­ dÃ¡Â»Â¥: "TÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ tin nhÃ¡ÂºÂ¯n", "HÃ¡Â»â„¢p thÃ†Â° Ã„â€˜Ã¡ÂºÂ¿n") Ã„â€˜ÃƒÂ£ lÃ†Â°u vÃƒÂ o CSDL trÃ†Â°Ã¡Â»â€ºc Ã„â€˜ÃƒÂ¢y
+  // DÃƒÂ¡Ã‚Â»Ã‚Ân dÃƒÂ¡Ã‚ÂºÃ‚Â¹p cÃƒÆ’Ã‚Â¡c tÃƒÆ’Ã‚Âªn rÃƒÆ’Ã‚Â¡c hÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡ thÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœng (vÃƒÆ’Ã‚Â­ dÃƒÂ¡Ã‚Â»Ã‚Â¥: "TÃƒÂ¡Ã‚ÂºÃ‚Â¥t cÃƒÂ¡Ã‚ÂºÃ‚Â£ tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n", "HÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢p thÃƒâ€ Ã‚Â° Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚ÂºÃ‚Â¿n") Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ lÃƒâ€ Ã‚Â°u vÃƒÆ’Ã‚Â o CSDL trÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºc Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â¢y
   try {
     const dirtySystemNames = [
-      'TÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ tin nhÃ¡ÂºÂ¯n', 'TÃ¡ÂºÂ¥t cÃ¡ÂºÂ£', 'All messages', 'All',
-      'Tin nhÃ¡ÂºÂ¯n trÃ¡Â»Â±c tiÃ¡ÂºÂ¿p', 'Direct messages',
-      'HÃ¡Â»â„¢p thÃ†Â° Ã„â€˜Ã¡ÂºÂ¿n', 'HÃ¡Â»â„¢p thÃ†Â°', 'Inbox',
-      'ChÃ†Â°a Ã„â€˜Ã¡Â»Âc', 'Unread', 'Ã„ÂÃƒÂ£ xong', 'Done',
-      'GÃ¡ÂºÂ¯n dÃ¡ÂºÂ¥u sao', 'Ã„ÂÃƒÂ£ gÃ¡ÂºÂ¯n dÃ¡ÂºÂ¥u sao', 'Starred',
-      'Spam', 'ThÃ†Â° rÃƒÂ¡c', 'Ã„Âang', 'Facebook', 'Messenger', 'Meta'
+      'TÃƒÂ¡Ã‚ÂºÃ‚Â¥t cÃƒÂ¡Ã‚ÂºÃ‚Â£ tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n', 'TÃƒÂ¡Ã‚ÂºÃ‚Â¥t cÃƒÂ¡Ã‚ÂºÃ‚Â£', 'All messages', 'All',
+      'Tin nhÃƒÂ¡Ã‚ÂºÃ‚Â¯n trÃƒÂ¡Ã‚Â»Ã‚Â±c tiÃƒÂ¡Ã‚ÂºÃ‚Â¿p', 'Direct messages',
+      'HÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢p thÃƒâ€ Ã‚Â° Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚ÂºÃ‚Â¿n', 'HÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢p thÃƒâ€ Ã‚Â°', 'Inbox',
+      'ChÃƒâ€ Ã‚Â°a Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã‚Âc', 'Unread', 'Ãƒâ€žÃ‚ÂÃƒÆ’Ã‚Â£ xong', 'Done',
+      'GÃƒÂ¡Ã‚ÂºÃ‚Â¯n dÃƒÂ¡Ã‚ÂºÃ‚Â¥u sao', 'Ãƒâ€žÃ‚ÂÃƒÆ’Ã‚Â£ gÃƒÂ¡Ã‚ÂºÃ‚Â¯n dÃƒÂ¡Ã‚ÂºÃ‚Â¥u sao', 'Starred',
+      'Spam', 'ThÃƒâ€ Ã‚Â° rÃƒÆ’Ã‚Â¡c', 'Ãƒâ€žÃ‚Âang', 'Facebook', 'Messenger', 'Meta'
     ];
     const placeholders = dirtySystemNames.map(() => '?').join(',');
     db.prepare(`
       UPDATE threads 
-      SET contact_name = 'KhÃƒÂ¡ch hÃƒÂ ng' 
+      SET contact_name = 'KhÃƒÆ’Ã‚Â¡ch hÃƒÆ’Ã‚Â ng' 
       WHERE contact_name IN (${placeholders}) 
-         OR contact_name LIKE 'Ã„Âang hoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng%' 
-         OR contact_name LIKE 'HoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng%'
+         OR contact_name LIKE 'Ãƒâ€žÃ‚Âang hoÃƒÂ¡Ã‚ÂºÃ‚Â¡t Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢ng%' 
+         OR contact_name LIKE 'HoÃƒÂ¡Ã‚ÂºÃ‚Â¡t Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢ng%'
     `).run(...dirtySystemNames);
     db.prepare(`
       UPDATE contacts 
-      SET name = 'KhÃƒÂ¡ch hÃƒÂ ng' 
+      SET name = 'KhÃƒÆ’Ã‚Â¡ch hÃƒÆ’Ã‚Â ng' 
       WHERE name IN (${placeholders}) 
-         OR name LIKE 'Ã„Âang hoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng%' 
-         OR name LIKE 'HoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng%'
+         OR name LIKE 'Ãƒâ€žÃ‚Âang hoÃƒÂ¡Ã‚ÂºÃ‚Â¡t Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢ng%' 
+         OR name LIKE 'HoÃƒÂ¡Ã‚ÂºÃ‚Â¡t Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢ng%'
     `).run(...dirtySystemNames);
 
   } catch (cleanErr) {
-    console.warn('[DB] LÃ¡Â»â€”i dÃ¡Â»Ân dÃ¡ÂºÂ¹p tÃƒÂªn hÃ¡Â»â€¡ thÃ¡Â»â€˜ng:', cleanErr.message);
+    console.warn('[DB] LÃƒÂ¡Ã‚Â»Ã¢â‚¬â€i dÃƒÂ¡Ã‚Â»Ã‚Ân dÃƒÂ¡Ã‚ÂºÃ‚Â¹p tÃƒÆ’Ã‚Âªn hÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¡ thÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœng:', cleanErr.message);
   }
 
   // Drains message_queue (Page-thread sends routed there by sendViaExtension,
