@@ -1473,7 +1473,8 @@
         const parsedText = String(parsed.content || '').toLocaleLowerCase('vi-VN');
         const isCallRow = /(?:cu?c g?i|nh?|b? l?|audio call|video call|missed call|call ended)/i.test(parsedText);
         const isMediaRow = Boolean(parsed.media_url || (parsed.media_type && parsed.media_type !== 'text'));
-        // This recovery pass is incoming-only. Never forward an outgoing DOM bubble as CONTACT.\r\n        // The previous hard-coded is_outgoing:false here manufactured the ghost text.\r\n        if (parsed.is_outgoing) {\r\n          markObservedOutgoing(thread_id, parsed.content);\r\n          continue;\r\n        }\r\n        if (isRecentObservedOutgoing(thread_id, parsed.content)) continue;
+        if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
+        if (!parsed.is_outgoing && isRecentObservedOutgoing(thread_id, parsed.content)) continue;
         // Outgoing media is required here: MutationObserver often sees the
         // video shell before Facebook hydrates its native id/media element.
         // The periodic tail pass then provides the confirmation that clears
