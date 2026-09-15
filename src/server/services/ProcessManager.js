@@ -357,6 +357,7 @@ class ProcessManager {
         defaultViewport: null,
         enableExtensions: true,
         args: [
+          '--start-maximized',
           '--no-first-run',
           '--no-default-browser-check',
           '--disable-background-mode',
@@ -474,6 +475,7 @@ class ProcessManager {
         defaultViewport: null,
         enableExtensions: true,
         args: [
+          '--start-maximized',
           '--no-first-run',
           '--no-default-browser-check',
           '--disable-background-mode',

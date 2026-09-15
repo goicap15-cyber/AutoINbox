@@ -16,6 +16,7 @@ import { sortDueReminders } from '../utils/reminderPresentation.js';
 export default function ConversationSidebar({
   threads = [], activeThreadId, onSelectThread,
   activeTab, onTabChange, searchQuery, onSearchChange, isConnected, onOpenSearch,
+  sidebarSyncActive = false, sidebarSyncSecondsRemaining = 0, onToggleSidebarSync,
   waitingCount = 0,
   accounts = [],
   inboxSources = [],
@@ -92,15 +93,21 @@ export default function ConversationSidebar({
             <div className="relative">
               <button
                 type="button"
-                onClick={() => setIsSyncMenuOpen((open) => !open)}
+                onClick={() => { setIsSyncMenuOpen(false); onToggleSidebarSync?.(); }}
                 disabled={!isConnected}
-                className="p-1.5 hover:bg-[var(--color-bg-hover)] rounded-full transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
-                title="Điều khiển đồng bộ Facebook"
-                aria-label="Điều khiển đồng bộ Facebook"
-                aria-haspopup="menu"
-                aria-expanded={isSyncMenuOpen}
+                className={`relative p-1.5 rounded-full transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${sidebarSyncActive ? 'bg-[var(--color-accent-subtle)] text-[var(--color-accent)]' : 'hover:bg-[var(--color-bg-hover)]'}`}
+                title={sidebarSyncActive
+                  ? `\u0110ang \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i + Tin nh\u1eafn ch\u1edd (c\u00f2n ${sidebarSyncSecondsRemaining}s). B\u1ea5m \u0111\u1ec3 t\u1eaft.`
+                  : 'B\u1eadt \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i + Tin nh\u1eafn ch\u1edd trong 1 ph\u00fat'}
+                aria-label={sidebarSyncActive ? 'T\u1eaft \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i v\u00e0 Tin nh\u1eafn ch\u1edd' : 'B\u1eadt \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i v\u00e0 Tin nh\u1eafn ch\u1edd trong 1 ph\u00fat'}
+                aria-pressed={sidebarSyncActive}
               >
-                <RefreshCw size={17} className={`text-[var(--color-text-muted)] ${bulkHistoryProgress?.status === 'running' ? 'animate-spin' : ''}`} strokeWidth={1.75} />
+                <RefreshCw size={17} className={sidebarSyncActive ? 'animate-spin text-[var(--color-accent)]' : 'text-[var(--color-text-muted)]'} strokeWidth={1.75} />
+                {sidebarSyncActive && (
+                  <span className="absolute -right-2 -bottom-2 min-w-[22px] h-4 px-1 rounded-full bg-[var(--color-accent)] text-[var(--color-text-on-accent)] text-[8px] font-bold flex items-center justify-center shadow-sm">
+                    {sidebarSyncSecondsRemaining}s
+                  </span>
+                )}
               </button>
               {isSyncMenuOpen && (
                 <div role="menu" className="absolute right-0 top-9 z-50 w-40 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-panel)] p-1.5 shadow-xl">

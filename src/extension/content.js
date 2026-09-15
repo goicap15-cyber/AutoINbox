@@ -1373,6 +1373,12 @@
           }
         }
 
+        // The explicit composer confirmation/network intercept owns plain outgoing text.
+        // The DOM observer must not forward the same rendered bubble a second time.
+        const isPlainOutgoingDomText = parsed.is_outgoing
+          && !parsed.media_url
+          && (!parsed.media_type || parsed.media_type === 'text');
+        if (isPlainOutgoingDomText) return;
         try {
           if (chrome?.runtime?.id) {
             console.log(`[DOM Observer] matched message: thread_id=${thread_id} | id=${fbMessageId} | media_type=${parsed.media_type || 'text'} | content="${parsed.content.substring(0, 40)}" | tsMs=${tsMs}`);

@@ -223,7 +223,7 @@ class OutboundDomCorrelationService {
         AND datetime(outbound.created_at) >= datetime('now', '-' || ? || ' seconds')
         AND (queued.id IS NULL OR (queued.attachment_id IS NULL AND queued.manifest_id IS NULL))
         AND outbound.attachment_id IS NULL AND (outbound.media_type IS NULL OR outbound.media_type = 'text')
-      ORDER BY outbound.id DESC LIMIT 1
+      ORDER BY outbound.id ASC LIMIT 1
     `).get(threadId, windowSeconds);
     if (!candidate) return null;
     const pendingContent = String(candidate.content || '').trim();

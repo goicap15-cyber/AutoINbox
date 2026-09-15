@@ -25,6 +25,7 @@ import { MessageSquare } from 'lucide-react';
 import { sortThreadsByActivity } from './utils/threadActivity.js';
 
 const THEME_VERSION = 'chat-redesign-v1';
+const WAITING_REQUEST_REFRESH_MS = 15000;
 
 // Older/background sync payloads can create a thread before Messenger returns
 // the actual display name.  Do not keep showing that placeholder once the
@@ -297,6 +298,8 @@ export default function App() {
   const [historySyncingThreadId, setHistorySyncingThreadId] = useState(null);
   const historySyncTimeoutRef = useRef(null);
   const requestedFacebookSyncRef = useRef(null);
+  const [sidebarSyncUntil, setSidebarSyncUntil] = useState(0);
+  const [sidebarSyncClock, setSidebarSyncClock] = useState(() => Date.now());
 
   const [campaignSelectionMode, setCampaignSelectionMode] = useState(false);
   const [selectedCampaignThreadIds, setSelectedCampaignThreadIds] = useState([]);
@@ -505,6 +508,49 @@ export default function App() {
   useEffect(() => { activeThreadIdRef.current = activeThreadId; }, [activeThreadId]);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
 
+  const sidebarSyncActive = isConnected && sidebarSyncUntil > sidebarSyncClock;
+  const sidebarSyncSecondsRemaining = sidebarSyncActive
+    ? Math.max(1, Math.ceil((sidebarSyncUntil - sidebarSyncClock) / 1000))
+    : 0;
+
+  useEffect(() => {
+    if (!sidebarSyncUntil) return undefined;
+    const updateClock = () => {
+      const now = Date.now();
+      setSidebarSyncClock(now);
+      if (now >= sidebarSyncUntil) setSidebarSyncUntil(0);
+    };
+    updateClock();
+    const timer = setInterval(updateClock, 1000);
+    return () => clearInterval(timer);
+  }, [sidebarSyncUntil]);
+
+  useEffect(() => {
+    if (!socket) return undefined;
+    const handleSyncWindowState = ({ enabled, expires_at } = {}) => {
+      const nextUntil = enabled ? Number(expires_at || 0) : 0;
+      setSidebarSyncUntil(nextUntil > Date.now() ? nextUntil : 0);
+      setSidebarSyncClock(Date.now());
+    };
+    socket.on('SIDEBAR_SYNC_WINDOW_STATE', handleSyncWindowState);
+    return () => socket.off('SIDEBAR_SYNC_WINDOW_STATE', handleSyncWindowState);
+  }, [socket]);
+
+  const handleToggleSidebarSync = useCallback(() => {
+    if (!socket || !isConnected) return;
+    const enable = !sidebarSyncActive;
+    socket.emit('SET_SIDEBAR_SYNC_WINDOW', {
+      enabled: enable,
+      duration_ms: 60000,
+      account_ids: accountsRef.current.map((account) => account.id).filter(Boolean)
+    });
+    // Optimistic feedback keeps the button responsive while the server starts
+    // or closes the two background Messenger surfaces.
+    const now = Date.now();
+    setSidebarSyncClock(now);
+    setSidebarSyncUntil(enable ? now + 60000 : 0);
+  }, [socket, isConnected, sidebarSyncActive]);
+
   const requestThreadNavigation = useCallback((thread) => {
     if (!thread) return;
     setActiveThreadId(thread.id);
@@ -521,13 +567,29 @@ export default function App() {
     setActiveThreadId(null);
     setThreads([]);
     setActiveTab(normalizedTab);
-    if (normalizedTab === 'WAITING' && socket && isConnected) {
+    if (normalizedTab === 'WAITING' && sidebarSyncActive && socket && isConnected) {
       for (const account of accountsRef.current) {
         if (!account?.id) continue;
         socket.emit('REQUEST_SYNC_MESSAGE_REQUESTS', { account_id: account.id });
       }
     }
-  }, [socket, isConnected]);
+  }, [socket, isConnected, sidebarSyncActive]);
+
+  // Message Requests live on a separate Facebook surface. Keep asking for
+  // that dedicated scan while WAITING is visible, including after a socket
+  // reconnect or when accounts finish loading after the user opened the tab.
+  useEffect(() => {
+    if (activeTab !== 'WAITING' || !sidebarSyncActive || !socket || !isConnected) return undefined;
+    const requestWaitingThreads = () => {
+      for (const account of accountsRef.current) {
+        if (!account?.id) continue;
+        socket.emit('REQUEST_SYNC_MESSAGE_REQUESTS', { account_id: account.id });
+      }
+    };
+    requestWaitingThreads();
+    const refreshTimer = setInterval(requestWaitingThreads, WAITING_REQUEST_REFRESH_MS);
+    return () => clearInterval(refreshTimer);
+  }, [activeTab, sidebarSyncActive, socket, isConnected, accounts]);
 
   const requestThreadMessageSync = useCallback((threadId, direction = 'initial', scrollDelta = 0) => {
     if (!socket || !isConnected || !threadId) return;
@@ -694,9 +756,13 @@ export default function App() {
             ? String(newMsg.attachment_id) === String(message.attachment_id)
             : true;
           const sameMediaType = !incomingMediaType || !existingMediaType || incomingMediaType === existingMediaType;
+          // Text can be intentionally sent twice. Only a still-pending local
+          // bubble may absorb its own DOM confirmation; a sent text is final.
+          const localDelivery = String(message.delivery_status || message.status || '').toLowerCase();
+          const awaitingTextConfirmation = ['pending', 'sending', 'queued', 'awaiting_confirmation'].includes(localDelivery);
           return newIsMedia
             ? existingIsMedia && sameAttachment && sameMediaType
-            : !existingIsMedia && String(message.content || '') === String(newMsg.content || '');
+            : awaitingTextConfirmation && !existingIsMedia && String(message.content || '') === String(newMsg.content || '');
         });
         if (newMsg.client_message_id) {
           // Feature 021: a Page send's local optimistic bubble is created
@@ -1355,10 +1421,17 @@ export default function App() {
           attachment: payloadOrText?.attachment || null
         };
     if (!payload.client_message_id) throw new Error('Thiếu mã tin nhắn phía CRM.');
+    const hasAttachment = Boolean(payload.attachment_id || payload.attachment?.media_type || payload.attachment?.preview_url);
+    // An attachment must never reuse text left in the composer from an earlier
+    // send: its queue owns the media bubble and has no standalone caption.
+    const outboundContent = hasAttachment ? '' : String(payload.content || '').trim();
+    // Do not create a phantom CRM bubble for an empty transport event.
+    // Real video/image sends always carry an attachment identity.
+    if (!String(payload.content || '').trim() && !hasAttachment) return;
 
     const newMsg = {
       client_message_id: payload.client_message_id,
-      content: payload.content,
+      content: outboundContent,
       attachment_id: payload.attachment_id,
       attachment: payload.attachment,
       media_type: payload.attachment?.media_type || 'text',
@@ -1397,7 +1470,7 @@ export default function App() {
         contract_version: payload.attachment_id || payload.attachment ? 2 : 1,
         thread_id: threadIdStr,
         client_message_id: payload.client_message_id,
-        content: payload.content,
+        content: outboundContent,
         attachment_id: payload.attachment_id
       });
       return;
@@ -1676,6 +1749,9 @@ export default function App() {
         waitingCount={waitingCount}
         searchQuery={searchQuery} onSearchChange={setSearchQuery}
         isConnected={isConnected} onOpenSearch={() => setActiveModal('search')}
+        sidebarSyncActive={sidebarSyncActive}
+        sidebarSyncSecondsRemaining={sidebarSyncSecondsRemaining}
+        onToggleSidebarSync={handleToggleSidebarSync}
         accounts={accounts}
         inboxSources={inboxSources}
         leadStatuses={leadStatuses}

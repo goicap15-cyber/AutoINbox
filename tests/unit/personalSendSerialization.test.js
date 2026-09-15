@@ -84,6 +84,19 @@ test('campaign personal sends use durable external thread identity and fail clos
   assert.match(source, /assertCampaignRecipientIdentity\(expected_contact_name, visibleContactName, strict_recipient_identity/);
   assert.match(source, /if \(strict_recipient_identity\) throw err/);
 });
+test('campaign recipient composer is thread-bound even when selected contacts share the same name', () => {
+  const source = fs.readFileSync('src/extension/background.js', 'utf8');
+  assert.match(source, /async function prepareCampaignRecipientComposer\(tabId, targetThreadId/);
+  assert.match(source, /forceCleanViewport: strict_recipient_identity/);
+  assert.equal((source.match(/forceCleanViewport: strict_recipient_identity/g) || []).length, 2);
+  assert.match(source, /stable_polls: 1/);
+  assert.match(source, /data-crm-campaign-recipient-thread/);
+  assert.match(source, /Campaign route changed before text insert/);
+  assert.match(source, /React may replace the verified composer node between polls/);
+  assert.match(source, /const box = boundBox \|\| freshCampaignBox/);
+  assert.match(source, /stage: 'campaign_recipient_composer_timeout'/);
+  assert.match(source, /if \(strict_recipient_identity\) await confirmFromRenderedBubble/);
+});
 test('a trusted attachment click is a single submit and history retains url-less media confirmations', () => {
   const extensionSource = fs.readFileSync('src/extension/background.js', 'utf8');
   const serverSource = fs.readFileSync('src/server/server.js', 'utf8');
@@ -94,6 +107,13 @@ test('a trusted attachment click is a single submit and history retains url-less
   assert.match(serverSource, /m\.media_type && m\.media_type !== 'text'/);
   assert.match(serverSource, /BACKEND_HISTORY_MEDIA_ECHO_COLLAPSED/);
 });
+test('composer media confirmation uses the existing outbound correlation path', () => {
+  const serverSource = fs.readFileSync('src/server/server.js', 'utf8');
+  assert.match(serverSource, /const isTrustedOutgoingObservation =[\s\S]+?m\.source === 'composer_confirmation'/);
+  assert.match(serverSource, /isOutgoing && isTrustedOutgoingObservation &&/);
+  assert.match(serverSource, /if \(isTrustedOutgoingObservation && isOutgoing\)/);
+});
+
 test('message_queue migration accepts image/video/file and failed cleanup does not poison the next send', () => {
   const migrationSource = fs.readFileSync('src/server/database/db.js', 'utf8');
   const extensionSource = fs.readFileSync('src/extension/background.js', 'utf8');

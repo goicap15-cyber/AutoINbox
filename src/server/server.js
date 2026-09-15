@@ -1018,6 +1018,15 @@ wss.on('connection', (ws, req) => {
               type: 'REGISTER_ACCOUNT_ACK',
               data: { account_id, status: 'SUCCESS', pending_key }
             }));
+            if (!pending_key && !InboxSyncScheduler.isSyncWindowActive(account_id)) {
+              // Profiles upgraded from older releases can still contain the two
+              // dedicated polling tabs. Close them on registration while the
+              // new opt-in sync window is off.
+              ws.send(JSON.stringify({
+                type: 'SET_SIDEBAR_SYNC_WINDOW',
+                data: { account_id, enabled: false, reason: 'register_idle' }
+              }));
+            }
             const bootstrapState = newAccountBootstrapSyncs.get(String(account_id));
             if (!pending_key && bootstrapState?.awaitingSetup) {
               newAccountBootstrapSyncs.delete(String(account_id));
@@ -1248,7 +1257,11 @@ wss.on('connection', (ws, req) => {
 
         case 'NEW_MESSAGE_RECEIVED': {
           const m = msg.data;
-          const threadId = String(m.thread_id || '');
+          const threadId = String(m.thread_id || '');          // Emit the durable message as soon as SQLite accepts it. Contact
+          // enrichment, avatar downloads and campaign/phone automation can be
+          // slow on the first message of a thread; they must not delay the
+          // chat bubble or make the first realtime event appear to be lost.
+          let realtimeMessageEmittedEarly = false;
           console.log(`[WS] 📩 Nhận NEW_MESSAGE_RECEIVED | Source: ${m.source || 'unknown'} | Thread: ${threadId} | FB Message ID: ${m.fb_message_id} | Content: "${sanitizeLog(m.content, 80)}"`);
           if (!threadId || threadId === 'unknown_dom' || threadId.trim() === '') {
             console.warn(`[WS] ⚠️ Bỏ qua tin nhắn từ Thread ID không hợp lệ: "${threadId}"`);
@@ -1352,7 +1365,18 @@ wss.on('connection', (ws, req) => {
 
 
           const cleanedContent = cleanMessageText(m.content);
-          const hasMediaPayload = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
+          const isDomObserverRow = m.source === 'dom_observer' || m.source === 'page_dom_observer';
+          // A type alone is only a Messenger DOM shell. Treat media as real
+          // only after its URL/path/attachment identity is available.
+          const hasMediaPayload = !!(m.media_url || m.local_media_path || m.attachment_id);
+          const isBareDomMediaShell = isDomObserverRow
+            && String(m.fb_message_id || '').startsWith('dom_')
+            && !hasMediaPayload
+            && m.media_type && m.media_type !== 'text' && m.media_type !== 'call';
+          if (isBareDomMediaShell) {
+            console.log(`[WS] Backend Guard: skip unhydrated DOM media shell: ${sanitizeLog(cleanedContent, 60)}`);
+            break;
+          }
 
           // Before the junk/system-text guards below get a chance to drop this
           // event, check whether its RAW (pre-cleaning) text matches something
@@ -1388,6 +1412,21 @@ wss.on('connection', (ws, req) => {
           // Meta Page can inject this lead-activity notice repeatedly while a
           // thread reloads. It is never customer content, even when it arrives
           // without an FB message id, so reject it before persistence/capture.
+// DOM rows often expose the sender heading as a standalone text node.
+          // It is metadata, not a customer message; reject it before persistence.
+          const knownContactName = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(canonicalThreadId)?.contact_name || '';
+          const observedPersonLabels = [m.sender_name, m.contact_name, knownContactName]
+            .map((value) => String(value || '').trim())
+            .filter(Boolean);
+          const normalizedObservedContent = String(cleanedContent || '').trim().toLocaleLowerCase('vi-VN');
+          const senderLabelOnly = !hasMediaPayload
+            && isDomObserverRow
+            && normalizedObservedContent
+            && observedPersonLabels.some((label) => normalizedObservedContent === label.toLocaleLowerCase('vi-VN'));
+          if (senderLabelOnly) {
+            console.log(`[WS] Backend Guard: bỏ qua tên người gửi bị parse thành nội dung: "${sanitizeLog(cleanedContent, 60)}"`);
+            break;
+          }
           if (!hasMediaPayload && isKnownPageSystemNotice(cleanedContent)) {
             console.log(`[WS] ℹ️ Backend Guard: Bỏ qua thông báo hệ thống Meta lặp lại từ thread ${threadId}`);
             break;
@@ -1429,6 +1468,12 @@ wss.on('connection', (ws, req) => {
           console.log(`[WS] 🔍 Debug Outgoing | Thread: ${threadId} | Source: ${m.source} | account_id: ${targetAccountId} | thread_account_id: ${threadAccountId} | sender_id: ${m.sender_id} | sender_name: ${m.sender_name} | raw is_outgoing: ${m.is_outgoing} | final is_outgoing: ${finalIsOutgoing}`);
 
           const isPageDomObservation = m.source === 'page_dom_observer';
+          // Composer confirmations are the authoritative Facebook echo for a
+          // CRM attachment send. Correlate them just like existing DOM echoes
+          // instead of persisting a second image/video bubble.
+          const isTrustedOutgoingObservation = m.source === 'dom_observer'
+            || m.source === 'page_dom_observer'
+            || m.source === 'composer_confirmation';
           const hasBooleanDirection = m.is_outgoing === true || m.is_outgoing === false
             || m.is_outgoing === 1 || m.is_outgoing === 0;
           // New Page events must carry an explicit high-confidence direction.
@@ -1510,7 +1555,7 @@ wss.on('connection', (ws, req) => {
           }
           // Composer fallback không có official GraphQL ID; ghép confirmation DOM
           // vào bản pending gần nhất cùng thread/nội dung thay vì tạo bubble thứ hai.
-          if (isOutgoing && (m.source === 'dom_observer' || m.source === 'page_dom_observer') && (m.content || m.media_url || (m.media_type && m.media_type !== 'text'))) {
+          if (isOutgoing && isTrustedOutgoingObservation && (m.content || m.media_url || (m.media_type && m.media_type !== 'text'))) {
             console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_OUTGOING_RECEIVED', thread_id: String(threadId), fb_message_id: m.fb_message_id || null, at: new Date().toISOString() }));
             let skipPendingCorrelation = false;
             // Fix: Tránh crash UNIQUE constraint khi DOM observer gửi lại tin nhắn cũ có trùng content
@@ -1586,7 +1631,7 @@ wss.on('connection', (ws, req) => {
                       AND outbound.delivery_status = 'pending'
                       AND outbound.attachment_id IS NULL AND (outbound.media_type IS NULL OR outbound.media_type = 'text')
                       AND (queued.id IS NULL OR (queued.attachment_id IS NULL AND queued.manifest_id IS NULL))
-                    ORDER BY outbound.id DESC LIMIT 1
+                    ORDER BY outbound.id ASC LIMIT 1
                   `).get(internalThreadId, m.content);
 
               if (!pending) {
@@ -1615,10 +1660,13 @@ wss.on('connection', (ws, req) => {
               // a plain insert - a real duplicate row for the same send.
               // Recognize "already sent, same content, different id, very
               // recent" as an id upgrade and update in place instead.
-               if (m.fb_message_id) {
-                 const observedAsMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
+               // Text rows carry a CRM client_message_id through their whole lifecycle.
+               // Do not use content-based temporary-id upgrades for text:
+               // two identical sends are two independent messages.
+               const observedAsMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
+               if (m.fb_message_id && observedAsMedia) {
                  const recentSent = OutboundDomCorrelationService.findTemporaryIdUpgrade(
-                   db, canonicalThreadId, { ...m, timestamp_ms: tsMs, created_at: createdAt }, observedAsMedia
+                   db, canonicalThreadId, { ...m, timestamp_ms: tsMs, created_at: createdAt }, true
                  );
                 if (recentSent) {
                   db.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?').run(m.fb_message_id, recentSent.id);
@@ -1662,7 +1710,7 @@ wss.on('connection', (ws, req) => {
           // Không được dùng một media outgoing bất kỳ trong 5 phút để loại một
           // media customer mới. Điều kiện cũ làm ảnh/video khách gửi biến mất
           // chỉ vì CRM vừa gửi ảnh/video trong cùng hội thoại.
-          if ((m.source === 'dom_observer' || m.source === 'page_dom_observer') && isOutgoing) {
+          if (isTrustedOutgoingObservation && isOutgoing) {
             const isMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
             let outgoingMatch = null;
 
@@ -1829,6 +1877,28 @@ wss.on('connection', (ws, req) => {
             // move the bubble without inserting a duplicate message.
           }
 
+          if (wasNewMessage || directionWasUpdated || mediaWasUpdated) {
+            const earlyPersistedMessage = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+            const earlyThread = db.prepare(`
+              SELECT id, external_thread_id, account_id, contact_name, avatar_url,
+                     last_message, last_activity, is_unread, inbox_folder, source_id
+              FROM threads WHERE id = ?
+            `).get(earlyPersistedMessage?.thread_id || canonicalThreadId || m.thread_id);
+            if (earlyPersistedMessage) {
+              io.emit('NEW_MESSAGE', {
+                ...m,
+                ...earlyPersistedMessage,
+                account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null,
+                timestamp_ms: tsMs,
+                timestamp_source: tsSource,
+                created_at: createdAt,
+                is_outgoing: !!isOutgoing,
+                direction_status: directionStatus,
+                thread_summary: earlyThread || null
+              });
+              realtimeMessageEmittedEarly = true;
+            }
+          }
           // Update contact name if provided and not yet properly set
           if (m.contact_name && !isInvalidContactName(m.contact_name)) {
             const cleanName = m.contact_name.trim();
@@ -2013,6 +2083,17 @@ wss.on('connection', (ws, req) => {
                    last_message, last_activity, is_unread, inbox_folder, source_id
             FROM threads WHERE id = ?
           `).get(persistedMessage?.thread_id || canonicalThreadId || m.thread_id);
+          if (realtimeMessageEmittedEarly) {
+            // The durable row was already published immediately after insert.
+            // Keep the later enrichment/automation path from emitting it twice.
+            if (msg.outbox_id && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'BACKEND_OUTBOX_ACK',
+                data: { outbox_id: String(msg.outbox_id) }
+              }));
+            }
+            break;
+          }
           const msgPayload = {
             ...m,
             ...(persistedMessage || {}),
@@ -2180,19 +2261,39 @@ wss.on('connection', (ws, req) => {
                     : 'Chưa có tin nhắn';
                 }
 
+                const normalizedPreviousThread = previousThread
+                  ? { ...previousThread, last_message: cleanMessageText(previousThread.last_message) }
+                  : null;
+                const isActivitySummary = isSidebarActivitySummary(t.last_message);
+                const hasStrongIncomingSignal = Number(t.is_unread) === 1 || t.is_like === true;
+                const needsOutboundEchoLookup = Boolean(
+                  normalizedPreviousThread
+                  && cleanLastMsg
+                  && normalizedPreviousThread.last_message !== cleanLastMsg
+                  && !isActivitySummary
+                  && t.preview_is_outgoing !== true
+                  && !hasStrongIncomingSignal
+                );
+                const hasRecentMatchingOutbound = needsOutboundEchoLookup
+                  ? ConversationRepository.hasRecentMatchingOutgoing(existingInternalThreadId, cleanLastMsg, db, {
+                      // Sidebar timestamps are synthetic. A hidden Messenger tab
+                      // can expose an older self-preview many minutes later; hold
+                      // that provisional echo until native history confirms it.
+                      windowMs: 60 * 60 * 1000
+                    })
+                  : false;
                 const incomingPreviewChanged = isChangedIncomingSidebarPreview({
-                  previousThread: previousThread
-                    ? { ...previousThread, last_message: cleanMessageText(previousThread.last_message) }
-                    : null,
+                  previousThread: normalizedPreviousThread,
                   incomingThread: t,
                   cleanLastMessage: cleanLastMsg,
-                  isActivitySummary: isSidebarActivitySummary(t.last_message)
+                  isActivitySummary,
+                  hasRecentMatchingOutbound
                 });
                 const storedThread = ConversationRepository.upsertThread({
                   id: threadId,
                   external_thread_id: t.external_thread_id || threadId,
                   account_id: account_id,
-                  thread_url: t.thread_url || null,
+                              thread_url: t.thread_url || null,
                   contact_name: name,
                   last_message: cleanLastMsg,
                   is_unread: t.is_unread,
@@ -2207,8 +2308,7 @@ wss.on('connection', (ws, req) => {
                     thread_id: canonicalThreadId,
                     external_thread_id: t.external_thread_id || threadId,
                     thread_url: t.thread_url || previousThread?.thread_url || null,
-                    page_id: t.source_type === 'page_messenger' ? (t.page_id || null) : null,
-                    contact_name: name || previousThread?.contact_name || null,
+                          contact_name: name || previousThread?.contact_name || null,
                     preview_content: cleanLastMsg,
                     preview_is_like: t.is_like === true
                   });
@@ -3095,6 +3195,22 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('SET_SIDEBAR_SYNC_WINDOW', ({ enabled, duration_ms = 60000, account_ids = [] } = {}) => {
+    const requestedIds = Array.isArray(account_ids) && account_ids.length
+      ? account_ids.map((id) => String(id || '')).filter(Boolean)
+      : enterpriseAccess.listAccounts(socket.user).map((account) => String(account.id));
+    const allowedIds = [...new Set(requestedIds)].filter((accountId) => enterpriseAccess.canAccessAccount(socket.user, accountId));
+    const states = allowedIds.map((accountId) => enabled === true
+      ? { account_id: accountId, ...InboxSyncScheduler.startSyncWindow(accountId, duration_ms) }
+      : { account_id: accountId, ...InboxSyncScheduler.stopSyncWindow(accountId, 'operator_toggle') });
+    const expiresAt = states.reduce((latest, state) => Math.max(latest, Number(state.expires_at || 0)), 0);
+    socket.emit('SIDEBAR_SYNC_WINDOW_STATE', {
+      enabled: enabled === true && states.length > 0,
+      expires_at: expiresAt,
+      accounts: states
+    });
+  });
+
   socket.on('REQUEST_SYNC_THREADS', ({ account_id }) => {
     if (!account_id) return;
     if (!InboxSyncScheduler.requestSidebarSync(account_id, 'crm_manual', { force: true })) {
@@ -3327,7 +3443,9 @@ io.on('connection', (socket) => {
         const accepted = RichMessageService.submit({
           threadId: thread_id,
           clientMessageId: client_message_id,
-          content,
+          // Rich attachments own a media bubble; ignore any stale composer
+          // text so a video/image cannot also create a second text message.
+          content: attachment_id ? '' : content,
           attachmentId: attachment_id || null
         }, {
           database: db,

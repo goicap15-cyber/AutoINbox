@@ -19,7 +19,24 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
   const syncWasActiveRef = useRef(false);
   const localSyncTimeoutRef = useRef(null);
   const [localHistorySyncing, setLocalHistorySyncing] = useState(false);
-  const displayMessages = collapseMessengerMediaCompanions(messages);
+  const displayMessages = collapseMessengerMediaCompanions(messages).filter((msg) => {
+    // A Messenger media row can arrive before its URL is hydrated. Keep that
+    // row only when it has a real media identity; never render empty text
+    // placeholders produced by the transient video shell.
+    const content = String(msg?.content ?? msg?.text_content ?? msg?.text ?? msg?.message ?? '').trim();
+    // media_type alone is not enough to render a message. Messenger emits
+    // empty placeholder rows before the actual attachment URL arrives.
+    const media = Boolean(msg?.media_url || msg?.local_media_path || msg?.attachment_id
+      || msg?.attachment?.preview_url || msg?.attachment?.media_url
+      || msg?.attachment?.local_media_path || msg?.attachment?.id
+      || msg?.media_type === 'call');
+    // A standalone contact heading occasionally arrives as a DOM message.
+    // Never show it as an incoming chat bubble when it has no real media.
+    const contactName = String(activeThread?.contact_name || '').trim().toLocaleLowerCase('vi-VN');
+    const isContactHeading = !Boolean(msg?.is_outgoing) && Boolean(content) && !media
+      && contactName && content.toLocaleLowerCase('vi-VN') === contactName;
+    return Boolean((content || media) && !isContactHeading);
+  });
   // CRM-owned bubbles keep the client identity for their whole lifecycle.
   // The database id and Facebook mid arrive later and must not remount the
   // DOM node or make React treat the same image as a new bubble.
@@ -76,6 +93,23 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     const release = requestAnimationFrame(() => { suppressScrollRef.current = false; });
     return () => cancelAnimationFrame(release);
   }, [messages]);
+
+  // Keep the viewport pinned to the newest message when media/layout
+  // finishes loading. Do not disturb an operator who is reading history.
+  useEffect(() => {
+    const container = containerRef.current;
+    const content = container?.firstElementChild;
+    if (!container || !content || typeof ResizeObserver === 'undefined') return;
+    const keepAtBottom = () => {
+      if (suppressScrollRef.current || !nearBottomRef.current) return;
+      container.scrollTop = container.scrollHeight;
+      lastScrollTopRef.current = container.scrollTop;
+      previousHeightRef.current = container.scrollHeight;
+    };
+    const observer = new ResizeObserver(keepAtBottom);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [activeThread?.id]);
 
   useEffect(() => {
     if (historySyncing) syncWasActiveRef.current = true;

@@ -75,6 +75,20 @@ test('stale sidebar regression after a newer outbound is not a new incoming mess
   db.close();
 });
 
+test('detects only a recent exact outbound text as a possible sidebar echo', () => {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, content TEXT, media_type TEXT, timestamp_ms INTEGER, is_outgoing INTEGER, created_at TEXT)`);
+  db.prepare(`INSERT INTO messages (thread_id, content, media_type, timestamp_ms, is_outgoing, created_at) VALUES
+    ('t1', 'same text', 'text', 190000, 1, '1970-01-01T00:03:10.000Z'),
+    ('t1', 'old text', 'text', 1000, 1, '1970-01-01T00:00:01.000Z'),
+    ('t2', 'same text', 'text', 190000, 1, '1970-01-01T00:03:10.000Z')`).run();
+  const options = { nowMs: 200000, windowMs: 120000, futureToleranceMs: 1 };
+  assert.equal(ConversationRepository.hasRecentMatchingOutgoing('t1', 'same text', db, options), true);
+  assert.equal(ConversationRepository.hasRecentMatchingOutgoing('t1', 'old text', db, options), false);
+  assert.equal(ConversationRepository.hasRecentMatchingOutgoing('t1', 'different', db, options), false);
+  db.close();
+});
+
 test('normalization uses DOM sequence inside the same Facebook minute', () => {
   const db = new Database(':memory:');
   db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, fb_message_id TEXT UNIQUE, timestamp_ms INTEGER, sequence_order REAL, created_at TEXT)`);
