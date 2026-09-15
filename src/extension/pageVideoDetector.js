@@ -36,6 +36,84 @@
   }
 
   /**
+   * Trích xuất link CDN video hoặc thumbnail từ cây React Fiber của phần tử DOM
+   * @param {Element} node - Element node cần kiểm tra
+   * @returns {{ videoUrl: string|null, posterUrl: string|null }}
+   */
+  function extractVideoCdnFromReact(node) {
+    if (!node) return { videoUrl: null, posterUrl: null };
+    try {
+      const keys = Object.keys(node);
+      const reactKey = keys.find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactProps$') || k.startsWith('__reactInternalInstance$'));
+      if (!reactKey) return { videoUrl: null, posterUrl: null };
+
+      let curr = node[reactKey];
+      let depth = 0;
+      let foundVideo = null;
+      let foundPoster = null;
+
+      function scanObject(obj, currentDepth = 0) {
+        if (!obj || typeof obj !== 'object' || currentDepth > 5) return;
+
+        // 1. Kiểm tra các trường chứa link video CDN trực tiếp của Facebook
+        const videoKeys = [
+          'playable_url', 'playable_url_quality_hd', 'browser_native_hd_url',
+          'browser_native_sd_url', 'video_direct_url', 'videoDirectUrl', 'playableUrl'
+        ];
+        for (const vk of videoKeys) {
+          const val = obj[vk];
+          if (typeof val === 'string' && /^https?:\/\//i.test(val)) {
+            if (!foundVideo) foundVideo = val;
+          }
+        }
+
+        // 2. Kiểm tra các trường chứa link poster/thumbnail CDN
+        const posterKeys = [
+          'preview_url', 'previewUrl', 'thumbnail_url', 'thumbnailUrl',
+          'poster_url', 'posterUrl', 'large_preview', 'preview_image',
+          'thumbnail', 'image'
+        ];
+        for (const pk of posterKeys) {
+          const pval = obj[pk];
+          if (typeof pval === 'string' && /^https?:\/\//i.test(pval)) {
+            if (!foundPoster && !pval.includes('/emoji.php') && !pval.includes('/rsrc.php')) foundPoster = pval;
+          } else if (pval && typeof pval === 'object' && typeof pval.uri === 'string' && /^https?:\/\//i.test(pval.uri)) {
+            if (!foundPoster && !pval.uri.includes('/emoji.php') && !pval.uri.includes('/rsrc.php')) foundPoster = pval.uri;
+          }
+        }
+
+        // 3. Duyệt đệ quy các container đính kèm phổ biến của Facebook
+        const containers = [
+          'attachment', 'attachments', 'blob_attachments', 'video_attachments',
+          'extensible_attachment', 'story', 'media', 'video', 'video_delivery'
+        ];
+        for (const ck of containers) {
+          const child = obj[ck];
+          if (Array.isArray(child)) {
+            for (const item of child) scanObject(item, currentDepth + 1);
+          } else if (child && typeof child === 'object') {
+            scanObject(child, currentDepth + 1);
+          }
+        }
+      }
+
+      while (curr && depth < 40) {
+        depth++;
+        const props = curr.memoizedProps || curr.props || (depth === 1 ? curr : null);
+        if (props) {
+          scanObject(props);
+          if (foundVideo) break;
+        }
+        curr = curr.return || curr.child;
+      }
+
+      return { videoUrl: foundVideo || null, posterUrl: foundPoster || null };
+    } catch (_) {
+      return { videoUrl: null, posterUrl: null };
+    }
+  }
+
+  /**
    * Phát hiện video bên trong một messageIdNode (vỏ bọc tin nhắn [data-message-id])
    * @param {Element} messageNode - Element node của tin nhắn
    * @param {string} [captionText] - Nội dung text đã được lọc
@@ -91,13 +169,29 @@
         }
       }
 
+      let effectiveCdnSource = realCdnSource;
+      let effectivePoster = detectedPoster;
+
+      // Nếu DOM không có URL CDN trực tiếp (dạng blob: hoặc stream MSE), bóc tách từ React Fiber
+      if (!effectiveCdnSource || !effectivePoster) {
+        const reactMedia = extractVideoCdnFromReact(video);
+        if (!effectiveCdnSource && reactMedia?.videoUrl) effectiveCdnSource = reactMedia.videoUrl;
+        if (!effectivePoster && reactMedia?.posterUrl) effectivePoster = reactMedia.posterUrl;
+
+        if (!effectiveCdnSource || !effectivePoster) {
+          const nodeReactMedia = extractVideoCdnFromReact(messageNode);
+          if (!effectiveCdnSource && nodeReactMedia?.videoUrl) effectiveCdnSource = nodeReactMedia.videoUrl;
+          if (!effectivePoster && nodeReactMedia?.posterUrl) effectivePoster = nodeReactMedia.posterUrl;
+        }
+      }
+
       const hasPlayerTimeInNode = /\d{1,2}:\d{2}\s*\/\s*\d{1,2}:\d{2}/.test(rawText);
       const hasVideoSignal = Boolean(
         sourceCandidates.length > 0 ||
-        realCdnSource ||
+        effectiveCdnSource ||
         OPEN_VIDEO_LABEL_PATTERN.test(label) ||
         (video.closest && video.closest('[aria-label*="video" i]')) ||
-        detectedPoster ||
+        effectivePoster ||
         hasPlayerTimeInNode ||
         (typeof video.readyState === 'number' && video.readyState > 0) ||
         (typeof video.duration === 'number' && video.duration > 0)
@@ -106,8 +200,8 @@
       if (hasVideoSignal) {
         return {
           isVideo: true,
-          mediaUrl: realCdnSource || detectedPoster || null,
-          posterUrl: detectedPoster || null,
+          mediaUrl: effectiveCdnSource || effectivePoster || null,
+          posterUrl: effectivePoster || null,
           caption: finalCaption
         };
       }
@@ -201,6 +295,10 @@
           }
         }
       }
+      if (!detectedUrl) {
+        const reactMedia = extractVideoCdnFromReact(messageNode);
+        detectedUrl = reactMedia?.videoUrl || reactMedia?.posterUrl || null;
+      }
       if (detectedUrl || hasDurationFormat || hasPlayControl) {
         return {
           isVideo: true,
@@ -216,6 +314,8 @@
 
   return {
     detectPageVideo,
+    extractVideoCdnFromReact,
+    cleanVideoCaption,
     OPEN_VIDEO_LABEL_PATTERN,
     CALL_EXCLUDE_PATTERN
   };

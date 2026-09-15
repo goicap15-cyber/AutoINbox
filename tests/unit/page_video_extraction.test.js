@@ -166,3 +166,56 @@ test('pageVideoDetector - phát hiện video khách gửi có style background-i
   assert.equal(result.caption, null);
 });
 
+test('pageVideoDetector - extractVideoCdnFromReact trích xuất playable_url từ React Fiber', () => {
+  const node = {
+    __reactFiber$test123: {
+      memoizedProps: {
+        playable_url: 'https://video.fhan17-1.fna.fbcdn.net/v/t39.1234-2/video_playable.mp4?test=1',
+        preview_url: 'https://scontent.xx.fbcdn.net/v/t1.15752-9/preview.jpg'
+      }
+    }
+  };
+
+  const result = FbPageVideoDetector.extractVideoCdnFromReact(node);
+  assert.equal(result.videoUrl, 'https://video.fhan17-1.fna.fbcdn.net/v/t39.1234-2/video_playable.mp4?test=1');
+  assert.equal(result.posterUrl, 'https://scontent.xx.fbcdn.net/v/t1.15752-9/preview.jpg');
+});
+
+test('pageVideoDetector - bóc tách playable_url từ React Fiber khi thẻ <video> chỉ có src dạng blob:', () => {
+  const video = createMockElement('video', {
+    src: 'blob:https://business.facebook.com/d94f31c2-3e21-4d33-91cb-700f77977469'
+  });
+  video.__reactFiber$fiber1 = {
+    memoizedProps: {
+      attachment: {
+        playable_url: 'https://video.fna.fbcdn.net/v/t39.254/office_chair_stream.mp4'
+      }
+    }
+  };
+  const wrapper = createMockElement('div', { 'data-message-id': 'mid.cust_blob_fiber' }, [video], '0:00 / 0:03');
+
+  const result = FbPageVideoDetector.detectPageVideo(wrapper, '0:00 / 0:03');
+  assert.equal(result.isVideo, true);
+  assert.equal(result.mediaUrl, 'https://video.fna.fbcdn.net/v/t39.254/office_chair_stream.mp4');
+  assert.equal(result.caption, null);
+});
+
+test('pageVideoDetector - bóc tách preview_url từ React Fiber khi video chỉ có thời lượng 0:00 / 0:03', () => {
+  const wrapper = createMockElement('div', { 'data-message-id': 'mid.cust_fiber_preview' }, [], '0:00 / 0:03');
+  wrapper.__reactProps$props1 = {
+    blob_attachments: [
+      {
+        large_preview: {
+          uri: 'https://scontent.xx.fbcdn.net/v/office_chair_poster.jpg'
+        }
+      }
+    ]
+  };
+
+  const result = FbPageVideoDetector.detectPageVideo(wrapper, '0:00 / 0:03');
+  assert.equal(result.isVideo, true);
+  assert.equal(result.mediaUrl, 'https://scontent.xx.fbcdn.net/v/office_chair_poster.jpg');
+  assert.equal(result.posterUrl, 'https://scontent.xx.fbcdn.net/v/office_chair_poster.jpg');
+  assert.equal(result.caption, null);
+});
+

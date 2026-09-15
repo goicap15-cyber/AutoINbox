@@ -922,7 +922,13 @@ class ConversationRepository {
         sender_role, sequence_order, direction_status, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(fb_message_id) DO UPDATE SET
-        content = CASE WHEN excluded.content IS NOT NULL AND excluded.content <> '' THEN excluded.content ELSE messages.content END,
+        content = CASE
+          WHEN messages.content IS NOT NULL AND (messages.content GLOB '[0-9]:[0-9][0-9] / [0-9]:[0-9][0-9]' OR messages.content GLOB '[0-9][0-9]:[0-9][0-9] / [0-9][0-9]:[0-9][0-9]' OR messages.content GLOB '0:[0-9][0-9]')
+            THEN excluded.content
+          WHEN excluded.content IS NOT NULL AND excluded.content <> ''
+            THEN excluded.content
+          ELSE messages.content
+        END,
         media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
         media_url = COALESCE(excluded.media_url, messages.media_url),
         timestamp_ms = CASE WHEN ? = 1 THEN excluded.timestamp_ms ELSE messages.timestamp_ms END,
