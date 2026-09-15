@@ -747,12 +747,24 @@ if (isBusiness) {
 
             const isMedia = unit.resolved.kind === 'media';
             const text = isMedia ? (unit.resolved.caption || '') : unit.resolved.text;
+            let effectiveMediaUrl = isMedia ? unit.resolved.mediaUrl : null;
+            if (isMedia && unit.resolved.mediaType === 'video' && !effectiveMediaUrl) {
+                const vidCache = (typeof FbPageVideoDetector !== 'undefined' && FbPageVideoDetector.getVideoCache ? FbPageVideoDetector.getVideoCache() : null) ||
+                    (typeof window !== 'undefined' && window.FbPageVideoDetector?.getVideoCache ? window.FbPageVideoDetector.getVideoCache() : null);
+                const cached = vidCache?.get(fbMessageId);
+                const domAttr = unit.element?.getAttribute?.('data-crm-video-url') ||
+                    unit.element?.querySelector?.('[data-crm-video-url]')?.getAttribute?.('data-crm-video-url');
+                effectiveMediaUrl = domAttr || cached?.videoUrl || null;
+                if (!effectiveMediaUrl && typeof FbPageVideoDetector !== 'undefined' && typeof FbPageVideoDetector.requestVideoResolutionFromMain === 'function') {
+                    FbPageVideoDetector.requestVideoResolutionFromMain(fbMessageId);
+                }
+            }
 
             list.push({
                 fb_message_id: fbMessageId,
                 content: text,
                 media_type: isMedia ? (unit.resolved.mediaType || 'image') : 'text',
-                media_url: isMedia ? unit.resolved.mediaUrl : null,
+                media_url: effectiveMediaUrl,
                 is_outgoing: isOutgoing,
                 direction_status: isOutgoing === null ? 'pending' : 'confirmed',
                 direction_confidence: isOutgoing === null ? 'unknown' : dirEvidence.confidence,
@@ -1589,6 +1601,28 @@ if (isBusiness) {
         const resolvedContent = messageIdNode ? resolveMessageContent(messageIdNode) : { kind: 'text', text };
         forwardResolvedMessage(messageIdNode, element, fbMessageId, isInsideMessageBubble, inChatContainer, resolvedContent, messageListContainer);
     }
+
+    // Lắng nghe phản hồi link CDN video từ MAIN world (injected.js)
+    window.addEventListener('message', (event) => {
+        if (event.data?.type === 'CRM_RESOLVE_PAGE_VIDEO_RESPONSE') {
+            const { fb_message_id, videoUrl, posterUrl } = event.data;
+            if (fb_message_id && videoUrl) {
+                const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(fb_message_id) : fb_message_id;
+                const msgNode = document.querySelector(`[data-message-id="${escaped}"]`) ||
+                    document.querySelector(`[data-id="${escaped}"]`);
+                if (msgNode) {
+                    msgNode.setAttribute('data-crm-video-url', videoUrl);
+                    if (posterUrl) msgNode.setAttribute('data-crm-poster-url', posterUrl);
+                    const vEl = msgNode.querySelector('video');
+                    if (vEl) {
+                        vEl.setAttribute('data-crm-video-url', videoUrl);
+                        if (posterUrl) vEl.setAttribute('data-crm-poster-url', posterUrl);
+                    }
+                }
+                lastSyncedMountedSignature = '';
+            }
+        }
+    });
 
     // Message listener for ACK and on-demand batch synchronization requests from background
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

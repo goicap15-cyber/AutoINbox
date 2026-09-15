@@ -113,6 +113,29 @@
     }
   }
 
+  const resolvedVideoCache = new Map();
+
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('message', (event) => {
+      if (event.data?.type === 'CRM_RESOLVE_PAGE_VIDEO_RESPONSE') {
+        const { fb_message_id, videoUrl, posterUrl } = event.data;
+        if (fb_message_id) {
+          resolvedVideoCache.set(fb_message_id, { videoUrl, posterUrl });
+        }
+      }
+    });
+  }
+
+  function requestVideoResolutionFromMain(fbMessageId) {
+    if (!fbMessageId || typeof window === 'undefined' || typeof window.postMessage !== 'function') return;
+    try {
+      window.postMessage({
+        type: 'CRM_RESOLVE_PAGE_VIDEO_REQUEST',
+        fb_message_id: fbMessageId
+      }, '*');
+    } catch (_) {}
+  }
+
   /**
    * Phát hiện video bên trong một messageIdNode (vỏ bọc tin nhắn [data-message-id])
    * @param {Element} messageNode - Element node của tin nhắn
@@ -130,6 +153,16 @@
     }
 
     const finalCaption = cleanVideoCaption(captionText || rawText);
+    const fbMessageId = messageNode.getAttribute?.('data-message-id') ||
+      messageNode.getAttribute?.('data-id') ||
+      messageNode.querySelector?.('[data-message-id]')?.getAttribute?.('data-message-id') ||
+      null;
+
+    const cachedMedia = fbMessageId ? resolvedVideoCache.get(fbMessageId) : null;
+    const domCdnAttr = messageNode.getAttribute?.('data-crm-video-url') ||
+      messageNode.querySelector?.('[data-crm-video-url]')?.getAttribute?.('data-crm-video-url');
+    const domPosterAttr = messageNode.getAttribute?.('data-crm-poster-url') ||
+      messageNode.querySelector?.('[data-crm-poster-url]')?.getAttribute?.('data-crm-poster-url');
 
     // 1. Quét các thẻ <video> trực tiếp
     const videos = Array.from(messageNode.querySelectorAll('video'));
@@ -145,8 +178,16 @@
         ...Array.from(video.querySelectorAll('source[src]')).map((s) => s.getAttribute('src'))
       ].filter(Boolean);
 
-      const realCdnSource = sourceCandidates.find((src) => /^https?:\/\//i.test(src));
-      const poster = video.poster || video.getAttribute('poster') || '';
+      const realCdnSource = domCdnAttr ||
+        cachedMedia?.videoUrl ||
+        video.getAttribute('data-crm-video-url') ||
+        sourceCandidates.find((src) => /^https?:\/\//i.test(src));
+      const poster = domPosterAttr ||
+        cachedMedia?.posterUrl ||
+        video.getAttribute('data-crm-poster-url') ||
+        video.poster ||
+        video.getAttribute('poster') ||
+        '';
       const validPoster = /^https?:\/\//i.test(poster) ? poster : null;
 
       let detectedPoster = validPoster;
@@ -183,6 +224,11 @@
           if (!effectiveCdnSource && nodeReactMedia?.videoUrl) effectiveCdnSource = nodeReactMedia.videoUrl;
           if (!effectivePoster && nodeReactMedia?.posterUrl) effectivePoster = nodeReactMedia.posterUrl;
         }
+      }
+
+      // Kích hoạt giải mã từ MAIN world nếu chưa có URL CDN trực tiếp
+      if (!effectiveCdnSource && fbMessageId) {
+        requestVideoResolutionFromMain(fbMessageId);
       }
 
       const hasPlayerTimeInNode = /\d{1,2}:\d{2}\s*\/\s*\d{1,2}:\d{2}/.test(rawText);
@@ -316,6 +362,8 @@
     detectPageVideo,
     extractVideoCdnFromReact,
     cleanVideoCaption,
+    getVideoCache: () => resolvedVideoCache,
+    requestVideoResolutionFromMain,
     OPEN_VIDEO_LABEL_PATTERN,
     CALL_EXCLUDE_PATTERN
   };

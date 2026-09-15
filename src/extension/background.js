@@ -5045,7 +5045,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         try {
           await chrome.scripting.executeScript({
             target: { tabId: tab.id },
-            files: ['textFilter.js', 'pageTimestampParser.js', 'threadScanStateMachine.js', 'pageDirection.js', 'pageActiveScroller.js', 'page_content.js']
+            files: ['textFilter.js', 'pageTimestampParser.js', 'threadScanStateMachine.js', 'pageDirection.js', 'pageActiveScroller.js', 'pageVideoDetector.js', 'page_content.js']
           });
           await new Promise(r => setTimeout(r, 600));
           return chrome.tabs.sendMessage(tab.id, {

@@ -219,3 +219,40 @@ test('pageVideoDetector - bóc tách preview_url từ React Fiber khi video ch�
   assert.equal(result.caption, null);
 });
 
+test('pageVideoDetector - ưu tiên lấy link CDN trực tiếp từ thuộc tính DOM data-crm-video-url', () => {
+  const video = createMockElement('video', {
+    src: 'blob:https://business.facebook.com/49df82c1-8488-4e89-bdc9-fb39d4812345',
+    'data-crm-video-url': 'https://video.fna.fbcdn.net/v/t39.123/direct_cdn_from_main.mp4',
+    'data-crm-poster-url': 'https://scontent.xx.fbcdn.net/v/poster_from_main.jpg'
+  });
+  const wrapper = createMockElement('div', {
+    'data-message-id': 'mid.dom_cdn_test',
+    'data-crm-video-url': 'https://video.fna.fbcdn.net/v/t39.123/direct_cdn_from_main.mp4'
+  }, [video], '0:00 / 0:03');
+
+  const result = FbPageVideoDetector.detectPageVideo(wrapper, '0:00 / 0:03');
+  assert.equal(result.isVideo, true);
+  assert.equal(result.mediaUrl, 'https://video.fna.fbcdn.net/v/t39.123/direct_cdn_from_main.mp4');
+  assert.equal(result.posterUrl, 'https://scontent.xx.fbcdn.net/v/poster_from_main.jpg');
+  assert.equal(result.caption, null);
+});
+
+test('pageVideoDetector - lấy link CDN từ resolvedVideoCache khi đã được giải mã', () => {
+  const cache = FbPageVideoDetector.getVideoCache();
+  cache.set('mid.cached_cdn_msg', {
+    videoUrl: 'https://video.xx.fbcdn.net/v/t39.999/cached_video.mp4',
+    posterUrl: 'https://scontent.xx.fbcdn.net/v/cached_thumb.jpg'
+  });
+
+  const video = createMockElement('video', {
+    src: 'blob:https://business.facebook.com/12345678-0000'
+  });
+  const wrapper = createMockElement('div', { 'data-message-id': 'mid.cached_cdn_msg' }, [video], '0:00 / 0:03');
+
+  const result = FbPageVideoDetector.detectPageVideo(wrapper, '0:00 / 0:03');
+  assert.equal(result.isVideo, true);
+  assert.equal(result.mediaUrl, 'https://video.xx.fbcdn.net/v/t39.999/cached_video.mp4');
+  assert.equal(result.posterUrl, 'https://scontent.xx.fbcdn.net/v/cached_thumb.jpg');
+  assert.equal(result.caption, null);
+});
+
