@@ -9,7 +9,17 @@ export default function MediaViewer({ mediaType, mediaUrl, localMediaPath }) {
   // synthetic message while Facebook has not exposed playable media yet.
   // The real video bubble appears automatically when media_url/local path is
   // backfilled by the existing hydration flow.
-  if (!displayUrl) return null;
+  if (!displayUrl) {
+    if (mediaType === 'video') {
+      return (
+        <div className="mt-2 p-3 bg-[var(--color-bg-elevated)] rounded-lg border border-[var(--color-border)] flex items-center gap-2.5 max-w-xs text-xs text-[var(--color-text-secondary)]">
+          <div className="w-4 h-4 rounded-full border-2 border-[var(--color-accent)] border-t-transparent animate-spin shrink-0" />
+          <span>Đang đồng bộ video...</span>
+        </div>
+      );
+    }
+    return null;
+  }
 
   const inferredImage = /\.(png|jpg|jpeg|webp|gif|bmp)(\?.*)?$/i.test(displayUrl)
     || (typeof displayUrl === 'string' && displayUrl.startsWith('data:image/'));
@@ -65,8 +75,8 @@ export default function MediaViewer({ mediaType, mediaUrl, localMediaPath }) {
     }
     return (
       <div className="mt-2 max-w-xs">
-        <video controls className="w-full rounded-lg border border-[var(--color-border)] shadow-sm">
-          <source src={displayUrl} />
+        <video controls playsInline preload="metadata" className="w-full rounded-lg border border-[var(--color-border)] shadow-sm max-h-72 bg-black">
+          <source src={displayUrl} type="video/mp4" />
           Trình duyệt không hỗ trợ phát video này.
         </video>
       </div>

@@ -1202,6 +1202,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
   }
 
+  if (message.type === 'PAGE_MESSAGE_MEDIA_RESOLVED') {
+    const msgData = message.data;
+    console.log('[FB Engine] 🎬 PAGE_MESSAGE_MEDIA_RESOLVED từ page_content:', JSON.stringify(msgData));
+    sendToBackend('PAGE_MESSAGE_MEDIA_RESOLVED', {
+      ...msgData,
+      account_id: user_id || msgData?.account_id,
+      source_type: 'page_messenger'
+    });
+  }
+
   if (message.type === 'PAGE_SIDEBAR_THREADS_DISCOVERED') {
     const { page_id, threads } = message.data || {};
     if (Array.isArray(threads) && threads.length > 0) {

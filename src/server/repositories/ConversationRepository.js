@@ -371,6 +371,13 @@ class ConversationRepository {
         let content = msg.content ?? msg.text ?? msg.cleaned ?? null;
         const mediaType = msg.media_type || (msg.media_url ? 'image' : 'text');
         const mediaUrl = msg.media_url || null;
+        if (mediaType === 'video' && content) {
+          if (/^\s*\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}\s*$/i.test(content) ||
+              /^\s*\d{1,2}:\d{2}\s*$/i.test(content) ||
+              content.trim().toLowerCase() === 'video') {
+            content = null;
+          }
+        }
         if (!mediaUrl && mediaType === 'text') {
           const cleaned = cleanMessageText(content);
           if (!cleaned || isSystemOrMetadataText(cleaned) || cleaned === 'Đang tải...') {
@@ -923,8 +930,18 @@ class ConversationRepository {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(fb_message_id) DO UPDATE SET
         content = CASE
-          WHEN messages.content IS NOT NULL AND (messages.content GLOB '[0-9]:[0-9][0-9] / [0-9]:[0-9][0-9]' OR messages.content GLOB '[0-9][0-9]:[0-9][0-9] / [0-9][0-9]:[0-9][0-9]' OR messages.content GLOB '0:[0-9][0-9]')
-            THEN excluded.content
+          WHEN excluded.content IS NOT NULL AND (
+            excluded.content GLOB '[0-9]:[0-9][0-9] / [0-9]:[0-9][0-9]' OR
+            excluded.content GLOB '[0-9][0-9]:[0-9][0-9] / [0-9][0-9]:[0-9][0-9]' OR
+            excluded.content GLOB '0:[0-9][0-9]' OR
+            excluded.content GLOB '*:?? / *:??*'
+          ) THEN ''
+          WHEN messages.content IS NOT NULL AND (
+            messages.content GLOB '[0-9]:[0-9][0-9] / [0-9]:[0-9][0-9]' OR
+            messages.content GLOB '[0-9][0-9]:[0-9][0-9] / [0-9][0-9]:[0-9][0-9]' OR
+            messages.content GLOB '0:[0-9][0-9]' OR
+            messages.content GLOB '*:?? / *:??*'
+          ) THEN COALESCE(excluded.content, '')
           WHEN excluded.content IS NOT NULL AND excluded.content <> ''
             THEN excluded.content
           ELSE messages.content
@@ -952,12 +969,21 @@ class ConversationRepository {
         const existing = database.prepare('SELECT timestamp_source, timestamp_ms FROM messages WHERE fb_message_id = ?').get(msg.fb_message_id);
         const canUpgrade = !existing || ConversationRepository.shouldUpgradeTimestamp(existing.timestamp_source, tsSource, existing.timestamp_ms, tsMs);
 
+        let content = msg.content || null;
+        if (msg.media_type === 'video' && content) {
+          if (/^\s*\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}\s*$/i.test(content) ||
+              /^\s*\d{1,2}:\d{2}\s*$/i.test(content) ||
+              content.trim().toLowerCase() === 'video') {
+            content = null;
+          }
+        }
+
         insertOrUpdate.run(
           thread_id,
           msg.fb_message_id,
           msg.client_message_id || null,
           senderId,
-          msg.content || null,
+          content,
           msg.media_type || 'text',
           msg.media_url || null,
           tsMs,

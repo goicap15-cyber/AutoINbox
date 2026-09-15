@@ -28,7 +28,7 @@
 
   // Helper function to send message to Isolated World (content.js)
   function emitNetworkMessage(data) {
-    if (!data || !data.thread_id || !data.content) return;
+    if (!data || !data.thread_id || (!data.content && !data.media_url && !data.media_type)) return;
     const currentUserId = getCurrentUserId();
     const senderIdStr = data.sender_id ? String(data.sender_id) : null;
     const isOutgoing = (currentUserId && senderIdStr === String(currentUserId)) || !!data.is_outgoing;
@@ -40,7 +40,10 @@
         fb_message_id: data.fb_message_id || data.message_id || null,
         sender_id: senderIdStr,
         sender_name: data.sender_name || (isOutgoing ? 'Bạn' : null),
-        content: String(data.content).trim(),
+        content: data.content ? String(data.content).trim() : '',
+        media_type: data.media_type || (data.media_url ? 'image' : 'text'),
+        media_url: data.media_url || null,
+        poster_url: data.poster_url || null,
         is_outgoing: isOutgoing,
         timestamp_ms: data.timestamp_ms || null,
         created_at: data.created_at || new Date().toISOString(),
@@ -162,66 +165,85 @@
     if (!obj || typeof obj !== 'object' || depth > 8) return;
 
     // Direct message node matching Facebook GraphQL schema
-    if (obj.message_id || obj.offline_threading_id || obj.messageId) {
-      const threadId = obj.thread_id || obj.thread_fbid || obj.other_user_id || obj.threadKey?.thread_fbid || obj.thread_key?.thread_fbid;
-      const content = obj.text || obj.body || obj.message?.text;
-      const senderId = obj.sender_id || obj.sender_fbid || obj.author || obj.message_sender?.id;
-      const msgId = obj.message_id || obj.offline_threading_id || obj.messageId;
+    const msgId = obj.message_id || obj.offline_threading_id || obj.messageId ||
+      (typeof obj.id === 'string' && obj.id.startsWith('mid.') ? obj.id : null);
 
-      if (threadId && content) {
+    if (msgId) {
+      const threadId = obj.thread_id || obj.thread_fbid || obj.other_user_id || obj.threadKey?.thread_fbid || obj.thread_key?.thread_fbid;
+      const content = obj.text || obj.body || obj.message?.text || '';
+      const senderId = obj.sender_id || obj.sender_fbid || obj.author || obj.message_sender?.id;
+
+      // Quét bóc tách link CDN video và poster thumbnail từ GraphQL payload
+      let foundVid = null;
+      let foundPoster = null;
+      const scanVidObj = (o, d = 0) => {
+        if (!o || typeof o !== 'object' || d > 5) return;
+        const vKeys = [
+          'playable_url', 'playable_url_quality_hd', 'browser_native_hd_url', 'browser_native_sd_url',
+          'video_direct_url', 'videoDirectUrl', 'playableUrl', 'playableUrlQualityHd',
+          'hd_src', 'sd_src', 'streaming_url', 'download_url', 'downloadUrl', 'src', 'video_url', 'videoUrl'
+        ];
+        for (const vk of vKeys) {
+          const val = o[vk];
+          if (typeof val === 'string' && /^https?:\/\//i.test(val) && !val.includes('/rsrc.php')) {
+            if (!foundVid) foundVid = val;
+          }
+        }
+        const pKeys = [
+          'preview_url', 'previewUrl', 'thumbnail_url', 'thumbnailUrl', 'poster_url', 'posterUrl',
+          'large_preview', 'preview_image', 'thumbnail', 'image', 'photo_image', 'cover_image'
+        ];
+        for (const pk of pKeys) {
+          const pv = o[pk];
+          if (typeof pv === 'string' && /^https?:\/\//i.test(pv) && !pv.includes('/emoji.php') && !pv.includes('/rsrc.php')) {
+            if (!foundPoster) foundPoster = pv;
+          } else if (pv && typeof pv === 'object' && typeof pv.uri === 'string' && /^https?:\/\//i.test(pv.uri)) {
+            if (!foundPoster && !pv.uri.includes('/emoji.php') && !pv.uri.includes('/rsrc.php')) foundPoster = pv.uri;
+          }
+        }
+        const cKeys = [
+          'attachment', 'attachments', 'blob_attachments', 'video_attachments',
+          'extensible_attachment', 'story', 'media', 'video', 'video_delivery', 'message_attachments'
+        ];
+        for (const ck of cKeys) {
+          const ch = o[ck];
+          if (Array.isArray(ch)) {
+            for (const it of ch) scanVidObj(it, d + 1);
+          } else if (ch && typeof ch === 'object') {
+            scanVidObj(ch, d + 1);
+          }
+        }
+      };
+      scanVidObj(obj);
+
+      if (foundVid || foundPoster) {
+        pageVideoCache.set(msgId, { videoUrl: foundVid, posterUrl: foundPoster });
+        const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(msgId) : msgId;
+        const msgNode = document.querySelector(`[data-message-id="${escaped}"]`) || document.querySelector(`[data-id="${escaped}"]`);
+        if (msgNode) {
+          applyResolvedVideoToDom(msgNode, foundVid, foundPoster);
+        }
+        window.postMessage({
+          type: 'CRM_RESOLVE_PAGE_VIDEO_RESPONSE',
+          fb_message_id: msgId,
+          videoUrl: foundVid,
+          posterUrl: foundPoster
+        }, '*');
+      }
+
+      if (threadId && (content || foundVid || foundPoster)) {
         emitNetworkMessage({
           thread_id: threadId,
           fb_message_id: msgId,
           sender_id: senderId,
           content: content,
+          media_type: (foundVid || foundPoster) ? 'video' : 'text',
+          media_url: foundVid || foundPoster || null,
+          poster_url: foundPoster || null,
           is_outgoing: obj.is_outgoing || false,
           timestamp_ms: obj.timestamp_precise || obj.timestamp || null,
           created_at: obj.timestamp ? new Date(Number(obj.timestamp)).toISOString() : new Date().toISOString()
         });
-      }
-
-      // Quét bóc tách link CDN video từ GraphQL payload và lưu vào cache
-      if (msgId) {
-        let foundVid = null;
-        let foundPoster = null;
-        const scanVidObj = (o, d = 0) => {
-          if (!o || typeof o !== 'object' || d > 4) return;
-          const vKeys = ['playable_url', 'playable_url_quality_hd', 'browser_native_hd_url', 'browser_native_sd_url', 'video_direct_url', 'videoDirectUrl', 'playableUrl'];
-          for (const vk of vKeys) {
-            const val = o[vk];
-            if (typeof val === 'string' && /^https?:\/\//i.test(val)) {
-              if (!foundVid) foundVid = val;
-            }
-          }
-          const pKeys = ['preview_url', 'previewUrl', 'thumbnail_url', 'thumbnailUrl', 'poster_url', 'posterUrl', 'large_preview', 'preview_image', 'thumbnail', 'image'];
-          for (const pk of pKeys) {
-            const pv = o[pk];
-            if (typeof pv === 'string' && /^https?:\/\//i.test(pv) && !pv.includes('/emoji.php') && !pv.includes('/rsrc.php')) {
-              if (!foundPoster) foundPoster = pv;
-            } else if (pv && typeof pv === 'object' && typeof pv.uri === 'string' && /^https?:\/\//i.test(pv.uri)) {
-              if (!foundPoster && !pv.uri.includes('/emoji.php') && !pv.uri.includes('/rsrc.php')) foundPoster = pv.uri;
-            }
-          }
-          const cKeys = ['attachment', 'attachments', 'blob_attachments', 'video_attachments', 'extensible_attachment', 'story', 'media', 'video', 'video_delivery'];
-          for (const ck of cKeys) {
-            const ch = o[ck];
-            if (Array.isArray(ch)) {
-              for (const it of ch) scanVidObj(it, d + 1);
-            } else if (ch && typeof ch === 'object') {
-              scanVidObj(ch, d + 1);
-            }
-          }
-        };
-        scanVidObj(obj);
-        if (foundVid) {
-          pageVideoCache.set(msgId, { videoUrl: foundVid, posterUrl: foundPoster });
-          window.postMessage({
-            type: 'CRM_RESOLVE_PAGE_VIDEO_RESPONSE',
-            fb_message_id: msgId,
-            videoUrl: foundVid,
-            posterUrl: foundPoster
-          }, '*');
-        }
       }
     }
 
@@ -278,15 +300,17 @@
       let foundPoster = null;
 
       function scanObject(obj, currentDepth = 0) {
-        if (!obj || typeof obj !== 'object' || currentDepth > 5) return;
+        if (!obj || typeof obj !== 'object' || currentDepth > 6) return;
 
         const videoKeys = [
           'playable_url', 'playable_url_quality_hd', 'browser_native_hd_url',
-          'browser_native_sd_url', 'video_direct_url', 'videoDirectUrl', 'playableUrl'
+          'browser_native_sd_url', 'video_direct_url', 'videoDirectUrl', 'playableUrl',
+          'playableUrlQualityHd', 'hd_src', 'sd_src', 'streaming_url', 'download_url',
+          'downloadUrl', 'src', 'video_url', 'videoUrl'
         ];
         for (const vk of videoKeys) {
           const val = obj[vk];
-          if (typeof val === 'string' && /^https?:\/\//i.test(val)) {
+          if (typeof val === 'string' && /^https?:\/\//i.test(val) && !val.includes('/rsrc.php')) {
             if (!foundVideo) foundVideo = val;
           }
         }
@@ -294,7 +318,7 @@
         const posterKeys = [
           'preview_url', 'previewUrl', 'thumbnail_url', 'thumbnailUrl',
           'poster_url', 'posterUrl', 'large_preview', 'preview_image',
-          'thumbnail', 'image'
+          'thumbnail', 'image', 'photo_image', 'cover_image'
         ];
         for (const pk of posterKeys) {
           const pval = obj[pk];
@@ -307,7 +331,8 @@
 
         const containers = [
           'attachment', 'attachments', 'blob_attachments', 'video_attachments',
-          'extensible_attachment', 'story', 'media', 'video', 'video_delivery'
+          'extensible_attachment', 'story', 'media', 'video', 'video_delivery',
+          'message_attachments', 'videoGrid', 'mediaMetadata'
         ];
         for (const ck of containers) {
           const child = obj[ck];
@@ -319,13 +344,13 @@
         }
       }
 
-      while (curr && depth < 40) {
+      while (curr && depth < 50) {
         depth++;
         const props = curr.memoizedProps || curr.props || (depth === 1 ? curr : null);
-        if (props) {
-          scanObject(props);
-          if (foundVideo) break;
-        }
+        if (props) scanObject(props);
+        const state = curr.memoizedState;
+        if (state) scanObject(state);
+        if (foundVideo) break;
         curr = curr.return || curr.child;
       }
 
@@ -351,6 +376,26 @@
       if (msgRes.videoUrl) res.videoUrl = msgRes.videoUrl;
       if (msgRes.posterUrl && !res.posterUrl) res.posterUrl = msgRes.posterUrl;
     }
+
+    // Fallback: Tìm ảnh thumbnail hoặc background-image trong msgNode
+    if (!res.posterUrl && msgNode) {
+      const thumbImg = msgNode.querySelector('img[src]:not([src*="/emoji.php"]):not([src*="/rsrc.php"])');
+      if (thumbImg) {
+        const src = thumbImg.currentSrc || thumbImg.getAttribute('src');
+        if (src && /^https?:\/\//i.test(src)) res.posterUrl = src;
+      }
+      if (!res.posterUrl) {
+        const bgEls = msgNode.querySelectorAll('[style*="background-image"]');
+        for (const bg of bgEls) {
+          const m = (bg.getAttribute('style') || '').match(/background-image\s*:\s*url\((['"]?)([^'")]+)\1\)/i);
+          if (m && /^https?:\/\//i.test(m[2])) {
+            res.posterUrl = m[2];
+            break;
+          }
+        }
+      }
+    }
+
     return res;
   }
 
@@ -363,45 +408,37 @@
     }
     if (posterUrl) {
       msgNode.setAttribute('data-crm-poster-url', posterUrl);
+      const videoEl = msgNode.querySelector('video');
+      if (videoEl) videoEl.setAttribute('data-crm-poster-url', posterUrl);
     }
   }
 
   function scanAndStampMountedVideos() {
     try {
-      const videos = document.querySelectorAll('video');
+      const videos = document.querySelectorAll('video, [aria-label*="video" i], [data-surface*="video"]');
       for (const v of videos) {
-        if (v.getAttribute('data-crm-video-url')) continue;
         const msgNode = v.closest('[data-message-id]') || v.closest('[data-id]') || v;
         const mid = msgNode?.getAttribute?.('data-message-id') || msgNode?.getAttribute?.('data-id');
+        if (!mid) continue;
+
         let res = null;
-
-        // Ưu tiên 1: Lấy trực tiếp src / currentSrc của thẻ video nếu là link https://
-        const directSrc = (v.currentSrc && /^https?:\/\//i.test(v.currentSrc))
-          ? v.currentSrc
-          : ((v.src && /^https?:\/\//i.test(v.src)) ? v.src : (v.getAttribute('src') && /^https?:\/\//i.test(v.getAttribute('src')) ? v.getAttribute('src') : null));
-        if (directSrc) {
-          res = { videoUrl: directSrc, posterUrl: v.poster || v.getAttribute('poster') || null };
-          if (mid) pageVideoCache.set(mid, res);
-        }
-
-        if (!res?.videoUrl && mid && pageVideoCache.has(mid)) {
+        if (pageVideoCache.has(mid)) {
           res = pageVideoCache.get(mid);
-        } else if (!res?.videoUrl) {
+        }
+        if (!res?.videoUrl) {
           res = resolveVideoForMessageNode(msgNode);
-          if (res.videoUrl && mid) {
+          if ((res?.videoUrl || res?.posterUrl) && mid) {
             pageVideoCache.set(mid, res);
           }
         }
-        if (res?.videoUrl) {
+        if (res?.videoUrl || res?.posterUrl) {
           applyResolvedVideoToDom(msgNode, res.videoUrl, res.posterUrl);
-          if (mid) {
-            window.postMessage({
-              type: 'CRM_RESOLVE_PAGE_VIDEO_RESPONSE',
-              fb_message_id: mid,
-              videoUrl: res.videoUrl,
-              posterUrl: res.posterUrl || null
-            }, '*');
-          }
+          window.postMessage({
+            type: 'CRM_RESOLVE_PAGE_VIDEO_RESPONSE',
+            fb_message_id: mid,
+            videoUrl: res.videoUrl || null,
+            posterUrl: res.posterUrl || null
+          }, '*');
         }
       }
     } catch (_) {}
@@ -422,7 +459,7 @@
           document.querySelector(`[data-id="${escaped}"]`);
         if (msgNode) {
           const res = resolveVideoForMessageNode(msgNode);
-          if (res.videoUrl) {
+          if (res.videoUrl || res.posterUrl) {
             videoUrl = res.videoUrl;
             posterUrl = res.posterUrl;
             applyResolvedVideoToDom(msgNode, videoUrl, posterUrl);
@@ -440,5 +477,5 @@
     }
   });
 
-  setInterval(scanAndStampMountedVideos, 1500);
+  setInterval(scanAndStampMountedVideos, 1000);
 })();

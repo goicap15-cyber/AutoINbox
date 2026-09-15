@@ -29,7 +29,10 @@
     if (/^\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}$/i.test(cleaned)) {
       cleaned = '';
     }
-    if (/^0:\d{2}$/i.test(cleaned)) {
+    if (/^\d{1,2}:\d{2}$/i.test(cleaned)) {
+      cleaned = '';
+    }
+    if (/^(?:video|\d+\s*giây|\d+\s*s|\d+s|xem video|phát video)$/i.test(cleaned)) {
       cleaned = '';
     }
     return cleaned || null;

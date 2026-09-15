@@ -169,6 +169,39 @@ if (isBusiness) {
         return null;
     }
 
+    // Lắng nghe URL video đã giải mã từ MAIN world (injected.js)
+    window.addEventListener('message', (event) => {
+        if (event.data?.type === 'CRM_RESOLVE_PAGE_VIDEO_RESPONSE') {
+            const { fb_message_id, videoUrl, posterUrl } = event.data || {};
+            if (!fb_message_id || (!videoUrl && !posterUrl)) return;
+
+            const effectiveUrl = videoUrl || posterUrl;
+            const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(fb_message_id) : fb_message_id;
+            const msgNode = document.querySelector(`[data-message-id="${escaped}"]`) ||
+                document.querySelector(`[data-id="${escaped}"]`);
+            if (msgNode) {
+                if (videoUrl) msgNode.setAttribute('data-crm-video-url', videoUrl);
+                if (posterUrl) msgNode.setAttribute('data-crm-poster-url', posterUrl);
+            }
+
+            const currentThread = resolveCurrentThreadId();
+            if (currentThread && effectiveUrl) {
+                console.log(`[PageContent] 🎬 Nhận được URL video cho ${fb_message_id} -> Gửi lên Server:`, effectiveUrl.substring(0, 60));
+                chrome.runtime.sendMessage({
+                    type: 'PAGE_MESSAGE_MEDIA_RESOLVED',
+                    data: {
+                        thread_id: currentThread,
+                        fb_message_id: fb_message_id,
+                        media_type: 'video',
+                        video_url: effectiveUrl,
+                        media_url: effectiveUrl,
+                        poster_url: posterUrl || null
+                    }
+                }).catch(() => {});
+            }
+        }
+    });
+
     window.addEventListener('popstate', () => setTimeout(scanForMessages, 300));
     window.addEventListener('hashchange', () => setTimeout(scanForMessages, 300));
     document.addEventListener('click', (e) => {
@@ -753,8 +786,10 @@ if (isBusiness) {
                     (typeof window !== 'undefined' && window.FbPageVideoDetector?.getVideoCache ? window.FbPageVideoDetector.getVideoCache() : null);
                 const cached = vidCache?.get(fbMessageId);
                 const domAttr = unit.element?.getAttribute?.('data-crm-video-url') ||
-                    unit.element?.querySelector?.('[data-crm-video-url]')?.getAttribute?.('data-crm-video-url');
-                effectiveMediaUrl = domAttr || cached?.videoUrl || null;
+                    unit.element?.querySelector?.('[data-crm-video-url]')?.getAttribute?.('data-crm-video-url') ||
+                    unit.element?.getAttribute?.('data-crm-poster-url') ||
+                    unit.element?.querySelector?.('[data-crm-poster-url]')?.getAttribute?.('data-crm-poster-url');
+                effectiveMediaUrl = domAttr || cached?.videoUrl || cached?.posterUrl || null;
                 if (!effectiveMediaUrl && typeof FbPageVideoDetector !== 'undefined' && typeof FbPageVideoDetector.requestVideoResolutionFromMain === 'function') {
                     FbPageVideoDetector.requestVideoResolutionFromMain(fbMessageId);
                 }
@@ -1347,10 +1382,12 @@ if (isBusiness) {
         if (videoDetector && typeof videoDetector.detectPageVideo === 'function') {
             const videoResult = videoDetector.detectPageVideo(messageIdNode, cleanedText || rawText);
             if (videoResult && videoResult.isVideo) {
+                const domVid = messageIdNode.getAttribute?.('data-crm-video-url') || messageIdNode.querySelector?.('[data-crm-video-url]')?.getAttribute?.('data-crm-video-url');
+                const domPoster = messageIdNode.getAttribute?.('data-crm-poster-url') || messageIdNode.querySelector?.('[data-crm-poster-url]')?.getAttribute?.('data-crm-poster-url');
                 return {
                     kind: 'media',
                     mediaType: 'video',
-                    mediaUrl: videoResult.mediaUrl || null,
+                    mediaUrl: videoResult.mediaUrl || domVid || domPoster || null,
                     caption: videoResult.caption || null
                 };
             }

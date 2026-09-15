@@ -652,6 +652,8 @@ const inboundMediaHydration = new InboundMediaHydrationService({
   })
 });
 
+const resolvedPageVideos = new Map();
+
 function sendRichMessageError(res, error) {
   const status = Number(error?.httpStatus) || 400;
   res.status(status).json({
@@ -2979,6 +2981,19 @@ wss.on('connection', (ws, req) => {
             initialLastMessage: initialPreview
           }, db);
 
+          if (Array.isArray(envelope.messages)) {
+            for (const m of envelope.messages) {
+              if (m.fb_message_id && resolvedPageVideos.has(m.fb_message_id)) {
+                const resolved = resolvedPageVideos.get(m.fb_message_id);
+                const vidUrl = resolved.video_url || resolved.media_url;
+                if (vidUrl && (!m.media_url || !m.media_url.startsWith('http'))) {
+                  m.media_url = vidUrl;
+                  m.media_type = 'video';
+                }
+              }
+            }
+          }
+
           const ack = ConversationRepository.processPageBatchEnvelope(envelope, db);
 
           // Giải phóng InboxSyncScheduler ngay khi batch hoàn tất (tránh timeout 20s)
@@ -3035,6 +3050,66 @@ wss.on('connection', (ws, req) => {
               sync_status: ack.status === 'retry_required' ? 'PARTIAL' : 'FAILED',
               sync_error: ack.reason || null
             });
+          }
+          break;
+        }
+
+        case 'PAGE_MESSAGE_MEDIA_RESOLVED': {
+          const { thread_id, fb_message_id, poster_url } = msg.data || {};
+          const video_url = msg.data?.video_url || msg.data?.media_url;
+          if (video_url) {
+            if (fb_message_id) {
+              resolvedPageVideos.set(fb_message_id, { video_url, media_url: video_url, poster_url, time: Date.now() });
+              if (resolvedPageVideos.size > 200) {
+                const oldestKey = resolvedPageVideos.keys().next().value;
+                resolvedPageVideos.delete(oldestKey);
+              }
+            }
+
+            let targetRow = null;
+            if (fb_message_id) {
+              targetRow = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(fb_message_id);
+            }
+            if (!targetRow && thread_id) {
+              targetRow = db.prepare(`
+                SELECT * FROM messages
+                WHERE thread_id = ? AND media_type = 'video' AND (media_url IS NULL OR media_url NOT LIKE 'http%')
+                ORDER BY timestamp_ms DESC, id DESC
+                LIMIT 1
+              `).get(thread_id);
+            }
+
+            if (targetRow) {
+              let cleanedContent = targetRow.content || '';
+              if (/^\s*\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}\s*$/i.test(cleanedContent) ||
+                  /^\s*\d{1,2}:\d{2}\s*$/i.test(cleanedContent) ||
+                  cleanedContent.trim().toLowerCase() === 'video') {
+                cleanedContent = '';
+              }
+
+              db.prepare(`
+                UPDATE messages
+                SET media_url = ?,
+                    media_type = 'video',
+                    content = ?
+                WHERE id = ?
+              `).run(video_url, cleanedContent, targetRow.id);
+
+              const updatedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(targetRow.id);
+              if (updatedRow) {
+                console.log(`[WS] 🎥 Đã cập nhật video URL cho message ${updatedRow.fb_message_id || updatedRow.id}: ${video_url.substring(0, 60)}...`);
+                io.emit('MESSAGE_UPDATED', {
+                  thread_id: String(updatedRow.thread_id),
+                  fb_message_id: updatedRow.fb_message_id,
+                  message: withAttachmentAccessUrl(updatedRow)
+                });
+                io.emit('THREAD_MESSAGES_UPDATED', {
+                  thread_id: String(updatedRow.thread_id),
+                  messages: [withAttachmentAccessUrl(updatedRow)]
+                });
+                inboundMediaHydration.hydrateRow(updatedRow);
+              }
+            }
           }
           break;
         }
