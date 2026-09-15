@@ -101,19 +101,38 @@ class InboxSyncScheduler {
     return Boolean(state && Number(state.syncEnabledUntil || 0) > Date.now());
   }
 
-  startSyncWindow(accountId, durationMs = 60000) {
+  scheduleSidebarReplay(accountId, reason = 'scheduled_replay', delayMs = 500) {
+    const accId = String(accountId || '');
+    const state = this.accounts.get(accId);
+    if (!state || !this.isSyncWindowActive(accId)) return false;
+    state.pending = true;
+    if (state.pendingTimer) return true;
+    state.pendingTimer = setTimeout(() => {
+      state.pendingTimer = null;
+      if (!this.isSyncWindowActive(accId)) return;
+      this.requestSidebarSync(accId, reason, { force: true, scanMode: 'realtime' });
+    }, Math.max(25, Number(delayMs) || 500));
+    if (typeof state.pendingTimer.unref === 'function') state.pendingTimer.unref();
+    return true;
+  }
+
+  startSyncWindow(accountId, durationMs = 120000) {
     const accId = String(accountId || '');
     if (!accId) return { enabled: false, expires_at: 0 };
     if (!this.accounts.has(accId)) this.registerAccount(accId);
     const state = this.accounts.get(accId);
-    const boundedDuration = Math.max(5000, Math.min(Number(durationMs) || 60000, 60000));
+    const boundedDuration = Math.max(5000, Math.min(Number(durationMs) || 120000, 120000));
     state.syncEnabledUntil = Date.now() + boundedDuration;
     if (state.syncWindowTimer) clearTimeout(state.syncWindowTimer);
     state.syncWindowTimer = setTimeout(() => this.stopSyncWindow(accId, 'window_expired'), boundedDuration);
     if (typeof state.syncWindowTimer.unref === 'function') state.syncWindowTimer.unref();
 
     const inboxDispatched = this.requestSidebarSync(accId, 'manual_window_inbox', { force: true, scanMode: 'realtime' });
-    if (inboxDispatched) this.requestMessageRequestsSync(accId, 'manual_window_requests');
+    // The refresh button can be pressed while the extension is reconnecting.
+    // Do not lose that explicit request: retry the Inbox scan after the socket
+    // becomes ready and trigger Message Requests independently of Inbox.
+    if (!inboxDispatched) this.scheduleSidebarReplay(accId, 'manual_window_inbox_replay', 500);
+    this.requestMessageRequestsSync(accId, 'manual_window_requests');
     console.log(`[INBOX_SYNC_WINDOW_STARTED] account=${accId} duration_ms=${boundedDuration}`);
     return { enabled: true, expires_at: state.syncEnabledUntil };
   }
@@ -249,6 +268,7 @@ class InboxSyncScheduler {
     const extWs = this.getConnection(accId);
     if (!extWs || extWs.readyState !== 1) {
       console.warn(`[INBOX_SYNC_SKIP] account=${accId} reason=${reason} skip=extension_not_ready`);
+      this.scheduleSidebarReplay(accId, `${reason}_extension_replay`, 750);
       return false;
     }
 
@@ -447,6 +467,12 @@ class InboxSyncScheduler {
     if (!dispatched) {
       this.threadInFlight.delete(job.key);
       this.accountThreadBusy.delete(accId);
+      // A user can select a blank thread while Chrome/the extension is still
+      // reconnecting. Retain that explicit request instead of silently losing
+      // it; replay is cancelled naturally if the operator selects another chat.
+      this.pendingThreadSyncs.set(job.key, { ...job, reason: `${job.reason}_extension_replay` });
+      const retryTimer = setTimeout(() => this.replayPendingThread(job.key), 750);
+      if (typeof retryTimer.unref === 'function') retryTimer.unref();
       setTimeout(() => this.drainThreadQueue(accId), 250);
       return;
     }

@@ -97,9 +97,9 @@ export default function ConversationSidebar({
                 disabled={!isConnected}
                 className={`relative p-1.5 rounded-full transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${sidebarSyncActive ? 'bg-[var(--color-accent-subtle)] text-[var(--color-accent)]' : 'hover:bg-[var(--color-bg-hover)]'}`}
                 title={sidebarSyncActive
-                  ? `\u0110ang \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i + Tin nh\u1eafn ch\u1edd (c\u00f2n ${sidebarSyncSecondsRemaining}s). B\u1ea5m \u0111\u1ec3 t\u1eaft.`
-                  : 'B\u1eadt \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i + Tin nh\u1eafn ch\u1edd trong 1 ph\u00fat'}
-                aria-label={sidebarSyncActive ? 'T\u1eaft \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i v\u00e0 Tin nh\u1eafn ch\u1edd' : 'B\u1eadt \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i v\u00e0 Tin nh\u1eafn ch\u1edd trong 1 ph\u00fat'}
+                  ? `\u0110ang \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i + Tin nh\u1eafn ch\u1edd + Page (c\u00f2n ${sidebarSyncSecondsRemaining}s). B\u1ea5m \u0111\u1ec3 t\u1eaft.`
+                  : 'B\u1eadt \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i + Tin nh\u1eafn ch\u1edd + Page trong 2 ph\u00fat'}
+                aria-label={sidebarSyncActive ? 'T\u1eaft \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i, Tin nh\u1eafn ch\u1edd v\u00e0 Page' : 'B\u1eadt \u0111\u1ed3ng b\u1ed9 H\u1ed9i tho\u1ea1i, Tin nh\u1eafn ch\u1edd v\u00e0 Page trong 2 ph\u00fat'}
                 aria-pressed={sidebarSyncActive}
               >
                 <RefreshCw size={17} className={sidebarSyncActive ? 'animate-spin text-[var(--color-accent)]' : 'text-[var(--color-text-muted)]'} strokeWidth={1.75} />

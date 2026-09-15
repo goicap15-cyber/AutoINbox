@@ -776,6 +776,15 @@ function connectWebSocket() {
         case 'SEND_QUEUED_MESSAGE':
           await handleSendQueuedMessage(message.data);
           break;
+        case 'SYNC_PAGE_SIDEBAR': {
+          const pageId = String(message.data?.page_id || '');
+          const tabs = await chrome.tabs.query({ url: ['*://business.facebook.com/*'] });
+          for (const tab of tabs) {
+            if (!tab?.id || (pageId && !String(tab.url || '').includes(`asset_id=${pageId}`))) continue;
+            chrome.tabs.sendMessage(tab.id, { type: 'SCAN_PAGE_SIDEBAR', data: { page_id: pageId } }).catch(() => {});
+          }
+          break;
+        }
         case 'SYNC_THREADS':
           console.log("[FB Engine] Sync threads sidebar:", message.data);
           await handleSync100Threads(message.data);
@@ -1133,6 +1142,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
   }
 
+  if (message.type === 'PAGE_CONTEXT_READY') {
+    const msgData = message.data || {};
+    if (msgData.page_id) {
+      sendToBackend('PAGE_EXTENSION_READY', {
+        account_id: user_id || msgData.account_id,
+        page_id: String(msgData.page_id)
+      });
+    }
+  }
+
   if (message.type === 'PAGE_THREAD_MESSAGES_SYNCED_V1') {
     const msgData = message.data || {};
     sendToBackend('PAGE_THREAD_MESSAGES_SYNCED_V1', {
@@ -1141,6 +1160,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       source_type: 'page_messenger'
     });
   }
+  // Relay Business Suite sidebar threads through the existing backend sync.
+  // Server-side source binding remains responsible for separating Page rows.
+  if (message.type === 'PAGE_SIDEBAR_THREADS_DISCOVERED') {
+    const msgData = message.data || {};
+    const pageId = String(msgData.page_id || '');
+    const threads = Array.isArray(msgData.threads) ? msgData.threads : [];
+    if (!pageId || !threads.length) return false;
+    sendToBackend('SYNC_THREADS_RESULT', {
+      account_id: user_id || msgData.account_id,
+      partial: true,
+      source_type: 'page_messenger',
+      page_id: pageId,
+      threads: threads.map((thread) => ({
+        ...thread,
+        page_id: thread?.page_id || pageId,
+        source_type: 'page_messenger'
+      }))
+    });
+    console.log(`[FB Engine] Relayed ${threads.length} Page sidebar threads for page=${pageId}`);
+  }
+
   if (message.type === 'UPDATE_THREAD_METADATA') {
     const msgData = message.data;
     console.log('[FB Engine] 👤 UPDATE_THREAD_METADATA từ page_content:', JSON.stringify(msgData));
