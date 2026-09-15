@@ -413,7 +413,7 @@ if (isBusiness) {
                 const likeVisual = messageEl.querySelector?.('svg:not([aria-label*="tùy chọn" i]):not([aria-label*="bày tỏ" i]):not([aria-label*="khác" i]), [role="img"]:not([aria-label*="đại diện" i]), img:not([alt*="đại diện" i])');
                 if (likeVisual) targetMeasureEl = likeVisual;
             } else {
-                const innerVisual = messageEl.querySelector?.('[dir="auto"], svg:not([aria-label*="tùy chọn" i]):not([aria-label*="bày tỏ" i]):not([aria-label*="khác" i]), img:not([alt*="đại diện" i]):not([alt*="profile" i]), [role="img"]:not([aria-label*="đại diện" i])');
+                const innerVisual = messageEl.querySelector?.('video, [data-surface*="video"], [dir="auto"], svg:not([aria-label*="tùy chọn" i]):not([aria-label*="bày tỏ" i]):not([aria-label*="khác" i]), img:not([alt*="đại diện" i]):not([alt*="profile" i]), [role="img"]:not([aria-label*="đại diện" i])');
                 if (innerVisual) {
                     const vRect = innerVisual.getBoundingClientRect();
                     if (vRect.width > 0 && vRect.height > 0) {
@@ -651,7 +651,15 @@ if (isBusiness) {
             } else {
                 // Có nút Like bên trong messageEl
                 const rawText = (el.innerText || el.textContent || '').trim();
-                const hasSubstantialText = rawText.length > 0 && rawText !== '👍' && !/^(?:thích|like)$/i.test(rawText);
+                // Clean accessibility/metadata text (e.g. "Tin nhắn do X gửi lúc 20:11")
+                // before checking for substantial content. Without this, Like-only
+                // bubbles that contain accessibility labels are misidentified as text
+                // messages and lose their native mid.$ ID.
+                const _likeTextFilter = globalThis.FbCrmTextFilter || (typeof window !== 'undefined' && window.FbCrmTextFilter);
+                const _cleanedForLikeCheck = _likeTextFilter && typeof _likeTextFilter.cleanMessageText === 'function'
+                    ? _likeTextFilter.cleanMessageText(rawText)
+                    : rawText;
+                const hasSubstantialText = _cleanedForLikeCheck.length > 0 && _cleanedForLikeCheck !== '👍' && !/^(?:thích|like)$/i.test(_cleanedForLikeCheck);
                 if (hasSubstantialText) {
                     rawUnits.push({
                         element: el,
@@ -673,19 +681,17 @@ if (isBusiness) {
             }
         }
 
-        // 2. Thêm các likeCandidates độc lập nằm ngoài bất kỳ messageEl nào (chỉ khi có data-message-id thật sự của FB)
+        // 2. Thêm các likeCandidates độc lập nằm ngoài bất kỳ messageEl nào
         for (const cand of likeCandidates) {
             if (handledLikeNodes.has(cand)) continue;
             handledLikeNodes.add(cand);
             const ownMsgId = cand.getAttribute('data-message-id') || (cand.parentElement && cand.parentElement.getAttribute('data-message-id'));
-            if (ownMsgId && ownMsgId.startsWith('mid.')) {
-                rawUnits.push({
-                    element: cand,
-                    fbMessageId: ownMsgId,
-                    resolved: { kind: 'text', text: '👍' },
-                    isStandaloneLike: true
-                });
-            }
+            rawUnits.push({
+                element: cand,
+                fbMessageId: ownMsgId || null,
+                resolved: { kind: 'text', text: '👍' },
+                isStandaloneLike: true
+            });
         }
 
         // 3. Sắp xếp rawUnits theo ĐÚNG THỨ TỰ XUẤT HIỆN TỰ NHIÊN TRONG CÂY DOM (Top-to-Bottom)
@@ -699,12 +705,30 @@ if (isBusiness) {
 
         // 4. Xây dựng danh sách batch kết quả theo thứ tự DOM chuẩn
         const list = [];
+        let lastKnownMsgId = null;
+        let likeCounterAfterAnchor = 0;
         for (let i = 0; i < rawUnits.length; i++) {
             const unit = rawUnits[i];
             let fbMessageId = unit.fbMessageId;
-            if (!fbMessageId || !fbMessageId.startsWith('mid.')) {
-                continue; // Bỏ qua các phần tử không có message ID thực từ Facebook
+            if (fbMessageId && !unit.isStandaloneLike) {
+                lastKnownMsgId = fbMessageId;
+                likeCounterAfterAnchor = 0;
+            } else if (unit.isStandaloneLike) {
+                if (!fbMessageId || list.some(item => item.fb_message_id === fbMessageId) || !fbMessageId.startsWith('mid.')) {
+                    likeCounterAfterAnchor++;
+                    const anchorKey = lastKnownMsgId ? `after_${lastKnownMsgId}` : 'prefix';
+                    fbMessageId = `page_like_${currentThread}_${anchorKey}_${likeCounterAfterAnchor}`;
+                } else {
+                    lastKnownMsgId = fbMessageId;
+                    likeCounterAfterAnchor = 0;
+                }
+            } else if (!fbMessageId || list.some(item => item.fb_message_id === fbMessageId)) {
+                likeCounterAfterAnchor++;
+                const anchorKey = lastKnownMsgId ? `after_${lastKnownMsgId}` : 'prefix';
+                fbMessageId = `page_like_${currentThread}_${anchorKey}_${likeCounterAfterAnchor}`;
             }
+
+            if (!fbMessageId) continue;
             if (list.some(item => item.fb_message_id === fbMessageId)) {
                 continue;
             }
@@ -898,7 +922,7 @@ if (isBusiness) {
                     }
 
                     if (!currentContactName || isInvalidName(currentContactName)) {
-                        const headerEls = document.querySelectorAll('[role="main"] header [dir="auto"], [role="main"] header h2, header [role="heading"], [data-surface*="contact_name"], [data-surface*="profile_header"]');
+                        const headerEls = document.querySelectorAll('[role="main"] header h1, [role="main"] header h2, [role="main"] header [role="heading"], [role="main"] header [dir="auto"], [role="main"] [data-surface*="contact_name"], [role="main"] [data-surface*="profile_header"], [role="main"] header a[href*="facebook.com"]');
                         for (const el of headerEls) {
                             const txt = (el.textContent || '').trim().split('\n')[0].trim();
                             if (txt && !isInvalidName(txt) && txt.length >= 2 && txt.length <= 80 && !/^\d+$/.test(txt)) {
@@ -1904,9 +1928,9 @@ if (isBusiness) {
                 if (!txt || typeof txt !== 'string') return true;
                 const s = txt.trim();
                 if (s.length < 2) return true;
-                const systemKeywordsRegex = /^(?:Tất cả tin nhắn|Tất cả|All messages|All|Tin nhắn trực tiếp|Direct messages|Hộp thư đến|Hộp thư|Inbox|Chưa đọc|Unread|Đã xong|Done|Gắn dấu sao|Đã gắn dấu sao|Starred|Spam|Thư rác|Bình luận.*|Comments.*|Thông báo|Notifications|Đang hoạt động.*|Hoạt động.*|Active now|Active recently|Online|Offline|Đang|Facebook|Messenger|Meta)$/i;
+                const systemKeywordsRegex = /^(?:Tất cả tin nhắn|Tất cả|All messages|All|Tin nhắn trực tiếp|Direct messages|Tin nhắn|Messages|Hộp thư đến|Hộp thư|Inbox|Chưa đọc|Unread|Đã xong|Done|Gắn dấu sao|Đã gắn dấu sao|Starred|Spam|Thư rác|Bình luận.*|Comments.*|Thông báo|Notifications|Đang hoạt động.*|Hoạt động.*|Active now|Active recently|Online|Offline|Đang|Facebook|Messenger|Meta)$/i;
                 if (systemKeywordsRegex.test(s)) return true;
-                const singleKeywordsPattern = '(?:Tất cả tin nhắn|Tất cả|All messages|All|Tin nhắn trực tiếp|Direct messages|Hộp thư đến|Hộp thư|Inbox|Chưa đọc|Unread|Đã xong|Done|Gắn dấu sao|Đã gắn dấu sao|Starred|Spam|Thư rác|Thông báo|Notifications|Facebook|Messenger|Meta)';
+                const singleKeywordsPattern = '(?:Tất cả tin nhắn|Tất cả|All messages|All|Tin nhắn trực tiếp|Direct messages|Tin nhắn|Messages|Hộp thư đến|Hộp thư|Inbox|Chưa đọc|Unread|Đã xong|Done|Gắn dấu sao|Đã gắn dấu sao|Starred|Spam|Thư rác|Thông báo|Notifications|Facebook|Messenger|Meta)';
                 const repeatedRegex = new RegExp(`^(?:${singleKeywordsPattern}[\\s\\n\\r]*)+$`, 'i');
                 if (repeatedRegex.test(s)) return true;
                 return false;

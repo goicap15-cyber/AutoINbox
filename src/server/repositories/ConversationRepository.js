@@ -960,6 +960,15 @@ class ConversationRepository {
 
     threadGenerations.set(thread_id, { session_epoch, generation });
 
+    // Before reconciliation, purge stale synthetic page_like_ entries from
+    // the DB. These are generated when the extension cannot assign a real
+    // mid.$ ID to a Like message. Once the extension is updated (or the
+    // next sync provides the real ID), these orphans cause duplicates and
+    // push Likes to the bottom of the conversation.
+    database.prepare(
+      "DELETE FROM messages WHERE thread_id = ? AND fb_message_id LIKE 'page_like_%'"
+    ).run(thread_id);
+
     const existingRows = database.prepare(`
       SELECT * FROM messages WHERE thread_id = ? ORDER BY sequence_order ASC, id ASC
     `).all(thread_id);

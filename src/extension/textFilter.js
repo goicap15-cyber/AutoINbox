@@ -165,6 +165,7 @@
     /(?:Hộp thư đến\s*){2,}/i,
     /Meta Business Suite/i,
     /^(?:Tin nhắn trực tiếp|Direct messages)$/i,
+    /^(?:Tin nhắn|Messages)$/i,
     /^(?:Hộp thư đến|Hộp thư|Inbox)$/i,
     /^(?:Chưa đọc|Unread)$/i,
     /^(?:Đã xong|Done)$/i,

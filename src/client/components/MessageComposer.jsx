@@ -146,9 +146,8 @@ export default function MessageComposer({
 
   const submitContent = async (rawContent) => {
     const submittedAttachment = attachment;
-    // Attachments travel through their own reliable queue. Do not let stale
-    // composer text become a second standalone message beside the media.
-    const content = submittedAttachment ? '' : String(rawContent || '').trim();
+    // Allow text caption to be sent alongside attachment
+    const content = String(rawContent || '').trim();
     if ((!content && !submittedAttachment) || sending || disabled || uploadingAttachment) return;
 
     const clientMessageId = 'client_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);

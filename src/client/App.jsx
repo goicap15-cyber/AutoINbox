@@ -1448,12 +1448,11 @@ export default function App() {
         };
     if (!payload.client_message_id) throw new Error('Thiáº¿u mÃ£ tin nháº¯n phÃ­a CRM.');
     const hasAttachment = Boolean(payload.attachment_id || payload.attachment?.media_type || payload.attachment?.preview_url);
-    // An attachment must never reuse text left in the composer from an earlier
-    // send: its queue owns the media bubble and has no standalone caption.
-    const outboundContent = hasAttachment ? '' : String(payload.content || '').trim();
+    // Preserve caption/text when attachment is present
+    const outboundContent = String(payload.content || '').trim();
     // Do not create a phantom CRM bubble for an empty transport event.
     // Real video/image sends always carry an attachment identity.
-    if (!String(payload.content || '').trim() && !hasAttachment) return;
+    if (!outboundContent && !hasAttachment) return;
 
     const newMsg = {
       client_message_id: payload.client_message_id,

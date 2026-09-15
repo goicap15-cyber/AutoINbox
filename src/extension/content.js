@@ -914,7 +914,7 @@
 
     if (isMissedCallContent) {
       is_outgoing = false;
-      sender_name = contactNameStr || 'KhÃƒÂ¡ch hÃƒÂ ng';
+      sender_name = contactNameStr || 'Khách hàng';
     } else if (/do BÃ¡ÂºÂ¡n gÃ¡Â»Â­i|Tin nhÃ¡ÂºÂ¯n do BÃ¡ÂºÂ¡n gÃ¡Â»Â­i lÃƒÂºc|BÃ¡ÂºÂ¡n Ã„â€˜ÃƒÂ£ gÃ¡Â»Â­i|sent by you|You sent|Message sent by you/i.test(effectiveLabel)) {
       is_outgoing = true;
       sender_name = 'BÃ¡ÂºÂ¡n';
@@ -978,7 +978,7 @@
         const relativeCenter = (bubbleRect.left + bubbleRect.width / 2 - mainRect.left) / mainRect.width;
         if (relativeCenter <= 0.45) {
           is_outgoing = false;
-          sender_name = contactNameStr || 'KhÃƒÂ¡ch hÃƒÂ ng';
+          sender_name = contactNameStr || 'Khách hàng';
         } else if (relativeCenter >= 0.55) {
           is_outgoing = true;
           sender_name = 'BÃ¡ÂºÂ¡n';

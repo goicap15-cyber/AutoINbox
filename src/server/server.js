@@ -518,11 +518,11 @@ function dispatchPageSidebarSync(accountId, reason = 'manual') {
     if (pageWs?.readyState === WebSocket.OPEN) {
       pageWs.send(JSON.stringify({ type: 'SYNC_PAGE_SIDEBAR', data: { account_id: accountKey, page_id: pageId, reason } }));
       dispatched += 1;
-    } else {
-      processManager.startPageProcess(pageId, accountKey).catch((error) => {
-        console.warn(`[PageSync] Could not start Page ${pageId}:`, error.message);
-      });
     }
+    // NOTE: Removed auto-spawn startPageProcess here. When pageWs is not
+    // connected the user's own Chrome (with Meta Business Suite already
+    // authenticated) will handle Page sync. Spawning a fresh, unauthenticated
+    // Chrome profile just redirects to the Facebook login page.
   }
   return dispatched;
 }
@@ -1472,7 +1472,7 @@ wss.on('connection', (ws, req) => {
                   VALUES (?, ?, ?)
                   ON CONFLICT(thread_id) DO UPDATE SET
                     avatar_url = excluded.avatar_url
-                `).run(tidStr, updatedName || 'KhÃƒÂ¡ch hÃƒÂ ng', localAvatarPath);
+                `).run(tidStr, updatedName || 'Khách hàng', localAvatarPath);
               }
             } catch (e) {
               console.warn('[WS] Avatar save failed:', e.message);
@@ -1535,7 +1535,7 @@ wss.on('connection', (ws, req) => {
             ConversationRepository.upsertThread({
               id: callThreadId,
               account_id: targetAccountIdForCall,
-              contact_name: m.contact_name || 'KhÃƒÂ¡ch hÃƒÂ ng',
+              contact_name: m.contact_name || 'Khách hàng',
               last_message: m.content,
               is_unread: !callIsOutgoing
             });
@@ -1770,7 +1770,7 @@ wss.on('connection', (ws, req) => {
           ConversationRepository.upsertThread({
             id: m.thread_id,
             account_id: targetAccountId,
-            contact_name: m.contact_name || 'KhÃƒÂ¡ch hÃƒÂ ng',
+            contact_name: m.contact_name || 'Khách hàng',
             last_message: m.content,
             is_unread: !isOutgoing
           });
@@ -2157,7 +2157,7 @@ wss.on('connection', (ws, req) => {
           if (m.contact_name && !isInvalidContactName(m.contact_name)) {
             const cleanName = m.contact_name.trim();
             const existing = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(m.thread_id);
-            if (!existing || isInvalidContactName(existing.contact_name) || (existing.contact_name || '').startsWith('KhÃƒÂ¡ch hÃƒÂ ng')) {
+            if (!existing || isInvalidContactName(existing.contact_name) || (existing.contact_name || '').startsWith('Khách hàng')) {
               db.prepare('UPDATE threads SET contact_name = ? WHERE id = ?').run(cleanName, m.thread_id);
               db.prepare(`
                 INSERT INTO contacts (thread_id, name)
@@ -2202,7 +2202,7 @@ wss.on('connection', (ws, req) => {
                 VALUES (?, ?, ?)
                 ON CONFLICT(thread_id) DO UPDATE SET
                   email = COALESCE(NULLIF(excluded.email,''), contacts.email)
-              `).run(m.thread_id, m.contact_name || 'KhÃƒÂ¡ch hÃƒÂ ng', emails[0] || null);
+              `).run(m.thread_id, m.contact_name || 'Khách hàng', emails[0] || null);
             }
 
             // Phone capture (spec 035): exact-prefix detection, immutable
@@ -2413,7 +2413,7 @@ wss.on('connection', (ws, req) => {
           const knownThread = internalThreadId
             ? db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(internalThreadId)
             : null;
-          const callerName = String(data.caller_name || knownThread?.contact_name || '').trim() || 'KhÃƒÂ¡ch hÃƒÂ ng';
+          const callerName = String(data.caller_name || knownThread?.contact_name || '').trim() || 'Khách hàng';
           io.emit('INCOMING_CALL_RINGING', { ...data, caller_name: callerName, thread_id: internalThreadId || data.thread_id || null, external_thread_id: data.thread_id || null, account_id: accountId });
           break;
         }
@@ -2513,7 +2513,7 @@ wss.on('connection', (ws, req) => {
 
                   // A media message with no caption is a valid "last message" too -
                   // preview it as [Ã¡ÂºÂ¢nh] instead of falling through to an older text
-                  // message or "ChÃ†Â°a cÃƒÂ³ tin nhÃ¡ÂºÂ¯n".
+                  // message or "Chưa có tin nhắn".
                   const validInDb = dbMsgs.find(m => {
                     if (m.media_url) return true;
                     const c = cleanMessageText(m.content);
@@ -2522,7 +2522,7 @@ wss.on('connection', (ws, req) => {
 
                   cleanLastMsg = validInDb
                     ? (cleanMessageText(validInDb.content) || (validInDb.media_url ? '[Ã¡ÂºÂ¢nh]' : ''))
-                    : 'ChÃ†Â°a cÃƒÂ³ tin nhÃ¡ÂºÂ¯n';
+                    : 'Chưa có tin nhắn';
                 }
 
                 const normalizedPreviousThread = previousThread
@@ -2872,7 +2872,7 @@ wss.on('connection', (ws, req) => {
               ConversationRepository.upsertThread({
                 id: String(thread_id),
                 account_id,
-                contact_name: 'KhÃƒÂ¡ch hÃƒÂ ng',
+                contact_name: 'Khách hàng',
                 is_unread: false
               });
             }
@@ -3885,9 +3885,8 @@ io.on('connection', (socket) => {
         const accepted = RichMessageService.submit({
           threadId: thread_id,
           clientMessageId: client_message_id,
-          // Rich attachments own a media bubble; ignore any stale composer
-          // text so a video/image cannot also create a second text message.
-          content: attachment_id ? '' : content,
+          // Preserve text caption alongside attachment
+          content: content || '',
           attachmentId: attachment_id || null
         }, {
           database: db,
@@ -5122,30 +5121,31 @@ function startServer() {
     server.listen(PORT, '0.0.0.0');
   });
 
-  // DÃ¡Â»Ân dÃ¡ÂºÂ¹p cÃƒÂ¡c tÃƒÂªn rÃƒÂ¡c hÃ¡Â»â€¡ thÃ¡Â»â€˜ng (vÃƒÂ­ dÃ¡Â»Â¥: "TÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ tin nhÃ¡ÂºÂ¯n", "HÃ¡Â»â„¢p thÃ†Â° Ã„â€˜Ã¡ÂºÂ¿n") Ã„â€˜ÃƒÂ£ lÃ†Â°u vÃƒÂ o CSDL trÃ†Â°Ã¡Â»â€ºc Ã„â€˜ÃƒÂ¢y
+    // Dọn dẹp các tên rác hệ thống (ví dụ: "Tất cả tin nhắn", "Hộp thư đến", "Tin nhắn") đã lưu vào CSDL trước đây
   try {
     const dirtySystemNames = [
-      'TÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ tin nhÃ¡ÂºÂ¯n', 'TÃ¡ÂºÂ¥t cÃ¡ÂºÂ£', 'All messages', 'All',
-      'Tin nhÃ¡ÂºÂ¯n trÃ¡Â»Â±c tiÃ¡ÂºÂ¿p', 'Direct messages',
-      'HÃ¡Â»â„¢p thÃ†Â° Ã„â€˜Ã¡ÂºÂ¿n', 'HÃ¡Â»â„¢p thÃ†Â°', 'Inbox',
-      'ChÃ†Â°a Ã„â€˜Ã¡Â»Âc', 'Unread', 'Ã„ÂÃƒÂ£ xong', 'Done',
-      'GÃ¡ÂºÂ¯n dÃ¡ÂºÂ¥u sao', 'Ã„ÂÃƒÂ£ gÃ¡ÂºÂ¯n dÃ¡ÂºÂ¥u sao', 'Starred',
-      'Spam', 'ThÃ†Â° rÃƒÂ¡c', 'Ã„Âang', 'Facebook', 'Messenger', 'Meta'
+      'Tất cả tin nhắn', 'Tất cả', 'All messages', 'All',
+      'Tin nhắn trực tiếp', 'Direct messages',
+      'Tin nhắn', 'Messages',
+      'Hộp thư đến', 'Hộp thư', 'Inbox',
+      'Chưa đọc', 'Unread', 'Đã xong', 'Done',
+      'Gắn dấu sao', 'Đã gắn dấu sao', 'Starred',
+      'Spam', 'Thư rác', 'Đang', 'Facebook', 'Messenger', 'Meta'
     ];
     const placeholders = dirtySystemNames.map(() => '?').join(',');
     db.prepare(`
       UPDATE threads 
-      SET contact_name = 'KhÃƒÂ¡ch hÃƒÂ ng' 
+      SET contact_name = 'Khách hàng' 
       WHERE contact_name IN (${placeholders}) 
-         OR contact_name LIKE 'Ã„Âang hoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng%' 
-         OR contact_name LIKE 'HoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng%'
+         OR contact_name LIKE 'Đang hoạt động%' 
+         OR contact_name LIKE 'Hoạt động%'
     `).run(...dirtySystemNames);
     db.prepare(`
       UPDATE contacts 
-      SET name = 'KhÃƒÂ¡ch hÃƒÂ ng' 
+      SET name = 'Khách hàng' 
       WHERE name IN (${placeholders}) 
-         OR name LIKE 'Ã„Âang hoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng%' 
-         OR name LIKE 'HoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng%'
+         OR name LIKE 'Đang hoạt động%' 
+         OR name LIKE 'Hoạt động%'
     `).run(...dirtySystemNames);
 
     // Dọn dẹp tin nhắn rác từ các nút menu Meta Business Suite & chuẩn hóa lại thứ tự tin nhắn

@@ -390,6 +390,69 @@ async function isolateFailedMediaDraftBeforeSend(tabId) {
   return { ...cleanup, cleaned: true };
 }
 
+async function resetFailedBusinessSuiteComposerDraft(tabId) {
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const visible = (el) => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          return Boolean(r && r.width > 0 && r.height > 0);
+        };
+
+        // 1. Clear any stuck text inside contenteditable composer
+        const textboxes = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
+          .filter((el) => {
+            if (!visible(el)) return false;
+            const label = String(el.getAttribute('aria-label') || '').toLowerCase();
+            return !label.includes('search') && !label.includes('tìm kiếm');
+          });
+        for (const box of textboxes) {
+          if (box.innerText && box.innerText.trim()) {
+            box.focus();
+            try {
+              document.execCommand('selectAll', false, null);
+              document.execCommand('delete', false, null);
+            } catch (_) {}
+            box.textContent = '';
+            box.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
+          }
+        }
+
+        // 2. Dismiss or remove any suggested reply / draft chips / attachment chips
+        const dismissButtons = [...document.querySelectorAll('button, [role="button"]')]
+          .filter((el) => {
+            if (!visible(el)) return false;
+            const label = (el.getAttribute('aria-label') || '').toLowerCase();
+            const title = (el.getAttribute('title') || '').toLowerCase();
+            const text = (el.textContent || '').trim().toLowerCase();
+            const combined = `${label} ${title} ${text}`;
+            return /^(?:đóng|close|xóa|gỡ|remove|dismiss|huỷ|hủy)$/i.test(combined) ||
+                   /(?:gỡ|xóa|xoá|remove|delete|discard).*(?:file|tệp|ảnh|hình|video|attachment|gợi ý|draft)/i.test(combined);
+          });
+
+        let clickedCount = 0;
+        for (const btn of dismissButtons) {
+          const r = btn.getBoundingClientRect();
+          if (r.top > window.innerHeight * 0.4) {
+            btn.click();
+            clickedCount++;
+          }
+        }
+
+        return { success: true, cleared_boxes: textboxes.length, dismissed_buttons: clickedCount };
+      }
+    });
+    const cleaned = result?.[0]?.result || { success: false };
+    sendToBackend('COMPOSER_DEBUG', { stage: 'business_suite_draft_cleanup', ...cleaned });
+    return cleaned;
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+
 async function waitForMessengerAttachmentReady(tabId, attachmentOrManifest) {
   const items = Array.isArray(attachmentOrManifest) ? attachmentOrManifest : [attachmentOrManifest];
   const hasVideo = items.some((item) => item?.media_type === 'video' || String(item?.mime_type || '').startsWith('video/'));
@@ -3205,7 +3268,12 @@ async function typeAndSubmitComposer(tabId, content) {
         const text = (el.textContent || '').trim();
         return /^(Gửi|Send)$/i.test(text);
       };
-      const isReadySendButton = (el) => el && !el.disabled && el.getAttribute('aria-disabled') !== 'true' && isNotLikeButton(el);
+      const visible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        return Boolean(rect && rect.width > 0 && rect.height > 0);
+      };
+      const isReadySendButton = (el) => el && visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true' && isNotLikeButton(el);
       const findInScope = (scope) => {
         const labelledCandidates = [...(scope.querySelectorAll?.(SEND_SELECTOR) || [])];
         const labelled = labelledCandidates.find(isReadySendButton);
@@ -3240,7 +3308,10 @@ async function typeAndSubmitComposer(tabId, content) {
       const composerBefore = document.activeElement;
       const textBefore = (composerBefore?.innerText || composerBefore?.textContent || '').trim();
       const sendRect = sendButton.getBoundingClientRect();
-      const buttonCenter = { x: sendRect.left + sendRect.width / 2, y: sendRect.top + sendRect.height / 2 };
+      const hasValidRect = sendRect.width > 0 && sendRect.height > 0;
+      const buttonCenter = hasValidRect
+        ? { x: sendRect.left + sendRect.width / 2, y: sendRect.top + sendRect.height / 2 }
+        : null;
       if (!textBefore) {
         return { success: false, error: 'Attachment-only message requires trusted CDP click', button_center: buttonCenter, aria_label: sendButton.getAttribute('aria-label') };
       }
@@ -3271,7 +3342,10 @@ async function typeAndSubmitComposer(tabId, content) {
     const clickDetails = clickResult?.[0]?.result || {};
     console.log('[FB Engine] DOM send did not dispatch; trying trusted CDP send:', clickDetails.error);
     let cdpResult = null;
-    if (clickDetails.button_center) {
+    const hasValidCenter = clickDetails.button_center &&
+      clickDetails.button_center.x > 0 &&
+      clickDetails.button_center.y > 0;
+    if (hasValidCenter) {
       cdpResult = await dispatchTrustedPointerClick(tabId, clickDetails.button_center);
       sendToBackend('COMPOSER_DEBUG', { stage: 'trusted_send_click', ...cdpResult, button_center: clickDetails.button_center });
       // Exactly one trusted submit per attachment. Messenger keeps a normal
@@ -3357,6 +3431,9 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
     await delay(1200);
   }
 
+  // Dọn dẹp bản nháp hoặc gợi ý cũ nếu có trước khi soạn thảo
+  await resetFailedBusinessSuiteComposerDraft(tab.id).catch(() => null);
+
   // Vòng lặp chờ ô soạn thảo và so khớp danh tính thực tế trên DOM
   const interactionDeadline = Date.now() + 10000;
   let interactionState = null;
@@ -3441,13 +3518,18 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
     throw new Error(`Business Suite contact identity mismatch: ${visibleContactName} !== ${expected_contact_name}`);
   }
 
-  const attachmentPayload = attachmentManifest || attachment;
-  if (attachmentPayload) {
-    await stageBusinessSuiteAttachment(tab.id, attachmentPayload);
-    await waitForBusinessSuiteAttachmentReady(tab.id, attachmentPayload);
-  }
+  try {
+    const attachmentPayload = attachmentManifest || attachment;
+    if (attachmentPayload) {
+      await stageBusinessSuiteAttachment(tab.id, attachmentPayload);
+      await waitForBusinessSuiteAttachmentReady(tab.id, attachmentPayload);
+    }
 
-  await typeAndSubmitComposer(tab.id, content);
+    await typeAndSubmitComposer(tab.id, content);
+  } catch (error) {
+    await resetFailedBusinessSuiteComposerDraft(tab.id).catch(() => null);
+    throw error;
+  }
 
   console.log('[FB Engine] ✅ Đã dispatch tin nhắn qua Business Suite');
   sendToBackend('SEND_MESSAGE_RESULT', {
