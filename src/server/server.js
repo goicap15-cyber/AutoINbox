@@ -2866,6 +2866,54 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'PAGE_THREAD_MESSAGES_SYNCED_V1': {
+          const envelope = msg.data || {};
+          const { verifyPageOwnership } = require('./utils/pageContextResolver');
+          const pageThreadId = String(envelope.thread_id || '');
+          const authenticatedAccountId = String(ws.accountId || '');
+          const pageId = String(envelope.page_id || '');
+          const ackBase = { thread_id: pageThreadId, session_epoch: envelope.session_epoch, generation: envelope.generation, scan_id: envelope.scan_id };
+          if (!pageThreadId || !pageId || !authenticatedAccountId || (envelope.account_id && String(envelope.account_id) !== authenticatedAccountId)) {
+            const ack = { ...ackBase, status: 'rejected', reason: 'invalid_authenticated_page_context' };
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: ack }));
+            break;
+          }
+          try {
+            if (!verifyPageOwnership(authenticatedAccountId, pageId, db)) {
+              const ack = { ...ackBase, status: 'rejected', reason: 'unauthorized_page_ownership' };
+              InboxSyncScheduler.markThreadSyncResult(authenticatedAccountId, pageThreadId, ack.reason);
+              if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: ack }));
+              break;
+            }
+            const source = InboxSourceService.getSourceByExternalId('page_messenger', pageId, db);
+            if (!source || String(source.owner_account_id || '') !== authenticatedAccountId) {
+              const ack = { ...ackBase, status: 'rejected', reason: 'page_source_not_registered' };
+              if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: ack }));
+              break;
+            }
+            ConversationRepository.upsertThread({
+              id: pageThreadId,
+              external_thread_id: pageThreadId,
+              account_id: authenticatedAccountId,
+              source_id: source.id,
+              contact_name: envelope.contact_name || 'Khách hàng',
+              last_message: Array.isArray(envelope.messages) && envelope.messages.length ? (envelope.messages[envelope.messages.length - 1].content || 'Chưa có tin nhắn') : 'Chưa có tin nhắn',
+              is_unread: 0,
+              inbox_folder: 'INBOX'
+            }, db);
+            const ack = ConversationRepository.processPageBatchEnvelope({ ...envelope, account_id: authenticatedAccountId, page_id: pageId }, db);
+            InboxSyncScheduler.markThreadSyncResult(authenticatedAccountId, pageThreadId, ack.status === 'committed' ? null : (ack.reason || 'page_batch_rejected'));
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: ack }));
+            const persistedRows = db.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY COALESCE(sequence_order, id) ASC, id ASC').all(pageThreadId);
+            io.emit('THREAD_MESSAGES_UPDATED', { thread_id: pageThreadId, account_id: authenticatedAccountId, messages: persistedRows.map(withAttachmentAccessUrl), authoritative: true, sync_status: ack.status === 'committed' || ack.status === 'duplicate' ? 'SYNCED' : 'FAILED', sync_error: ack.reason || null });
+          } catch (error) {
+            console.error('[PAGE_BATCH] ingest failed:', error.message);
+            const ack = { ...ackBase, status: 'retry_required', reason: 'page_batch_ingest_failed' };
+            InboxSyncScheduler.markThreadSyncResult(authenticatedAccountId, pageThreadId, ack.reason);
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: ack }));
+          }
+          break;
+        }
         case 'BULK_HISTORY_SYNC_PROGRESS': {
           const progress = msg.data || {};
           const job = bulkHistoryJobs.get(String(progress.job_id || ''));
@@ -4046,7 +4094,10 @@ app.get('/api/inbox-sources', (req, res) => {
 app.post('/api/inbox-sources/page', (req, res) => {
   try {
     const raw = String(req.body?.page_access_token || '').trim();
-    const ownerAccountId = req.body?.owner_account_id || null;
+    const requestedOwnerAccountId = req.body?.owner_account_id || null;
+    const ownerAccountId = requestedOwnerAccountId && enterpriseAccess.canAccessAccount(req.user, requestedOwnerAccountId)
+      ? String(requestedOwnerAccountId)
+      : null;
     if (!raw) return res.status(400).json({ error: 'Thiếu Link Page hoặc ID Page' });
 
     const pageId = parsePageIdFromInput(raw);
@@ -4054,7 +4105,14 @@ app.post('/api/inbox-sources/page', (req, res) => {
       return res.status(400).json({ error: 'Không nhận diện được ID Page. Dùng ID số hoặc link dạng facebook.com/profile.php?id=...' });
     }
 
+    if (!ownerAccountId) return res.status(403).json({ error: 'Tài khoản Facebook sở hữu Page không hợp lệ hoặc bạn không có quyền truy cập.' });
     const source = InboxSourceService.ensurePageSource({ pageId, accountId: ownerAccountId, pageName: null }, db);
+    // Launch asynchronously after the source is persisted. Personal Messenger
+    // keeps its existing Chrome process; Page receives a separate profile/window
+    // with the extension installed and opens Business Suite for this page.
+    processManager.startPageProcess(pageId, ownerAccountId).catch((launchError) => {
+      console.warn(`[InboxSource] Không thể mở Chrome riêng cho Page ${pageId}:`, launchError.message);
+    });
     io.emit('INBOX_SOURCE_ADDED', { id: source.id, source_type: 'page_messenger', display_name: source.display_name });
     res.json(source);
   } catch (error) {

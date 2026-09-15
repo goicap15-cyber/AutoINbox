@@ -1133,6 +1133,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
   }
 
+  if (message.type === 'PAGE_THREAD_MESSAGES_SYNCED_V1') {
+    const msgData = message.data || {};
+    sendToBackend('PAGE_THREAD_MESSAGES_SYNCED_V1', {
+      ...msgData,
+      account_id: user_id || msgData.account_id,
+      source_type: 'page_messenger'
+    });
+  }
   if (message.type === 'UPDATE_THREAD_METADATA') {
     const msgData = message.data;
     console.log('[FB Engine] 👤 UPDATE_THREAD_METADATA từ page_content:', JSON.stringify(msgData));
@@ -3060,7 +3068,14 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
       () => getBusinessSuiteTab(page_id),
       async () => {
         const created = await new Promise(resolve => {
-          chrome.tabs.create({ url: targetUrl, active: false, pinned: true }, resolve);
+          // Open Page Business Suite in a separate Chrome window. The extension
+          // keeps the Page tab registered by page_id, while personal Messenger
+          // remains in its own window/flow.
+          chrome.windows.create({ url: targetUrl, focused: false, type: 'normal' }, (createdWindow) => {
+            const createdTab = createdWindow?.tabs?.[0] || null;
+            if (createdTab?.id) chrome.tabs.update(createdTab.id, { pinned: true }).catch(() => {});
+            resolve(createdTab);
+          });
         });
         if (created?.id) {
           await registerTab(role, created.id);
@@ -4707,9 +4722,22 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     : page_id
       ? await getBusinessSuiteTab(page_id)
       : await ensureRoleMessengerTab(targetAcc, 'history');
-
+  if (!tab && page_id) {
+    const pageTargetUrl = thread_url || `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(page_id)}&mailbox_id=${encodeURIComponent(page_id)}&selected_item_id=${encodeURIComponent(navigationThreadId)}&thread_type=FB_MESSAGE`;
+    tab = await new Promise((resolve) => {
+      chrome.windows.create({ url: pageTargetUrl, focused: false, type: 'normal' }, (createdWindow) => {
+        const createdTab = createdWindow?.tabs?.[0] || null;
+        if (createdTab?.id) {
+          registerTab(`page:${page_id}`, createdTab.id).catch(() => {});
+          chrome.tabs.update(createdTab.id, { pinned: true }).catch(() => {});
+        }
+        resolve(createdTab);
+      });
+    });
+    if (tab?.id) await Promise.race([waitForTabComplete(tab.id, 12000), delay(3500)]);
+  }
   if (!tab) {
-    console.warn('[FB Engine] Không có/tạo được tab Facebook tương ứng để sync thread messages.');
+    console.warn('[FB Engine] Không có/tạo được Chrome tương ứng để sync thread messages.');
     sendToBackend('THREAD_MESSAGES_SYNCED', { account_id: targetAcc, thread_id, messages: [], reason: 'no_background_tab', mode, cursor });
     return;
   }
@@ -4766,6 +4794,18 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     return;
   }
 
+  if (page_id) {
+    const pageMode = mode === 'ondemand_older' ? 'page_scroll_older' : (mode === 'ondemand_viewport' ? 'ondemand_viewport' : 'page_initial');
+    chrome.tabs.sendMessage(tab.id, {
+      type: 'REQUEST_PAGE_BATCH_SYNC',
+      data: { account_id: targetAcc, thread_id, page_id, mode: pageMode, cursor }
+    }).catch(async (error) => {
+      console.warn('[FB Engine] Page content script unavailable:', error?.message || error);
+      sendToBackend('PAGE_SCROLLER_DEBUG', { thread_id, stage: 'TAB_DISCONNECTED', error: error?.message || String(error) });
+      sendToBackend('THREAD_MESSAGES_SYNCED', { account_id: targetAcc, thread_id, messages: [], reason: 'page_content_unavailable', mode, cursor });
+    });
+    return;
+  }
   // Messenger can leave a newly opened conversation completely unmounted in
   // an inactive background tab. Activate initial sync as well as older-page
   // sync so a blank CRM conversation does not require sending a message before
