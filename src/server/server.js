@@ -711,7 +711,7 @@ function isRecentOutgoingTextEcho(threadId, message = {}, database = db) {
   // replays an operator bubble as an incoming row. Match the durable outgoing
   // text across the history window so a late crawler cannot resurrect it.
   const observerSource = String(message.source || '').toLowerCase();
-  const isObserverEcho = ['dom_observer', 'dom_history_sync', 'history_sync', 'history_backfill'].includes(observerSource)
+  const isObserverEcho = ['dom_observer', 'dom_history_sync', 'history_sync', 'history_backfill', 'bulk_history_sync'].includes(observerSource)
     || !message.sender_id;
   const isSyntheticObserverId = isObserverEcho
     || /^(?:dom_|history_|network_|websocket_|mercury_|xhr_)/i.test(String(message.fb_message_id || ''));

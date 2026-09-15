@@ -196,7 +196,9 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
 // repeated identical messages are intentionally preserved.
 const reconcileOutgoingTextEchoes = (items = []) => {
   const result = [];
-  const normalizedText = (message) => String(message?.content || '').replace(/\s+/g, ' ').trim();
+  const normalizedText = (message) => String(message?.content || '')
+    .replace(/[\u200B-\u200D\uFEFF\u2060]/g, '')
+    .replace(/\s+/g, ' ').trim();
   const isPlainText = (message) => !(
     message?.attachment_id || message?.media_url || message?.local_media_path
     || (message?.media_type && message.media_type !== 'text')
@@ -1178,7 +1180,7 @@ export default function App() {
           fetch(`/api/threads/${threadId}/messages`)
             .then((response) => response.json())
             .then((data) => {
-              if (Array.isArray(data)) setMessages((previous) => ({ ...previous, [threadId]: mergeMessagesWithoutReordering(previous[threadId] || [], preserveOrderAnchors(data, previous[threadId] || [])) }));
+              if (Array.isArray(data)) setMessages((previous) => ({ ...previous, [threadId]: reconcileOutgoingTextEchoes(mergeMessagesWithoutReordering(previous[threadId] || [], preserveOrderAnchors(data, previous[threadId] || []))) }));
             })
             .catch(() => {});
         }
@@ -1198,7 +1200,7 @@ export default function App() {
           .then((response) => response.json())
           .then((data) => {
             if (!Array.isArray(data)) return;
-            setMessages((previous) => ({ ...previous, [String(currentThreadId)]: mergeMessagesWithoutReordering(previous[String(currentThreadId)] || [], preserveOrderAnchors(data, previous[String(currentThreadId)] || [])) }));
+            setMessages((previous) => ({ ...previous, [String(currentThreadId)]: reconcileOutgoingTextEchoes(mergeMessagesWithoutReordering(previous[String(currentThreadId)] || [], preserveOrderAnchors(data, previous[String(currentThreadId)] || []))) }));
           })
           .catch(() => {});
       }, 750);
