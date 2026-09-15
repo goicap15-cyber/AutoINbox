@@ -82,6 +82,24 @@ if (!contactColumns.includes('nickname')) {
   console.log('[DB] Added missing contacts.nickname column.');
 }
 
+const userColumns = db.prepare('PRAGMA table_info(users)').all().map((column) => column.name);
+if (!userColumns.includes('company_id')) {
+  try { db.exec('ALTER TABLE users ADD COLUMN company_id INTEGER;'); } catch (_) {}
+  try { db.exec('UPDATE users SET company_id = id WHERE company_id IS NULL;'); } catch (_) {}
+  console.log('[DB] Added missing users.company_id column.');
+}
+if (!userColumns.includes('company_role')) {
+  try { db.exec("ALTER TABLE users ADD COLUMN company_role TEXT NOT NULL DEFAULT 'ADMIN' CHECK(company_role IN ('ADMIN','EMPLOYEE'));"); } catch (_) {}
+  console.log('[DB] Added missing users.company_role column.');
+}
+
+const accountColumns = db.prepare('PRAGMA table_info(accounts)').all().map((column) => column.name);
+if (!accountColumns.includes('company_id')) {
+  try { db.exec('ALTER TABLE accounts ADD COLUMN company_id INTEGER;'); } catch (_) {}
+  try { db.exec('UPDATE accounts SET company_id = owner_user_id WHERE company_id IS NULL;'); } catch (_) {}
+  console.log('[DB] Added missing accounts.company_id column.');
+}
+
 // Initialize migrations table
 db.exec(`
   CREATE TABLE IF NOT EXISTS migrations (

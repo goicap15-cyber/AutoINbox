@@ -88,12 +88,12 @@ const centralAuthClient = new CentralAuthClient();
 app.use(express.json());
 
 function sendAuthError(res, error) {
-  const status = error instanceof AuthError || error instanceof CentralAuthError ? error.status : 500;
-  if (status === 500) console.error('[Auth]', error);
+  const status = error instanceof AuthError || error instanceof CentralAuthError ? error.status : (error?.status || 500);
+  if (status === 500) console.error('[Auth Error]', error);
   res.status(status).json({
     success: false,
-    code: error.code || 'AUTH_ERROR',
-    message: status === 500 ? 'KhÃƒÂ´ng thÃ¡Â»Æ’ xÃ¡Â»Â­ lÃƒÂ½ yÃƒÂªu cÃ¡ÂºÂ§u Ã„â€˜Ã„Æ’ng nhÃ¡ÂºÂ­p.' : error.message
+    code: error?.code || 'AUTH_ERROR',
+    message: error?.message || 'Không thể xử lý yêu cầu đăng nhập.'
   });
 }
 
