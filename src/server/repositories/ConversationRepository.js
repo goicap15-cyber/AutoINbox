@@ -407,7 +407,10 @@ class ConversationRepository {
         // The existing outgoing row is authoritative; reject that incoming
         // history observation before it reaches INSERT/UPSERT.
         const historySource = String(msg.source || msg.timestamp_source || '').toLowerCase();
-        const isHistoryObservation = historySource.includes('history') || historySource.includes('dom_');
+        const observedId = String(msg.fb_message_id || msg.messageId || '');
+        const isHistoryObservation = historySource.includes('history') || historySource.includes('dom_')
+          || historySource === 'facebook_label'
+          || /(?:__bubble_\d+|^dom_|^history_)/i.test(observedId);
         if (!isOutgoing && isHistoryObservation && mediaType === 'text'
           && ConversationRepository.hasMatchingOutgoingText(threadId, content, database)) {
           result.skippedCount += 1;

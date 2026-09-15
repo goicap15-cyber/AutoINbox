@@ -2667,10 +2667,38 @@ wss.on('connection', (ws, req) => {
           let resolvedSyncStatus = null;
           
           if (Array.isArray(messages) && messages.length > 0) {
+            // A single Facebook DOM/history batch can contain the real
+            // operator bubble and a replay of that same bubble marked as
+            // CONTACT (usually with an __bubble_N id). The old guard only
+            // looked at rows already persisted, so both records passed the
+            // filter when they arrived in the same batch. Build a batch-local
+            // outgoing index first and drop only synthetic history replays.
+            const batchOutgoingTexts = new Set(messages
+              .filter((candidate) => {
+                const flag = candidate?.is_outgoing;
+                return flag === true || flag === 1 || flag === '1'
+                  || String(flag || '').toLowerCase() === 'true';
+              })
+              .filter((candidate) => String(candidate?.media_type || 'text').toLowerCase() === 'text')
+              .map((candidate) => cleanMessageText(candidate.content ?? candidate.text ?? candidate.cleaned ?? '')
+                .replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN'))
+              .filter(Boolean));
             let validMessages = messages.map(m => ({ ...m, content: cleanMessageText(m.content) }))
               .filter(m => {
                 if (String(m.thread_id || thread_id) !== String(thread_id)) return false;
                 if (!isRenderableStoredMessage(m)) return false;
+                const flag = m.is_outgoing;
+                const outgoing = flag === true || flag === 1 || flag === '1'
+                  || String(flag || '').toLowerCase() === 'true';
+                const mediaType = String(m.media_type || 'text').toLowerCase();
+                const normalizedText = cleanMessageText(m.content || '')
+                  .replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+                const syntheticHistoryId = /(?:__bubble_\d+|^dom_|^history_)/i.test(String(m.fb_message_id || ''));
+                if (!outgoing && mediaType === 'text' && syntheticHistoryId
+                  && normalizedText && batchOutgoingTexts.has(normalizedText)) {
+                  console.log('[WS] Batch Guard: skip same-batch outgoing text replay', { thread_id, content: sanitizeLog(m.content, 60) });
+                  return false;
+                }
                 if (isRecentOutgoingTextEcho(thread_id, m, db)) {
                   console.log(`[WS] History Guard: skip CRM outbound text echo parsed as incoming: thread=${thread_id} content="${sanitizeLog(m.content, 60)}"`);
                   return false;
