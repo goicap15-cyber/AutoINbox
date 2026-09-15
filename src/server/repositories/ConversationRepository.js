@@ -192,6 +192,23 @@ class ConversationRepository {
     return candidates.some((row) => String(row.content || '')
       .replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN') === normalizedContent);
   }
+  // DOM/history observers can replay an operator bubble long after the
+  // original send was confirmed or with a timestamp that does not match the
+  // local clock. For observer-only incoming rows, an existing outgoing text
+  // in the same thread is authoritative and the observed row is an echo.
+  static hasMatchingOutgoingText(threadId, content, database = getDefaultDb()) {
+    const normalizedContent = String(content || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+    if (!threadId || !normalizedContent) return false;
+    const candidates = database.prepare(`
+      SELECT content
+      FROM messages
+      WHERE thread_id = ? AND is_outgoing = 1
+        AND (media_type IS NULL OR media_type = 'text')
+      ORDER BY id DESC LIMIT 100
+    `).all(threadId);
+    return candidates.some((row) => String(row.content || '')
+      .replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN') === normalizedContent);
+  }
   static upsertThread(threadData, database = getDefaultDb()) {
     const { id, account_id, thread_url, contact_name, last_message, is_unread, source_id, inbox_folder } = threadData;
     const external_thread_id = String(threadData.external_thread_id || threadData.thread_id || id);
@@ -404,17 +421,47 @@ class ConversationRepository {
             content = null;
           }
         }
-        if (!mediaUrl && mediaType === 'text') {
-          const cleaned = cleanMessageText(content);
-          if (!cleaned || isSystemOrMetadataText(cleaned) || cleaned === 'Đang tải...') {
-            result.skippedCount += 1;
-            continue;
-          }
-          content = cleaned;
+        const cleanedContent = cleanMessageText(content);
+        if (!mediaUrl && (mediaType === 'text' || !mediaType) && (!cleanedContent || isSystemOrMetadataText(cleanedContent) || cleanedContent === 'Đang tải...')) {
+          result.skippedCount += 1;
+          continue;
+        }
+        content = cleanedContent;
+        // History crawlers can label an operator bubble as CONTACT/current_user.
+        // The existing outgoing row is authoritative; reject that incoming
+        // history observation before it reaches INSERT/UPSERT.
+        const historySource = String(msg.source || msg.timestamp_source || '').toLowerCase();
+        const observedId = String(msg.fb_message_id || msg.messageId || '');
+        const isHistoryObservation = historySource.includes('history') || historySource.includes('dom_')
+          || historySource === 'facebook_label'
+          || /(?:__bubble_\d+|^dom_|^history_)/i.test(observedId);
+        if (!isOutgoing && isHistoryObservation && mediaType === 'text'
+          && ConversationRepository.hasMatchingOutgoingText(threadId, content, database)) {
+          result.skippedCount += 1;
+          continue;
         }
         const observedCreatedAt = msg.created_at || (observedTimestampMs > 0 ? new Date(observedTimestampMs).toISOString() : new Date().toISOString());
         let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
         let promotedSidebarPreview = false;
+        // If the incoming message has an official fb_message_id but the DB only
+        // knows a pending_client_* placeholder, upgrade the pending row in-place
+        // so all downstream UPSERT logic finds the right existing record and does
+        // NOT insert a second row.
+        if (!existing && msg.fb_message_id && msg.client_message_id
+          && String(msg.client_message_id).startsWith('pending_')) {
+          try {
+            const upgradeInfo = database.prepare(
+              'SELECT fb_message_id FROM messages WHERE thread_id = ? AND fb_message_id = ? AND is_outgoing = 1 LIMIT 1'
+            ).get(threadId, String(msg.client_message_id));
+            if (upgradeInfo) {
+              database.prepare(
+                'UPDATE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\') WHERE thread_id = ? AND fb_message_id = ?'
+              ).run(String(msg.fb_message_id), threadId, String(msg.client_message_id));
+              stableId = String(msg.fb_message_id);
+              existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+            }
+          } catch (_) { /* non-fatal: fall through to normal insert path */ }
+        }
         if (!existing && msg.fb_message_id) {
           const promoted = ConversationRepository.promoteSidebarPreview({
             threadId, fbMessageId: msg.fb_message_id, content, isOutgoing,
@@ -447,6 +494,14 @@ class ConversationRepository {
           if (equivalentBubble) {
             stableId = equivalentBubble.fb_message_id;
             existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+          }
+        }
+        if (!existing && msg.fb_message_id && String(msg.fb_message_id).endsWith('_media')) {
+          const parentFbId = String(msg.fb_message_id).slice(0, -'_media'.length);
+          const parentRow = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE thread_id = ? AND fb_message_id = ?').get(threadId, parentFbId);
+          if (parentRow) {
+            stableId = parentFbId;
+            existing = parentRow;
           }
         }
         // Facebook sometimes omits data-message-id during a partial/reloaded DOM
@@ -514,7 +569,9 @@ class ConversationRepository {
       }
       return result;
     });
-    return transaction(messages);
+    const res = transaction(messages);
+    ConversationRepository.normalizeMessageSequence(threadId, database);
+    return res;
   }
 
   static extractFbMessageSequence(fbMessageId) {
@@ -909,10 +966,12 @@ class ConversationRepository {
         const cmp = seqA.localeCompare(seqB);
         if (cmp !== 0) return cmp;
       }
-      const tsA = Number(a.timestamp_ms || 0);
-      const tsB = Number(b.timestamp_ms || 0);
+      const tsA = Number(a.timestamp_ms || (a.created_at ? new Date(a.created_at).getTime() : 0));
+      const tsB = Number(b.timestamp_ms || (b.created_at ? new Date(b.created_at).getTime() : 0));
       if (tsA !== tsB && tsA > 0 && tsB > 0) return tsA - tsB;
-      return (a.sequence_order || a.dom_order || 0) - (b.sequence_order || b.dom_order || 0);
+      const orderA = Number(a.sequence_order ?? a.dom_order ?? a.id ?? 0);
+      const orderB = Number(b.sequence_order ?? b.dom_order ?? b.id ?? 0);
+      return orderA - orderB;
     });
     mergedList.forEach((msg, idx) => {
       msg.sequence_order = idx + 1;

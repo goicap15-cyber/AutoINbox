@@ -190,8 +190,11 @@ function runPersonalSendSerialized(accountId, operation) {
   }).catch(() => {});
   return current;
 }
-function runPersonalHistorySerialized(accountId, operation) {
+function runPersonalHistorySerialized(accountId, operation, isPriority = false) {
   const key = String(accountId || user_id || 'default');
+  if (isPriority) {
+    personalHistoryChains.delete(key);
+  }
   const previous = personalHistoryChains.get(key) || Promise.resolve();
   const current = previous.catch(() => {}).then(operation);
   personalHistoryChains.set(key, current);
@@ -979,10 +982,22 @@ function connectWebSocket() {
         case 'SYNC_THREAD_MESSAGES':
           console.log("[FB Engine] 🔄 Đang sync lịch sử tin nhắn thread:", message.data);
           {
+            const isUserClick = ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].includes(String(message.data?.reason || ''));
+            if (isUserClick) {
+              // Lock the history tab to the thread the user just clicked.
+              // Background sync for any other thread is now blocked.
+              userNavigationLockThreadId = String(message.data?.thread_id || '');
+              if (bulkHistorySyncInFlight) {
+                bulkHistorySyncAbortRequested = true;
+                console.log('[FB Engine] [BULK_HISTORY] Abort requested by user-click navigation.');
+              }
+              console.log('[FB Engine] [NAV_LOCK] History tab locked to thread:', userNavigationLockThreadId);
+            }
             const historyKey = `${message.data?.account_id || user_id}:history`;
             await runPersonalHistorySerialized(
               historyKey,
-              () => runPersonalHistoryWithDeadline(historyKey, message.data, () => handleSyncThreadMessages(message.data))
+              () => runPersonalHistoryWithDeadline(historyKey, message.data, () => handleSyncThreadMessages(message.data)),
+              isUserClick
             );
           }
           break;
@@ -1906,6 +1921,11 @@ async function ensureRoleMessengerTab(accountId, role) {
 async function selectAttachmentCapableMessengerTab(accountId, role = 'interaction') {
   const primary = await ensureRoleMessengerTab(accountId, role);
   if (!primary?.id) return primary || null;
+  const isDedicated = await isDedicatedMessengerRoleTab(accountId, primary.id);
+  if (isDedicated) {
+    console.warn(`[FB Engine] Warning: Selected tab ${primary.id} is registered as dedicated background tab; ignoring for attachment send.`);
+    return null;
+  }
   const capable = await chrome.scripting.executeScript({
     target: { tabId: primary.id },
     func: () => Boolean(
@@ -3395,8 +3415,7 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
           // Open Page Business Suite in a separate Chrome window. The extension
           // keeps the Page tab registered by page_id, while personal Messenger
           // remains in its own window/flow.
-          chrome.windows.create({ url: targetUrl, focused: false, type: 'normal' }, (createdWindow) => {
-            const createdTab = createdWindow?.tabs?.[0] || null;
+          chrome.tabs.create({ url: targetUrl, active: false }, (createdTab) => {
             if (createdTab?.id) chrome.tabs.update(createdTab.id, { pinned: true }).catch(() => {});
             resolve(createdTab);
           });
@@ -5332,6 +5351,23 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     });
     return;
   }
+  // If user has explicitly clicked a thread, the history tab is locked to it.
+  // Background sync for any OTHER thread must not navigate the history tab.
+  const isUserDrivenReason = ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].includes(baseReason);
+  if (!_history_tab_id && !page_id && !isUserDrivenReason
+    && userNavigationLockThreadId
+    && userNavigationLockThreadId !== String(thread_id || '')) {
+    console.log(`[FB Engine] [NAV_LOCK] Skipping background sync for thread=${thread_id} — history tab locked to ${userNavigationLockThreadId}`);
+    sendToBackend('THREAD_MESSAGES_SYNCED', {
+      account_id: account_id || user_id,
+      thread_id,
+      messages: [],
+      reason: 'navigation_locked_by_user_selection',
+      mode,
+      cursor
+    });
+    return;
+  }
   const targetAcc = account_id || user_id;
   const navigationThreadId = String(external_thread_id || thread_id).split(':').pop();
   const usesVisibleCrmTab = !page_id && !_history_tab_id
@@ -5351,8 +5387,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   if (!tab && page_id) {
     const pageTargetUrl = thread_url || `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(page_id)}&mailbox_id=${encodeURIComponent(page_id)}&selected_item_id=${encodeURIComponent(navigationThreadId)}&thread_type=FB_MESSAGE`;
     tab = await new Promise((resolve) => {
-      chrome.windows.create({ url: pageTargetUrl, focused: false, type: 'normal' }, (createdWindow) => {
-        const createdTab = createdWindow?.tabs?.[0] || null;
+      chrome.tabs.create({ url: pageTargetUrl, active: false }, (createdTab) => {
         if (createdTab?.id) {
           registerTab(`page:${page_id}`, createdTab.id).catch(() => {});
           chrome.tabs.update(createdTab.id, { pinned: true }).catch(() => {});
@@ -5993,7 +6028,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           // blank; previously they became scrollable only after sending text.
           await loadOlderMessages(mainContainer, mode);
         } else if (domReadyStatus.empty) stopReason = 'no_scroll_growth';
-        else if (mode === 'ondemand_initial') {
+        else if (mode === 'ondemand_initial' || mode === 'initial' || mode === 'crm_navigation') {
           // Opening a user synchronizes only the messages already mounted on
           // screen. Messenger scrolls only after the operator reaches the top
           // of the CRM conversation and requests `ondemand_older`.
@@ -6004,7 +6039,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             const mirrorResult = await mirrorCrmViewportScroll(mainContainer, scrollDelta);
             stopReason = mirrorResult.moved ? 'on_demand_page' : 'no_scroll_growth';
           }
-        } else if (mode === 'ondemand_older') {
+        } else if (mode === 'ondemand_older' || mode === 'deep_backfill') {
           // Mirror the operator's upward CRM gesture in the visible Messenger
           // tab first. If Facebook has not mounted a different virtual page,
           // fall back to the existing top-trigger lazy-loader.
@@ -6014,7 +6049,9 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (mirrorResult.moved) stopReason = 'on_demand_page';
             else await loadOlderMessages(mainContainer, mode);
           }
-        } else await loadOlderMessages(mainContainer, mode);
+        } else {
+          stopReason = 'on_demand_page';
+        }
 
         // Kiểm tra marker lại lần cuối xem có lạc thread không
         const finalRows = collectMessageRows(mainContainer);
@@ -6716,6 +6753,15 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
 
 let bulkHistorySyncInFlight = false;
 
+// Set to true when a user-click sync needs the history tab immediately.
+// The bulk sync worker loop checks this flag and yields on each thread.
+let bulkHistorySyncAbortRequested = false;
+
+// Tracks the thread the user last explicitly clicked in the CRM.
+// While set, the history tab is LOCKED to this thread — no background
+// sync is allowed to navigate it elsewhere until the user clicks again.
+let userNavigationLockThreadId = null;
+
 async function handleBulkHistorySync({ account_id, job_id, threads = [] } = {}) {
   const targetAcc = account_id || user_id;
   const personalThreads = (Array.isArray(threads) ? threads : [])
@@ -6744,21 +6790,11 @@ async function handleBulkHistorySync({ account_id, job_id, threads = [] } = {}) 
     keeper = await ensureRoleMessengerTab(targetAcc, 'history');
     if (!keeper?.id) throw new Error('HISTORY_TAB_NOT_AVAILABLE');
 
+    // Use only 1 worker tab (the existing history tab) to avoid creating
+    // extra Chrome tabs that confuse the user. A user-click can abort the
+    // bulk loop at any thread boundary via bulkHistorySyncAbortRequested.
+    bulkHistorySyncAbortRequested = false;
     const workerTabs = [keeper];
-    // Facebook/Chrome stalls when dozens of tabs are created before any work
-    // starts. Keep a small pool alive and let every tab crawl its next thread
-    // immediately; this bounds memory while all workers still scroll in parallel.
-    const workerCount = Math.min(3, personalThreads.length);
-    for (let index = 1; index < workerCount; index++) {
-      const created = await chrome.tabs.create({
-        url: 'https://www.facebook.com/messages',
-        active: false,
-        windowId: keeper.windowId
-      });
-      if (!created?.id) throw new Error('HISTORY_WORKER_TAB_CREATE_FAILED');
-      createdTabIds.push(created.id);
-      workerTabs.push(created);
-    }
 
     sendToBackend('BULK_HISTORY_SYNC_PROGRESS', {
       account_id: targetAcc, job_id, status: 'running', total: personalThreads.length,
@@ -6768,6 +6804,12 @@ async function handleBulkHistorySync({ account_id, job_id, threads = [] } = {}) 
     let nextThreadIndex = 0;
     await Promise.all(workerTabs.map(async (workerTab) => {
       while (true) {
+        // If a user clicked a thread, stop bulk sync immediately so the
+        // history tab is freed for the higher-priority navigation.
+        if (bulkHistorySyncAbortRequested) {
+          console.log('[BULK_HISTORY] Aborted by user-click navigation request.');
+          return;
+        }
         const index = nextThreadIndex++;
         if (index >= personalThreads.length) return;
         const thread = personalThreads[index];

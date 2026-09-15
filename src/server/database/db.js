@@ -1090,6 +1090,11 @@ if (adminCheck.count === 0) {
   console.log('[DB] Khởi tạo tài khoản Admin mặc định thành công (username: admin / pass: admin)');
 }
 
+try {
+  db.prepare("DELETE FROM messages WHERE content LIKE '%Chưa có tin nhắn%' OR content LIKE '%ChÃ%' OR (content LIKE '%tin nh%' AND content LIKE '%n%')").run();
+  db.prepare("UPDATE threads SET last_message = 'Chưa có tin nhắn' WHERE last_message LIKE '%ChÃ%'").run();
+} catch (e) {}
+
 console.log('[DB] CSDL SQLite đã sẵn sàng (WAL Mode, FTS5 enabled):', DB_PATH);
 
 module.exports = db;

@@ -43,7 +43,8 @@ function IncomingAvatar({ url, initial, color, threadId }) {
 export default function MessageBubble({ msg, activeThread, onRetry }) {
   const [isTimePinned, setIsTimePinned] = useState(false);
   const isPendingDirection = msg.direction_status === 'pending';
-  const isOutgoing = isConfirmedOutgoing(msg) || (!isPendingDirection && Boolean(msg.is_outgoing || msg.from === 'me' || msg.sender_type === 'staff' || msg.sender_type === 'ai'));
+  const isBoolOutgoing = (msg.is_outgoing === true || msg.is_outgoing === 1 || String(msg.is_outgoing || '').toLowerCase() === 'true' || String(msg.is_outgoing || '') === '1') || msg.from === 'me' || msg.sender_type === 'staff' || msg.sender_type === 'ai';
+  const isOutgoing = isConfirmedOutgoing(msg) || (!isPendingDirection && Boolean(isBoolOutgoing));
   const isUnsent = Boolean(msg.is_unsent || msg.unsent);
   const content = msg.content || msg.text_content || msg.text || msg.message || '';
   const senderName = msg.sender_name || (isOutgoing ? (msg.is_ai || msg.sender_type === 'ai' ? 'AI' : 'Bạn') : activeThread?.contact_name || 'Khách hàng');

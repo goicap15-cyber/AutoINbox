@@ -39,7 +39,7 @@ class OutboundDomCorrelationService {
     return database.prepare(`
       SELECT id, client_message_id, fb_message_id, timestamp_ms
       FROM messages
-      WHERE thread_id = ? AND is_outgoing = 1 AND delivery_status = 'sent'
+      WHERE thread_id = ? AND is_outgoing = 1 AND (delivery_status = 'sent' OR delivery_status = 'pending')
         AND fb_message_id IS NOT NULL AND fb_message_id != ?
         AND (fb_message_id NOT LIKE 'mid.%' OR client_message_id IS NOT NULL)
         AND ${mediaClause}
