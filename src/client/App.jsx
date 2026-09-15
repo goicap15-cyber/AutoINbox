@@ -201,18 +201,25 @@ const reconcileOutgoingTextEchoes = (items = []) => {
     message?.attachment_id || message?.media_url || message?.local_media_path
     || (message?.media_type && message.media_type !== 'text')
   );
-  const isSyntheticId = (message) => /^(?:dom_|history_|network_|websocket_|mercury_|xhr_)/i.test(String(message?.fb_message_id || ''));
+  // SQLite/network payloads may encode the flag as 0/1 or as a string. Never
+  // use JavaScript truthiness here: Boolean("0") is true and was the reason
+  // an incoming history echo could survive the old filter.
+  const isOutgoing = (message) => message?.is_outgoing === true
+    || message?.is_outgoing === 1
+    || String(message?.is_outgoing || '').toLowerCase() === 'true'
+    || String(message?.is_outgoing || '') === '1';
   const outgoingTextKeys = new Set(items
-    .filter((message) => message?.is_outgoing && isPlainText(message) && normalizedText(message))
+    .filter((message) => isOutgoing(message) && isPlainText(message) && normalizedText(message))
     .map((message) => normalizedText(message).toLocaleLowerCase('vi-VN')));
   const withoutIncomingEchoes = items.filter((message) => {
-    if (message?.is_outgoing || !isPlainText(message)) return true;
+    if (isOutgoing(message) || !isPlainText(message)) return true;
     const contentKey = normalizedText(message).toLocaleLowerCase('vi-VN');
-    if (!contentKey || !outgoingTextKeys.has(contentKey)) return true;
-    const source = String(message?.source || '').toLowerCase();
-    const isObserverRow = isSyntheticId(message)
-      || ['dom_observer', 'dom_history_sync', 'network_interceptor', 'network_xhr', 'websocket', 'mercury'].includes(source);
-    return !(isObserverRow || !message?.sender_id);
+    // Direction is authoritative: if this thread already has the exact text
+    // as an outgoing CRM row, an incoming copy is a Messenger history echo.
+    // Keep only the outgoing bubble. Real incoming messages with different
+    // content remain untouched.
+    if (contentKey && outgoingTextKeys.has(contentKey)) return false;
+    return true;
   });
 
   withoutIncomingEchoes.forEach((message) => {
