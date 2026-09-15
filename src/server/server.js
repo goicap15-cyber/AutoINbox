@@ -710,7 +710,13 @@ function isRecentOutgoingTextEcho(threadId, message = {}, database = db) {
   // Synthetic DOM/history ids are the exact shape Facebook uses when it
   // replays an operator bubble as an incoming row. Match the durable outgoing
   // text across the history window so a late crawler cannot resurrect it.
-  const isSyntheticObserverId = /^(?:dom_|history_|network_|websocket_|mercury_|xhr_)/i.test(String(message.fb_message_id || ''));
+  const isObserverEcho = String(message.source || '').toLowerCase() === 'dom_observer'
+    || !message.sender_id;
+  const isSyntheticObserverId = isObserverEcho
+    || /^(?:dom_|history_|network_|websocket_|mercury_|xhr_)/i.test(String(message.fb_message_id || ''));
+  if (isObserverEcho && ConversationRepository.hasMatchingOutgoingText(threadId, content, database)) {
+    return true;
+  }
   return ConversationRepository.hasRecentMatchingOutgoing(threadId, content, database, {
     windowMs: isSyntheticObserverId ? 24 * 60 * 60 * 1000 : 10 * 60 * 1000,
     futureToleranceMs: 60 * 1000

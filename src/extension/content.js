@@ -196,6 +196,7 @@
       if (sender_id && capturedUserId && String(sender_id) === String(capturedUserId)) {
         is_outgoing = true;
       }
+      if (is_outgoing) markObservedOutgoing(netMsg.thread_id, netMsg.content);
 
       const finalTsMs = normalizeTimestampMs(netMsg.timestamp_ms);
 
@@ -247,6 +248,27 @@
   }
   const recentNetworkEmits = new Map();
   const recentDomEmits = new Map();
+  // Direction ledger: Messenger may replay a rendered outgoing bubble as an
+  // incoming DOM row while React hydrates its aria metadata.
+  const recentObservedOutgoing = new Map();
+  function normalizeObservedText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+  }
+  function markObservedOutgoing(threadId, content) {
+    const normalized = normalizeObservedText(content);
+    if (!threadId || !normalized) return;
+    const key = `${String(threadId)}:${normalized}`;
+    recentObservedOutgoing.set(key, Date.now());
+    if (recentObservedOutgoing.size > 500) recentObservedOutgoing.delete(recentObservedOutgoing.keys().next().value);
+  }
+  function isRecentObservedOutgoing(threadId, content) {
+    const normalized = normalizeObservedText(content);
+    const key = `${String(threadId || '')}:${normalized}`;
+    const at = recentObservedOutgoing.get(key) || 0;
+    if (!at) return false;
+    if (Date.now() - at > 10 * 60 * 1000) { recentObservedOutgoing.delete(key); return false; }
+    return true;
+  }
   const domOccurrenceIds = new WeakMap();
   let nextDomOccurrenceId = 1;
   function markDomOccurrence(parsed, sourceNode) {
@@ -398,6 +420,7 @@
                 try {
                   capturedUserId = capturedUserId || document.cookie.match(/c_user=(\d+)/)?.[1] || null;
                   const is_outgoing = !!(sender_id && capturedUserId && String(sender_id) === String(capturedUserId));
+                  if (is_outgoing) markObservedOutgoing(thread_id, content);
                   const fbMsgId = packetId;
                   chrome.runtime.sendMessage({
                     type: 'NEW_MESSAGE_FROM_FB',
@@ -435,6 +458,8 @@
                     if (chrome?.runtime?.id) {
                       capturedUserId = capturedUserId || document.cookie.match(/c_user=(\d+)/)?.[1] || null;
                       const is_outgoing = !!(sender_id && capturedUserId && String(sender_id) === String(capturedUserId));
+      if (is_outgoing) markObservedOutgoing(thread_id, content);
+                                  if (is_outgoing) markObservedOutgoing(thread_id, content);
                       console.log(`[Content Interceptor] mercury mutation intercepted message: thread_id=${thread_id} | content="${content.substring(0, 40)}"`);
                       chrome.runtime.sendMessage({
                         type: 'NEW_MESSAGE_FROM_FB',
@@ -534,6 +559,7 @@
       if (recentNetworkEmits.size > 500) recentNetworkEmits.delete(recentNetworkEmits.keys().next().value);
       capturedUserId = capturedUserId || document.cookie.match(/c_user=(\d+)/)?.[1] || null;
       const is_outgoing = !!(sender_id && capturedUserId && String(sender_id) === String(capturedUserId));
+      if (is_outgoing) markObservedOutgoing(thread_id, content);
       try {
         if (chrome?.runtime?.id) {
           console.log(`[Content Interceptor] network_xhr intercepted message: thread_id=${thread_id} | content="${content.substring(0, 40)}"`);
@@ -1227,7 +1253,9 @@
     const rows = Array.from(main.querySelectorAll('div[role=row], div[role=article]')).slice(-32);
     for (const row of rows) {
       for (const parsed of parseMessagesFromDOMNode(row, true)) {
-        if (parsed.is_outgoing || !parsed.native_id) continue;
+        if (!parsed.native_id) continue;
+        if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
+        if (!parsed.is_outgoing && isRecentObservedOutgoing(thread_id, parsed.content)) continue;
         markDomOccurrence(parsed, row);
         const fbMessageId = makeDomMessageId(thread_id, parsed);
         const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
@@ -1378,6 +1406,9 @@
           }
         }
 
+        if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
+        if (!parsed.is_outgoing && isRecentObservedOutgoing(thread_id, parsed.content)) return;
+
         // The explicit composer confirmation/network intercept owns plain outgoing text.
         // The DOM observer must not forward the same rendered bubble a second time.
         const isPlainOutgoingDomText = parsed.is_outgoing
@@ -1437,6 +1468,8 @@
         const parsedText = String(parsed.content || '').toLocaleLowerCase('vi-VN');
         const isCallRow = /(?:cu?c g?i|nh?|b? l?|audio call|video call|missed call|call ended)/i.test(parsedText);
         const isMediaRow = Boolean(parsed.media_url || (parsed.media_type && parsed.media_type !== 'text'));
+        if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
+        if (!parsed.is_outgoing && isRecentObservedOutgoing(thread_id, parsed.content)) continue;
         // Outgoing media is required here: MutationObserver often sees the
         // video shell before Facebook hydrates its native id/media element.
         // The periodic tail pass then provides the confirmation that clears

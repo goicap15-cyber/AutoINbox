@@ -184,6 +184,23 @@ class ConversationRepository {
     return candidates.some((row) => String(row.content || '')
       .replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN') === normalizedContent);
   }
+  // DOM/history observers can replay an operator bubble long after the
+  // original send was confirmed or with a timestamp that does not match the
+  // local clock. For observer-only incoming rows, an existing outgoing text
+  // in the same thread is authoritative and the observed row is an echo.
+  static hasMatchingOutgoingText(threadId, content, database = getDefaultDb()) {
+    const normalizedContent = String(content || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+    if (!threadId || !normalizedContent) return false;
+    const candidates = database.prepare(`
+      SELECT content
+      FROM messages
+      WHERE thread_id = ? AND is_outgoing = 1
+        AND (media_type IS NULL OR media_type = 'text')
+      ORDER BY id DESC LIMIT 100
+    `).all(threadId);
+    return candidates.some((row) => String(row.content || '')
+      .replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN') === normalizedContent);
+  }
   static upsertThread(threadData, database = getDefaultDb()) {
     const { id, account_id, thread_url, contact_name, last_message, is_unread, source_id, inbox_folder } = threadData;
     const external_thread_id = String(threadData.external_thread_id || threadData.thread_id || id);
