@@ -530,20 +530,6 @@ if (isBusiness) {
                 if (assigned >= nextKnownTs) assigned = nextKnownTs - 1;
             } else if (lastKnownTs !== null) {
                 assigned = lastKnownTs + ORDER_GAP_MS * (i - lastKnownIdx);
-                // Spec 047: lastKnownTs can be a stale anchor left over from
-                // hours ago (e.g. reopening a thread after a long gap, or the
-                // async backend re-seed on thread switch racing this scan) -
-                // extrapolating forward from it unbounded stamps a message
-                // captured NOW with a synthetic timestamp hours in the past,
-                // scrambling display order against messages from the
-                // intervening time that DID get a fresh anchor. Live evidence
-                // (2026-08-19): a message captured at 09:33 was assigned
-                // 04:41 this way. There's no nextKnownTs bounding this from
-                // above, so nothing else will catch the drift - re-anchor to
-                // now instead, same as the no-anchors-at-all fallback below.
-                if (Date.now() - assigned > STALE_ANCHOR_MS) {
-                    assigned = Date.now() - ORDER_GAP_MS * (orderedIds.length - i);
-                }
             } else if (nextKnownTs !== null) {
                 assigned = nextKnownTs - ORDER_GAP_MS * (nextKnownIdx - i);
             } else {
@@ -684,18 +670,19 @@ if (isBusiness) {
             }
         }
 
-        // 2. Thêm các likeCandidates độc lập nằm ngoài bất kỳ messageEl nào
+        // 2. Thêm các likeCandidates độc lập nằm ngoài bất kỳ messageEl nào (chỉ khi có data-message-id thật sự của FB)
         for (const cand of likeCandidates) {
             if (handledLikeNodes.has(cand)) continue;
             handledLikeNodes.add(cand);
-            // Standalone customer like: không kế thừa ID của container cha tránh đè lên message khác
             const ownMsgId = cand.getAttribute('data-message-id') || (cand.parentElement && cand.parentElement.getAttribute('data-message-id'));
-            rawUnits.push({
-                element: cand,
-                fbMessageId: ownMsgId || null,
-                resolved: { kind: 'text', text: '👍' },
-                isStandaloneLike: true
-            });
+            if (ownMsgId && ownMsgId.startsWith('mid.')) {
+                rawUnits.push({
+                    element: cand,
+                    fbMessageId: ownMsgId,
+                    resolved: { kind: 'text', text: '👍' },
+                    isStandaloneLike: true
+                });
+            }
         }
 
         // 3. Sắp xếp rawUnits theo ĐÚNG THỨ TỰ XUẤT HIỆN TỰ NHIÊN TRONG CÂY DOM (Top-to-Bottom)
@@ -709,27 +696,14 @@ if (isBusiness) {
 
         // 4. Xây dựng danh sách batch kết quả theo thứ tự DOM chuẩn
         const list = [];
-        let lastKnownMsgId = null;
-        let likeCounterAfterAnchor = 0;
         for (let i = 0; i < rawUnits.length; i++) {
             const unit = rawUnits[i];
             let fbMessageId = unit.fbMessageId;
-            if (fbMessageId && !unit.isStandaloneLike) {
-                lastKnownMsgId = fbMessageId;
-                likeCounterAfterAnchor = 0;
-            } else if (unit.isStandaloneLike) {
-                if (!fbMessageId || list.some(item => item.fb_message_id === fbMessageId) || !fbMessageId.startsWith('mid.')) {
-                    likeCounterAfterAnchor++;
-                    const anchorKey = lastKnownMsgId ? `after_${lastKnownMsgId}` : 'prefix';
-                    fbMessageId = `page_like_${currentThread}_${anchorKey}_${likeCounterAfterAnchor}`;
-                } else {
-                    lastKnownMsgId = fbMessageId;
-                    likeCounterAfterAnchor = 0;
-                }
-            } else if (!fbMessageId || list.some(item => item.fb_message_id === fbMessageId)) {
-                likeCounterAfterAnchor++;
-                const anchorKey = lastKnownMsgId ? `after_${lastKnownMsgId}` : 'prefix';
-                fbMessageId = `page_like_${currentThread}_${anchorKey}_${likeCounterAfterAnchor}`;
+            if (!fbMessageId || !fbMessageId.startsWith('mid.')) {
+                continue; // Bỏ qua các phần tử không có message ID thực từ Facebook
+            }
+            if (list.some(item => item.fb_message_id === fbMessageId)) {
+                continue;
             }
 
             const targetMeasure = unit.element;
@@ -751,7 +725,7 @@ if (isBusiness) {
                 }
             }
 
-            // B. Date Separator xuất hiện trước phần tử này
+            // B. Date Separator xuất hiện trước hoặc ngay sau phần tử này
             if (parsedTs === 0 && separators.length > 0) {
                 let matchingSep = null;
                 for (let sIdx = 0; sIdx < separators.length; sIdx++) {
@@ -759,6 +733,9 @@ if (isBusiness) {
                     if (sep.element.compareDocumentPosition(unit.element) & Node.DOCUMENT_POSITION_FOLLOWING) {
                         matchingSep = sep;
                     } else {
+                        if (!matchingSep && sIdx === 0) {
+                            matchingSep = sep;
+                        }
                         break;
                     }
                 }

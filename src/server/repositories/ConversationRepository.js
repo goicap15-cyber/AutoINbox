@@ -491,20 +491,50 @@ class ConversationRepository {
     return transaction(messages);
   }
 
+  static extractFbMessageSequence(fbMessageId) {
+    if (!fbMessageId || typeof fbMessageId !== 'string' || !fbMessageId.startsWith('mid.$')) {
+      return null;
+    }
+    try {
+      const payload = fbMessageId.slice(5);
+      const b64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+      const buf = Buffer.from(b64, 'base64');
+      if (buf.length >= 15) {
+        return buf.subarray(9, 15).toString('hex');
+      }
+    } catch (_) {}
+    return null;
+  }
+
   static normalizeMessageSequence(threadId, database = getDefaultDb()) {
     const rows = database.prepare(`
-      SELECT id, timestamp_ms, sequence_order
+      SELECT id, fb_message_id, timestamp_ms, created_at, sequence_order
       FROM messages
       WHERE thread_id = ?
-      ORDER BY
-        CASE WHEN COALESCE(timestamp_ms, 0) > 0 THEN 0 ELSE 1 END ASC,
-        -- Facebook labels are minute-precision. Millisecond suffixes are DOM
-        -- offsets/optimistic send times, not chronology. Within one minute the
-        -- authoritative DOM sequence must win.
-        CAST(COALESCE(NULLIF(timestamp_ms, 0), CAST(strftime('%s', created_at) AS INTEGER) * 1000, id) / 60000 AS INTEGER) ASC,
-        COALESCE(sequence_order, id) ASC,
-        id ASC
     `).all(threadId);
+
+    rows.sort((a, b) => {
+      const seqA = ConversationRepository.extractFbMessageSequence(a.fb_message_id);
+      const seqB = ConversationRepository.extractFbMessageSequence(b.fb_message_id);
+      if (seqA && seqB) {
+        const cmp = seqA.localeCompare(seqB);
+        if (cmp !== 0) return cmp;
+      }
+
+      const tsA = Number(a.timestamp_ms || 0) || (a.created_at ? new Date(a.created_at).getTime() : 0);
+      const tsB = Number(b.timestamp_ms || 0) || (b.created_at ? new Date(b.created_at).getTime() : 0);
+      const minuteA = Math.floor(tsA / 60000);
+      const minuteB = Math.floor(tsB / 60000);
+      if (minuteA !== minuteB && minuteA > 0 && minuteB > 0) {
+        return minuteA - minuteB;
+      }
+
+      const orderA = a.sequence_order !== null && a.sequence_order !== undefined ? Number(a.sequence_order) : a.id;
+      const orderB = b.sequence_order !== null && b.sequence_order !== undefined ? Number(b.sequence_order) : b.id;
+      if (orderA !== orderB) return orderA - orderB;
+
+      return a.id - b.id;
+    });
 
     const update = database.prepare('UPDATE messages SET sequence_order = ? WHERE id = ?');
     const normalize = database.transaction((orderedRows) => {
@@ -847,6 +877,18 @@ class ConversationRepository {
     }
 
     const mergedList = Array.from(mergedMap.values());
+    mergedList.sort((a, b) => {
+      const seqA = ConversationRepository.extractFbMessageSequence(a.fb_message_id);
+      const seqB = ConversationRepository.extractFbMessageSequence(b.fb_message_id);
+      if (seqA && seqB) {
+        const cmp = seqA.localeCompare(seqB);
+        if (cmp !== 0) return cmp;
+      }
+      const tsA = Number(a.timestamp_ms || 0);
+      const tsB = Number(b.timestamp_ms || 0);
+      if (tsA !== tsB && tsA > 0 && tsB > 0) return tsA - tsB;
+      return (a.sequence_order || a.dom_order || 0) - (b.sequence_order || b.dom_order || 0);
+    });
     mergedList.forEach((msg, idx) => {
       msg.sequence_order = idx + 1;
     });

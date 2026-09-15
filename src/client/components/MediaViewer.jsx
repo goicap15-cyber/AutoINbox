@@ -74,8 +74,13 @@ export default function MediaViewer({ mediaType, mediaUrl, localMediaPath }) {
       );
     }
     return (
-      <div className="mt-2 max-w-xs">
-        <video controls playsInline preload="metadata" className="w-full rounded-lg border border-[var(--color-border)] shadow-sm max-h-72 bg-black">
+      <div className="rounded-2xl overflow-hidden max-w-[280px] bg-black shadow-md border border-[var(--color-border)] my-0.5">
+        <video
+          controls
+          playsInline
+          preload="metadata"
+          className="w-full max-h-[380px] object-contain block bg-black"
+        >
           <source src={displayUrl} type="video/mp4" />
           Trình duyệt không hỗ trợ phát video này.
         </video>

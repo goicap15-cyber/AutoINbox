@@ -98,8 +98,8 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
       <div className={`flex flex-col max-w-[min(78%,560px)] ${isOutgoing ? 'items-end' : 'items-start'}`}>
         <div
           className={`message-bubble ${
-            isQuickLike
-              ? 'p-1 bg-transparent border-0 shadow-none'
+            isQuickLike || (hasMedia && !visibleContent)
+              ? 'p-0 bg-transparent border-0 shadow-none'
               : `px-4 py-2.5 text-sm shadow-sm ${
                   isUnsent
                     ? 'bg-[var(--color-danger-subtle)] border border-[var(--color-danger)]/35 text-[var(--color-danger)] rounded-2xl'
