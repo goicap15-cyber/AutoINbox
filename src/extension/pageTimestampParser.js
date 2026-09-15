@@ -119,6 +119,12 @@
     }
 
     let sep = (separatorText || '').trim();
+
+    // Guard: Video player duration text (0:00 / 0:19, 0:03, 0:19) is never a date separator!
+    if (/^\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}$/.test(sep) || /^0:\d{2}$/.test(sep)) {
+      return { timestamp_ms: 0, timestamp_source: 'unknown' };
+    }
+
     let clock = clockText ? parseClockString(clockText) : null;
 
     // Nếu clockText không được truyền, kiểm tra xem trong separatorText có chứa giờ hay không

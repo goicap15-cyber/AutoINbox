@@ -124,3 +124,18 @@ test('T001: trả về timestamp_ms = 0 và unknown khi không có bằng chứn
   assert.equal(res.timestamp_ms, 0);
   assert.equal(res.timestamp_source, 'unknown');
 });
+
+test('T002: Video player duration text (0:00 / 0:19, 0:03, 0:19) không bị nhận nhầm thành date separator', () => {
+  const res1 = parseDateSeparator('0:00 / 0:19');
+  assert.equal(res1.timestamp_ms, 0);
+  assert.equal(res1.timestamp_source, 'unknown');
+
+  const res2 = parseDateSeparator('0:19');
+  assert.equal(res2.timestamp_ms, 0);
+  assert.equal(res2.timestamp_source, 'unknown');
+
+  const res3 = parseDateSeparator('0:03');
+  assert.equal(res3.timestamp_ms, 0);
+  assert.equal(res3.timestamp_source, 'unknown');
+});
+

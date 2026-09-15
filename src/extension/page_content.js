@@ -559,9 +559,11 @@ if (isBusiness) {
             const el = candidates[i];
             if (el.matches('[data-message-id]') || el.querySelector('[data-message-id]')) continue;
             if (el.children.length > 2) continue;
+            if (el.closest && el.closest('video, [role="region"], [aria-label*="video" i], [aria-label*="player" i], [data-surface*="video"]')) continue;
 
             const text = (el.textContent || '').trim();
             if (!text || text.length > 50) continue;
+            if (/^\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}$/.test(text) || /^0:\d{2}$/.test(text)) continue;
 
             const isSepFormat = /^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i.test(text) ||
                                 /^\d{1,2}:\d{2}\s+\d{1,2}\s+Tháng\s+\d{1,2},?\s+\d{4}$/i.test(text) ||

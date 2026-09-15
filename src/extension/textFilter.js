@@ -67,8 +67,9 @@
     /^\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM))?$/i,
     /^(?:T[2-7]|CN)$/i,
 
-    // Video player duration timestamps (e.g. 0:00 / 0:19, 00:00 / 01:23)
+    // Video player duration timestamps (e.g. 0:00 / 0:19, 00:00 / 01:23, 0:03, 0:19)
     /^\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}$/i,
+    /^0:\d{2}$/i,
 
     // Media label placeholders (e.g. [Ảnh], [Video], [File], [Attachment])
     /^\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment)\]?$/i,

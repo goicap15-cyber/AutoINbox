@@ -29,6 +29,9 @@
     if (/^\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}$/i.test(cleaned)) {
       cleaned = '';
     }
+    if (/^0:\d{2}$/i.test(cleaned)) {
+      cleaned = '';
+    }
     return cleaned || null;
   }
 
@@ -74,6 +77,17 @@
         if (thumbImg) {
           const src = thumbImg.currentSrc || thumbImg.getAttribute('src') || '';
           if (/^https?:\/\//i.test(src)) detectedPoster = src;
+        }
+      }
+      if (!detectedPoster) {
+        const bgElements = Array.from(messageNode.querySelectorAll('[style*="background-image"]'));
+        for (const el of bgElements) {
+          const style = el.getAttribute('style') || '';
+          const match = style.match(/background-image\s*:\s*url\((['"]?)([^'")]+)\1\)/i);
+          if (match && /^https?:\/\//i.test(match[2])) {
+            detectedPoster = match[2];
+            break;
+          }
         }
       }
 
@@ -151,6 +165,34 @@
           caption: finalCaption || cleanVideoCaption(label)
         };
       }
+    }
+
+    // 4. Quét khi có thanh thời lượng video player (dạng 0:00 / 0:xx) bên trong messageNode
+    const hasPlayerTimeInNode = /\d{1,2}:\d{2}\s*\/\s*\d{1,2}:\d{2}/.test(rawText);
+    if (hasPlayerTimeInNode && !isExcludedCall(rawText)) {
+      let detectedUrl = null;
+      const thumbImg = messageNode.querySelector('img[src]:not([src*="/emoji.php"]):not([src*="/rsrc.php"])');
+      if (thumbImg) {
+        const src = thumbImg.currentSrc || thumbImg.getAttribute('src') || '';
+        if (/^https?:\/\//i.test(src)) detectedUrl = src;
+      }
+      if (!detectedUrl) {
+        const bgElements = Array.from(messageNode.querySelectorAll('[style*="background-image"]'));
+        for (const el of bgElements) {
+          const style = el.getAttribute('style') || '';
+          const match = style.match(/background-image\s*:\s*url\((['"]?)([^'")]+)\1\)/i);
+          if (match && /^https?:\/\//i.test(match[2])) {
+            detectedUrl = match[2];
+            break;
+          }
+        }
+      }
+      return {
+        isVideo: true,
+        mediaUrl: detectedUrl || null,
+        posterUrl: detectedUrl || null,
+        caption: finalCaption
+      };
     }
 
     return { isVideo: false };

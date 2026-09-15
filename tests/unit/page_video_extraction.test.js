@@ -36,6 +36,7 @@ function createMockElement(tagName, attrs = {}, children = [], text = '') {
           else if (selector.includes('[role="img"]') && child.getAttribute('role') === 'img') results.push(child);
           else if (selector.includes('source[src]') && child.tagName === 'SOURCE' && child.getAttribute('src')) results.push(child);
           else if (selector.includes('img') && child.tagName === 'IMG') results.push(child);
+          else if (selector.includes('background-image') && child.getAttribute('style')?.includes('background-image')) results.push(child);
           walk(child);
         }
       };
@@ -140,3 +141,28 @@ test('pageVideoDetector - phát hiện video dạng blob: có caption kèm theo 
   // Caption chỉ giữ lại phần nội dung thực "212", bỏ phần thời lượng video
   assert.equal(result.caption, '212');
 });
+
+test('pageVideoDetector - phát hiện video khách gửi có thời lượng 0:00 / 0:03 và bóc tách thumbnail img', () => {
+  const thumb = createMockElement('img', {
+    src: 'https://scontent.xx.fbcdn.net/v/poster_customer.jpg'
+  });
+  const wrapper = createMockElement('div', { 'data-message-id': 'mid.cust1' }, [thumb], '0:00 / 0:03');
+
+  const result = FbPageVideoDetector.detectPageVideo(wrapper, '0:00 / 0:03');
+  assert.equal(result.isVideo, true);
+  assert.equal(result.mediaUrl, 'https://scontent.xx.fbcdn.net/v/poster_customer.jpg');
+  assert.equal(result.caption, null);
+});
+
+test('pageVideoDetector - phát hiện video khách gửi có style background-image làm poster', () => {
+  const bgThumb = createMockElement('div', {
+    style: 'background-image: url("https://scontent.xx.fbcdn.net/v/bg_poster.jpg")'
+  });
+  const wrapper = createMockElement('div', { 'data-message-id': 'mid.cust2' }, [bgThumb], '0:00 / 0:03');
+
+  const result = FbPageVideoDetector.detectPageVideo(wrapper, '0:00 / 0:03');
+  assert.equal(result.isVideo, true);
+  assert.equal(result.mediaUrl, 'https://scontent.xx.fbcdn.net/v/bg_poster.jpg');
+  assert.equal(result.caption, null);
+});
+
