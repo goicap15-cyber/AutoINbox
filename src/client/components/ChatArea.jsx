@@ -156,7 +156,7 @@ export default function ChatArea({
 
             const { msg } = item;
             const isPendingDirection = msg.direction_status === 'pending';
-            const isOutgoing = !isPendingDirection && !!msg.is_outgoing;
+            const isOutgoing = !isPendingDirection && (msg.is_outgoing === true || msg.is_outgoing === 1 || String(msg.is_outgoing || '').toLowerCase() === 'true' || String(msg.is_outgoing || '') === '1');
             const alignmentClass = isPendingDirection ? 'items-center' : (isOutgoing ? 'items-end' : 'items-start');
             const isUnsent = msg.is_unsent;
 

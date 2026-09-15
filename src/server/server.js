@@ -715,7 +715,10 @@ function isRecentOutgoingTextEcho(threadId, message = {}, database = db) {
     || !message.sender_id;
   const isSyntheticObserverId = isObserverEcho
     || /^(?:dom_|history_|network_|websocket_|mercury_|xhr_)/i.test(String(message.fb_message_id || ''));
-  if (isObserverEcho && ConversationRepository.hasMatchingOutgoingText(threadId, content, database)) {
+  // A text already stored as outgoing is authoritative regardless of which
+  // Facebook observer produced the late incoming copy. This covers users
+  // whose history payload carries a non-standard source/sender field.
+  if (ConversationRepository.hasMatchingOutgoingText(threadId, content, database)) {
     return true;
   }
   return ConversationRepository.hasRecentMatchingOutgoing(threadId, content, database, {
