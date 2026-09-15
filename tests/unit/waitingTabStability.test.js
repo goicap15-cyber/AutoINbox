@@ -8,6 +8,8 @@ test('waiting tab clears stale chat and ignores out-of-order list responses', ()
   assert.match(app, /activeTabRef\.current !== requestedTab/);
   assert.match(app, /setActiveThreadId\(null\);[\s\S]+?setThreads\(\[\]\);[\s\S]+?setActiveTab\(normalizedTab\)/);
   assert.match(app, /REQUEST_SYNC_MESSAGE_REQUESTS/);
+  assert.match(app, /const WAITING_REQUEST_REFRESH_MS = 15000/);
+  assert.match(app, /activeTab !== 'WAITING'[\s\S]+?setInterval\(requestWaitingThreads, WAITING_REQUEST_REFRESH_MS\)/);
 });
 
 test('realtime thread events are scoped to the visible inbox folder', () => {

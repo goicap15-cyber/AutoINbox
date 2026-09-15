@@ -12,7 +12,10 @@ const isBusiness = window.location.hostname.includes('business.facebook.com')
 
 if (isBusiness) {
     console.log(`[PageContent] Business Suite Inbox DOM observer started in ${window.top === window.self ? 'TOP FRAME' : 'IFRAME'}: ${window.location.href}`);
-
+    const initialPageContext = new URLSearchParams(window.location.search).get('asset_id') || new URLSearchParams(window.location.search).get('mailbox_id') || null;
+    if (initialPageContext) {
+        chrome.runtime.sendMessage({ type: 'PAGE_CONTEXT_READY', data: { page_id: initialPageContext } }).catch(() => {});
+    }
     class BoundedSet {
         constructor(maxSize) {
             this.maxSize = maxSize;
@@ -1674,6 +1677,12 @@ if (isBusiness) {
                     }
                 }
             }
+        } else if (request.type === 'SCAN_PAGE_SIDEBAR') {
+            // A manual CRM sync window explicitly requests a fresh Page list.
+            lastSidebarSyncHash = '';
+            lastSidebarSyncTime = 0;
+            scanPageSidebarThreads();
+            sendResponse({ success: true });
         } else if (request.type === 'REQUEST_PAGE_BATCH_SYNC') {
             const req = request.data || {};
             const threadId = req.thread_id || resolveCurrentThreadId();

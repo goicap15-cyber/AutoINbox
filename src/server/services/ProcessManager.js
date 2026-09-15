@@ -373,6 +373,7 @@ class ProcessManager {
         defaultViewport: null,
         enableExtensions: true,
         args: [
+          '--start-maximized',
           '--no-first-run',
           '--no-default-browser-check',
           '--disable-background-mode',
@@ -418,6 +419,33 @@ class ProcessManager {
     }
   }
 
+  // Additive Page launcher: keeps the personal account process untouched and
+  // opens a second managed Chrome profile with the same extension installed.
+  // The Page profile is keyed separately, so it can run alongside Messenger.
+  async startPageProcess(pageId, accountId) {
+    const safePageId = String(pageId || '').trim();
+    const safeAccountId = String(accountId || '').trim();
+    if (!/^\d+$/.test(safePageId) || !safeAccountId) throw new Error('Thiếu Page ID hoặc tài khoản sở hữu Page');
+    const key = `page:${safeAccountId}:${safePageId}`;
+    const profileDir = path.join(APP_DATA_ROOT, 'page-profiles', `${safeAccountId}_${safePageId}`);
+    const targetUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(safePageId)}&mailbox_id=${encodeURIComponent(safePageId)}&thread_type=FB_MESSAGE`;
+    const started = await this.startAccountProcess(key, profileDir, { forceExtensionReload: false });
+    if (!started) return false;
+    const entry = this.processes.get(key);
+    try {
+      if (entry?.browser?.connected) {
+        const pages = await entry.browser.pages();
+        const page = pages[0] || await entry.browser.newPage();
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      } else {
+        const chromeExecutable = this.getInteractiveSetupChromeExecutable();
+        spawn(chromeExecutable, [`--user-data-dir=${path.resolve(profileDir)}`, '--new-window', targetUrl], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+      }
+    } catch (error) {
+      console.warn(`[ProcessManager] Không thể mở Business Suite cho Page ${safePageId}:`, error.message);
+    }
+    return true;
+  }
   // Khởi chạy Chrome Portable cho phiên thêm tài khoản mới (pending session)
   async startNewAccountProcess(pendingKey) {
     const setupUrl = `https://www.facebook.com/messages/?crm_pending_key=${encodeURIComponent(pendingKey)}`;
@@ -490,6 +518,7 @@ class ProcessManager {
         defaultViewport: null,
         enableExtensions: true,
         args: [
+          '--start-maximized',
           '--no-first-run',
           '--no-default-browser-check',
           '--disable-background-mode',

@@ -166,6 +166,32 @@ class ConversationRepository {
     `).get(threadId, content));
   }
 
+  // A lazy-rendered sidebar can temporarily omit its self-message prefix.
+  // Keep this lookup bounded so only the just-sent exact outbound is treated
+  // as a possible sidebar echo.
+  static hasRecentMatchingOutgoing(threadId, content, database = getDefaultDb(), options = {}) {
+    const normalizedContent = String(content || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+    if (!threadId || !normalizedContent) return false;
+    const nowMs = Number(options.nowMs) || Date.now();
+    const windowMs = Math.max(1000, Number(options.windowMs) || 120000);
+    const configuredFutureTolerance = Number(options.futureToleranceMs);
+    const futureToleranceMs = Math.max(0, Number.isFinite(configuredFutureTolerance) ? configuredFutureTolerance : 30000);
+    const lowerBound = nowMs - windowMs;
+    const upperBound = nowMs + futureToleranceMs;
+    const candidates = database.prepare(`
+      SELECT content, timestamp_ms, created_at
+      FROM messages
+      WHERE thread_id = ? AND is_outgoing = 1
+        AND (media_type IS NULL OR media_type = 'text')
+        AND (
+          COALESCE(timestamp_ms, 0) BETWEEN ? AND ?
+          OR COALESCE(CAST(strftime('%s', created_at) AS INTEGER) * 1000, 0) BETWEEN ? AND ?
+        )
+      ORDER BY id DESC LIMIT 30
+    `).all(threadId, lowerBound, upperBound, lowerBound, upperBound);
+    return candidates.some((row) => String(row.content || '')
+      .replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN') === normalizedContent);
+  }
   static upsertThread(threadData, database = getDefaultDb()) {
     const { id, account_id, thread_url, contact_name, last_message, is_unread, source_id, inbox_folder } = threadData;
     const external_thread_id = String(threadData.external_thread_id || threadData.thread_id || id);
@@ -734,7 +760,6 @@ class ConversationRepository {
     ConversationRepository.normalizeMessageSequence(threadId, database);
     return database.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(fbMessageId);
   }
-
   static reconcileBatchWithAnchors(existingRows = [], incomingBatch = [], options = {}) {
     const mode = options.mode || 'page_initial';
     const boundaryEvidence = options.boundary_evidence || null;

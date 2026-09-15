@@ -145,11 +145,13 @@ export default function MessageComposer({
   }, [sending, disabled]);
 
   const submitContent = async (rawContent) => {
-    const content = String(rawContent || '').trim();
-    if ((!content && !attachment) || sending || disabled || uploadingAttachment) return;
+    const submittedAttachment = attachment;
+    // Attachments travel through their own reliable queue. Do not let stale
+    // composer text become a second standalone message beside the media.
+    const content = submittedAttachment ? '' : String(rawContent || '').trim();
+    if ((!content && !submittedAttachment) || sending || disabled || uploadingAttachment) return;
 
     const clientMessageId = 'client_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-    const submittedAttachment = attachment;
     restoreFocusAfterSendRef.current = true;
     setSending(true);
     setError(null);

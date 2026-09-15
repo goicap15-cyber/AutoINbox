@@ -2,18 +2,17 @@ class InboxSyncScheduler {
   constructor({
     // Realtime network/DOM observation is the primary path. When Facebook
     // does not surface an inactive thread there, this lightweight one-round
-    // Inbox scan is the fallback. Five seconds made a new customer message
-    // appear in CRM roughly six seconds late; one second keeps that fallback
-    // close to realtime without making the expensive full discovery frequent.
-    sidebarIntervalMs = 350,
-    sidebarCooldownMs = 250,
+    // Inbox scan is the fallback. A two-second cadence keeps replies responsive
+    // while leaving Chrome capacity for manual and campaign sends.
+    sidebarIntervalMs = 2000,
+    sidebarCooldownMs = 1200,
     // Requests/Spam live on a separate Messenger surface. Poll them often
     // enough for the waiting tab to feel live without adding work to every
-    // 350ms Inbox tick.
-    requestsIntervalMs = 15000,
-    // One sidebar job now scans Inbox and Message Requests sequentially in
-    // separate tabs. Facebook lazy loading can legitimately exceed 70s.
-    sidebarTimeoutMs = 180000,
+    // 2s Inbox tick. Scheduled request scans are deliberately less frequent.
+    requestsIntervalMs = 60000,
+    // Sidebar work is bounded so a stalled Facebook lazy surface cannot hold
+    // the extension command lane for minutes.
+    sidebarTimeoutMs = 45000,
     threadCooldownMs = 2000,
     // Messenger virtualized history regularly needs longer than 20s to
     // mount older rows. Expiring it early dispatches a replay while the first
@@ -53,7 +52,16 @@ class InboxSyncScheduler {
         account_id: accId,
         inFlight: false,
         lastSidebarSyncAt: 0,
-        lastRequestsSyncAt: 0,
+        // Do not launch the expensive Requests crawl immediately after startup;
+        // the explicit waiting tab can still request it at once.
+        lastRequestsSyncAt: Date.now(),
+        activeScanMode: null,
+        activeScanReason: null,
+        lastRealtimePreemptAt: 0,
+        // Sidebar discovery is opt-in. Manual/campaign sending remains online,
+        // while Inbox + Requests polling runs only inside a one-minute window.
+        syncEnabledUntil: 0,
+        syncWindowTimer: null,
         pendingRequestScan: false,
         lastResultAt: 0,
         pending: false,
@@ -65,12 +73,14 @@ class InboxSyncScheduler {
 
     if (!state.interval) {
       state.interval = setInterval(() => {
+        if (!this.isSyncWindowActive(accId)) return;
         console.log(`[INBOX_SYNC_TICK] account=${accId}`);
         state.quickTickCount = Number(state.quickTickCount || 0) + 1;
         // Preserve periodic full discovery while polling Inbox quickly for replies.
         // Keep the previous five-minute cadence for the expensive full scan
         // even though lightweight realtime ticks now run once per second.
-        const fullDiscoveryDue = state.quickTickCount % 300 === 0;
+        const fullDiscoveryTicks = Math.max(1, Math.round(300000 / this.sidebarIntervalMs));
+        const fullDiscoveryDue = state.quickTickCount % fullDiscoveryTicks === 0;
         const requestsDue = !fullDiscoveryDue
           && Date.now() - Number(state.lastRequestsSyncAt || 0) >= this.requestsIntervalMs;
         const scanMode = fullDiscoveryDue ? 'full' : (requestsDue ? 'realtime_requests' : 'realtime');
@@ -82,10 +92,72 @@ class InboxSyncScheduler {
     }
 
     console.log(`[INBOX_SYNC_REGISTER] account=${accId} interval_ms=${this.sidebarIntervalMs}`);
-    // The websocket is already connected when registerAccount is called. Run
-    // the first lightweight inbox scan now, so messages received while the
-    // desktop app was closed do not wait for the first interval tick.
-    this.requestSidebarSync(accId, 'register', { force: true, scanMode: 'realtime' });
+    // Keep the extension connection ready for manual sends, but leave the two
+    // expensive sidebar tabs asleep until the operator presses Refresh.
+  }
+
+  isSyncWindowActive(accountId) {
+    const state = this.accounts.get(String(accountId || ''));
+    return Boolean(state && Number(state.syncEnabledUntil || 0) > Date.now());
+  }
+
+  scheduleSidebarReplay(accountId, reason = 'scheduled_replay', delayMs = 500) {
+    const accId = String(accountId || '');
+    const state = this.accounts.get(accId);
+    if (!state || !this.isSyncWindowActive(accId)) return false;
+    state.pending = true;
+    if (state.pendingTimer) return true;
+    state.pendingTimer = setTimeout(() => {
+      state.pendingTimer = null;
+      if (!this.isSyncWindowActive(accId)) return;
+      this.requestSidebarSync(accId, reason, { force: true, scanMode: 'realtime' });
+    }, Math.max(25, Number(delayMs) || 500));
+    if (typeof state.pendingTimer.unref === 'function') state.pendingTimer.unref();
+    return true;
+  }
+
+  startSyncWindow(accountId, durationMs = 120000) {
+    const accId = String(accountId || '');
+    if (!accId) return { enabled: false, expires_at: 0 };
+    if (!this.accounts.has(accId)) this.registerAccount(accId);
+    const state = this.accounts.get(accId);
+    const boundedDuration = Math.max(5000, Math.min(Number(durationMs) || 120000, 120000));
+    state.syncEnabledUntil = Date.now() + boundedDuration;
+    if (state.syncWindowTimer) clearTimeout(state.syncWindowTimer);
+    state.syncWindowTimer = setTimeout(() => this.stopSyncWindow(accId, 'window_expired'), boundedDuration);
+    if (typeof state.syncWindowTimer.unref === 'function') state.syncWindowTimer.unref();
+
+    const inboxDispatched = this.requestSidebarSync(accId, 'manual_window_inbox', { force: true, scanMode: 'realtime' });
+    // The refresh button can be pressed while the extension is reconnecting.
+    // Do not lose that explicit request: retry the Inbox scan after the socket
+    // becomes ready and trigger Message Requests independently of Inbox.
+    if (!inboxDispatched) this.scheduleSidebarReplay(accId, 'manual_window_inbox_replay', 500);
+    this.requestMessageRequestsSync(accId, 'manual_window_requests');
+    console.log(`[INBOX_SYNC_WINDOW_STARTED] account=${accId} duration_ms=${boundedDuration}`);
+    return { enabled: true, expires_at: state.syncEnabledUntil };
+  }
+
+  stopSyncWindow(accountId, reason = 'manual') {
+    const accId = String(accountId || '');
+    const state = this.accounts.get(accId);
+    if (!state) return { enabled: false, expires_at: 0 };
+    state.syncEnabledUntil = 0;
+    state.pending = false;
+    state.pendingRequestScan = false;
+    if (state.syncWindowTimer) clearTimeout(state.syncWindowTimer);
+    state.syncWindowTimer = null;
+    if (state.timeout) clearTimeout(state.timeout);
+    state.timeout = null;
+    state.inFlight = false;
+    state.activeScanMode = null;
+    state.activeScanReason = null;
+    const extWs = this.getConnection?.(accId);
+    if (extWs?.readyState === 1) {
+      extWs.send(JSON.stringify({ type: 'CANCEL_THREADS_SYNC', data: { account_id: accId, reason } }));
+      extWs.send(JSON.stringify({ type: 'SET_SIDEBAR_SYNC_WINDOW', data: { account_id: accId, enabled: false, reason } }));
+    }
+    console.log(`[INBOX_SYNC_WINDOW_STOPPED] account=${accId} reason=${reason}`);
+    return { enabled: false, expires_at: 0 };
   }
 
   unregisterAccount(accountId) {
@@ -94,6 +166,7 @@ class InboxSyncScheduler {
     if (!state) return;
     if (state.interval) clearInterval(state.interval);
     if (state.timeout) clearTimeout(state.timeout);
+    if (state.syncWindowTimer) clearTimeout(state.syncWindowTimer);
     this.accounts.delete(accId);
     this.threadQueues.delete(accId);
     this.accountThreadBusy.delete(accId);
@@ -124,7 +197,12 @@ class InboxSyncScheduler {
       account_id: accId,
       inFlight: false,
       lastSidebarSyncAt: 0,
-      lastRequestsSyncAt: 0,
+      lastRequestsSyncAt: Date.now(),
+      activeScanMode: null,
+      activeScanReason: null,
+      lastRealtimePreemptAt: 0,
+      syncEnabledUntil: 0,
+      syncWindowTimer: null,
       pendingRequestScan: false,
       lastResultAt: 0,
       timeout: null,
@@ -133,6 +211,10 @@ class InboxSyncScheduler {
     this.accounts.set(accId, state);
 
     const now = Date.now();
+    if (!this.isSyncWindowActive(accId)) {
+      console.log(`[INBOX_SYNC_SKIP] account=${accId} reason=${reason} skip=manual_window_inactive`);
+      return false;
+    }
     const isLightweightScan = scanMode === 'realtime' || scanMode === 'realtime_requests';
     if (this.accountThreadBusy.has(accId)) {
       // Realtime discovery uses a separate tab, so history/campaign work must not pause new replies.
@@ -143,6 +225,26 @@ class InboxSyncScheduler {
       }
     }
     if (state.inFlight && !force) {
+      if (scanMode === 'realtime' && state.activeScanMode === 'realtime_requests'
+        && state.activeScanReason === 'scheduler_requests'
+        && now - Number(state.lastSidebarSyncAt || 0) >= 8000
+        && now - Number(state.lastRealtimePreemptAt || 0) >= 1000) {
+        const priorityWs = this.getConnection(accId);
+        if (priorityWs?.readyState === 1) {
+          // Queue a realtime scan inside the extension. It cancels the slower
+          // scheduled Requests crawl and starts as soon as that crawl unwinds.
+          priorityWs.send(JSON.stringify({ type: 'SYNC_THREADS', data: {
+            account_id: accId,
+            reason: 'realtime_preempt_requests',
+            scan_mode: 'realtime',
+            resume: false,
+            time_budget_ms: 5000
+          } }));
+          state.lastRealtimePreemptAt = now;
+          console.log(`[INBOX_SYNC_PREEMPT_REQUESTS] account=${accId}`);
+          return true;
+        }
+      }
       if (isLightweightScan) return false;
       state.pending = true;
       console.log(`[INBOX_SYNC_DEFER] account=${accId} reason=${reason} defer=in_flight`);
@@ -166,10 +268,13 @@ class InboxSyncScheduler {
     const extWs = this.getConnection(accId);
     if (!extWs || extWs.readyState !== 1) {
       console.warn(`[INBOX_SYNC_SKIP] account=${accId} reason=${reason} skip=extension_not_ready`);
+      this.scheduleSidebarReplay(accId, `${reason}_extension_replay`, 750);
       return false;
     }
 
     state.inFlight = true;
+    state.activeScanMode = scanMode || (reason === 'scheduler_realtime' || reason === 'register' ? 'realtime' : 'full');
+    state.activeScanReason = reason;
     state.pending = false;
     state.lastSidebarSyncAt = now;
     if (state.timeout) clearTimeout(state.timeout);
@@ -188,7 +293,12 @@ class InboxSyncScheduler {
       reason,
       scan_mode: scanMode || (reason === 'scheduler_realtime' || reason === 'register' ? 'realtime' : 'full'),
       resume: reason === 'crm_continue',
-      time_budget_ms: scanMode === 'realtime' ? 5000 : (scanMode === 'realtime_requests' ? 30000 : 120000)
+      // Requests must visit both the Possible and Spam surfaces. Facebook can
+      // spend tens of seconds mounting either lazy sidebar, so keep this job
+      // alive without changing the normal Inbox realtime budget.
+      time_budget_ms: scanMode === 'realtime'
+        ? 5000
+        : (scanMode === 'realtime_requests' ? (reason === 'scheduler_requests' ? 12000 : 30000) : 120000)
     } }));
     console.log(`[INBOX_SYNC_THREADS_DISPATCHED] account=${accId} reason=${reason}`);
     return true;
@@ -211,7 +321,10 @@ class InboxSyncScheduler {
     const state = this.accounts.get(accId);
     if (!state) return;
     state.inFlight = false;
+    state.activeScanMode = null;
+    state.activeScanReason = null;
     state.lastResultAt = Date.now();
+    if (!this.isSyncWindowActive(accId)) return;
     if (state.timeout) {
       clearTimeout(state.timeout);
       state.timeout = null;
@@ -354,6 +467,12 @@ class InboxSyncScheduler {
     if (!dispatched) {
       this.threadInFlight.delete(job.key);
       this.accountThreadBusy.delete(accId);
+      // A user can select a blank thread while Chrome/the extension is still
+      // reconnecting. Retain that explicit request instead of silently losing
+      // it; replay is cancelled naturally if the operator selects another chat.
+      this.pendingThreadSyncs.set(job.key, { ...job, reason: `${job.reason}_extension_replay` });
+      const retryTimer = setTimeout(() => this.replayPendingThread(job.key), 750);
+      if (typeof retryTimer.unref === 'function') retryTimer.unref();
       setTimeout(() => this.drainThreadQueue(accId), 250);
       return;
     }

@@ -86,7 +86,7 @@
 
   function schedule() {
     if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(emitIfChanged, 140);
+    debounceTimer = setTimeout(emitIfChanged, 45);
   }
 
   const observer = new MutationObserver(schedule);
@@ -97,7 +97,7 @@
     attributes: true,
     attributeFilter: ['aria-label', 'aria-current', 'class', 'href']
   });
-  const fallbackTimer = setInterval(emitIfChanged, 2500);
+  const fallbackTimer = setInterval(emitIfChanged, 500);
   globalThis.__FB_CRM_SIDEBAR_ACTIVITY_OBSERVER__ = {
     disconnect() {
       observer.disconnect();

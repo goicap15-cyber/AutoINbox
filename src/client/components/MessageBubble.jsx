@@ -45,7 +45,7 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   const isPendingDirection = msg.direction_status === 'pending';
   const isOutgoing = isConfirmedOutgoing(msg) || (!isPendingDirection && Boolean(msg.is_outgoing || msg.from === 'me' || msg.sender_type === 'staff' || msg.sender_type === 'ai'));
   const isUnsent = Boolean(msg.is_unsent || msg.unsent);
-  const content = msg.content || msg.text || msg.message || '';
+  const content = msg.content || msg.text_content || msg.text || msg.message || '';
   const senderName = msg.sender_name || (isOutgoing ? (msg.is_ai || msg.sender_type === 'ai' ? 'AI' : 'Bạn') : activeThread?.contact_name || 'Khách hàng');
   // Persisted delivery_status is authoritative. A stale optimistic status can
   // remain 'pending' after the backend has confirmed the Messenger media.
@@ -60,8 +60,8 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   const mediaUrl = msg.media_url || msg.attachment?.preview_url || msg.attachment?.media_url || null;
   const mediaType = msg.media_type || msg.attachment?.media_type || null;
   const hasRenderableMedia = Boolean(
-    msg.local_media_path || mediaUrl || msg.attachment_id || msg.attachment ||
-    (mediaType && mediaType !== 'text' && mediaType !== 'call')
+    msg.local_media_path || mediaUrl || msg.attachment_id ||
+    Boolean(msg.attachment?.preview_url || msg.attachment?.media_url || msg.attachment?.local_media_path || msg.attachment?.id)
   );
   const hasCallText = /(?:cuộc gọi|gọi thoại|bỏ lỡ cuộc gọi|nhỡ cuộc|audio call|video call|missed call|missed audio|missed video|call ended)/i.test(content);
   const isCallMessage = Boolean(
@@ -74,10 +74,16 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   const isVideoCall = lowerContent.includes('video');
 
   const hasMedia = hasRenderableMedia;
-  const visibleContent = isOutgoing && hasMedia && mediaType === 'image' ? '' : content;
+  // Messenger can echo stale composer text as an image caption even though
+  // CRM sent the image separately. Hide that transport artefact.
+  // Facebook can surface a transport caption as a second text bubble beside an outgoing
+  // image/video. The media bubble is the canonical representation in CRM.
+  const visibleContent = isOutgoing && hasMedia ? '' : content;
   const isQuickLike = !isCallMessage && !isUnsent && !hasMedia && (visibleContent?.trim() === '👍' || /^(?:thích|like)$/i.test(visibleContent?.trim() || ''));
-
-  if (!content && !hasMedia && !isUnsent) return null;
+  const displayUrl = msg.local_media_path || mediaUrl || msg.attachment?.local_media_path || null;
+  // Never render an empty placeholder bubble.
+  // A valid bubble must carry visible content text, playable media (displayUrl), or a call payload.
+  if (!visibleContent && !displayUrl && !isCallMessage && !isQuickLike) return null;
 
   return (
     <div

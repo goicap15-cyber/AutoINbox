@@ -25,13 +25,14 @@ import { MessageSquare } from 'lucide-react';
 import { sortThreadsByActivity } from './utils/threadActivity.js';
 
 const THEME_VERSION = 'chat-redesign-v1';
+const WAITING_REQUEST_REFRESH_MS = 15000;
 
 // Older/background sync payloads can create a thread before Messenger returns
 // the actual display name.  Do not keep showing that placeholder once the
 // contact record has a verified name.
 function isPlaceholderContactName(value) {
   const normalized = String(value || '').trim().toLocaleLowerCase('vi-VN');
-  return !normalized || normalized === 'khách hàng' || normalized === 'customer';
+  return !normalized || normalized === 'khÃ¡ch hÃ ng' || normalized === 'customer';
 }
 
 function getVerifiedContactName(contact) {
@@ -64,6 +65,29 @@ const sortMessagesChronologically = (items = []) => items
     return left.originalIndex - right.originalIndex;
   })
   .map(({ message }) => message);
+
+const messageText = (message) => String(
+  message?.content ?? message?.text_content ?? message?.text ?? message?.message ?? ''
+).trim();
+
+const hasRenderableMessagePayload = (message) => Boolean(
+  messageText(message)
+  || message?.media_url
+  || message?.local_media_path
+  || message?.attachment_id
+  || message?.attachment?.preview_url
+  || message?.attachment?.media_url
+  || message?.attachment?.local_media_path
+  || message?.attachment?.id
+  || message?.media_type === 'call'
+);
+
+const filterRenderableMessages = (items = []) => items.filter((message) => {
+  if (hasRenderableMessagePayload(message)) return true;
+  const status = String(message?.status || message?.delivery_status || '').toLowerCase();
+  return Boolean(message?.client_message_id && ['sending', 'pending', 'failed'].includes(status));
+});
+
 const preserveOrderAnchors = (incoming = [], existing = []) => {
   const byClientId = new Map(existing.filter((m) => m?.client_message_id).map((m) => [String(m.client_message_id), m]));
   const byFacebookId = new Map(existing.filter((m) => m?.fb_message_id).map((m) => [String(m.fb_message_id), m]));
@@ -82,8 +106,9 @@ const preserveOrderAnchors = (incoming = [], existing = []) => {
 // when the same durable identity is observed, then append genuinely unseen
 // rows in the order supplied by the backend.
 const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
-  if (!existing.length) return sortMessagesChronologically(incoming);
-  const result = [...existing];
+  const cleanIncoming = filterRenderableMessages(incoming);
+  if (!existing.length) return sortMessagesChronologically(cleanIncoming);
+  const result = filterRenderableMessages(existing);
   let newestVisibleSequence = existing.reduce((maximum, message) => {
     const sequence = Number(message?.sequence_order ?? message?.id);
     return Number.isFinite(sequence) ? Math.max(maximum, sequence) : maximum;
@@ -97,7 +122,7 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
   const indexByIdentity = new Map();
   result.forEach((message, index) => identities(message).forEach((key) => indexByIdentity.set(key, index)));
 
-  incoming.forEach((message) => {
+  cleanIncoming.forEach((message) => {
     const matchedIndex = identities(message)
       .map((key) => indexByIdentity.get(key))
       .find((index) => index !== undefined);
@@ -120,15 +145,13 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
         if (Number.isFinite(incomingSequence)) newestVisibleSequence = Math.max(newestVisibleSequence, incomingSequence);
         return;
       }
-      // Missing incoming media is a completeness backfill, not a new arrival.
+      // Missing older rows are completeness backfill, not a new arrival.
       // Insert it at its durable sequence without rebuilding/re-sorting the
-      // rest of the live chat. Previously this guard silently discarded every
-      // customer photo/video discovered after newer text was already visible.
+      // rest of the live chat. This must apply to text too; otherwise a blank
+      // conversation only becomes visible after the operator sends a new
+      // message, and the fetched older rows end up in the wrong place.
       if (Number.isFinite(newestVisibleSequence) && Number.isFinite(incomingSequence)
         && incomingSequence <= newestVisibleSequence) {
-        const isIncomingMedia = !message?.is_outgoing
-          && ['image', 'video', 'voice', 'file'].includes(String(message?.media_type || '').toLowerCase());
-        if (!isIncomingMedia) return;
         const insertAt = result.findIndex((candidate) => {
           const candidateSequence = Number(candidate?.sequence_order ?? candidate?.id);
           return Number.isFinite(candidateSequence) && candidateSequence > incomingSequence;
@@ -178,12 +201,21 @@ const reconcileOutgoingTextEchoes = (items = []) => {
     message?.attachment_id || message?.media_url || message?.local_media_path
     || (message?.media_type && message.media_type !== 'text')
   );
-  const isSyntheticFacebookId = (message) => {
-    const id = String(message?.fb_message_id || '');
-    return Boolean(id) && !id.startsWith('mid.');
-  };
+  const isSyntheticId = (message) => /^(?:dom_|history_|network_|websocket_|mercury_|xhr_)/i.test(String(message?.fb_message_id || ''));
+  const outgoingTextKeys = new Set(items
+    .filter((message) => message?.is_outgoing && isPlainText(message) && normalizedText(message))
+    .map((message) => normalizedText(message).toLocaleLowerCase('vi-VN')));
+  const withoutIncomingEchoes = items.filter((message) => {
+    if (message?.is_outgoing || !isPlainText(message)) return true;
+    const contentKey = normalizedText(message).toLocaleLowerCase('vi-VN');
+    if (!contentKey || !outgoingTextKeys.has(contentKey)) return true;
+    const source = String(message?.source || '').toLowerCase();
+    const isObserverRow = isSyntheticId(message)
+      || ['dom_observer', 'dom_history_sync', 'network_interceptor', 'network_xhr', 'websocket', 'mercury'].includes(source);
+    return !(isObserverRow || !message?.sender_id);
+  });
 
-  items.forEach((message) => {
+  withoutIncomingEchoes.forEach((message) => {
     if (!message?.is_outgoing || !isPlainText(message) || !normalizedText(message)) {
       result.push(message);
       return;
@@ -192,10 +224,8 @@ const reconcileOutgoingTextEchoes = (items = []) => {
     const matchIndex = result.findIndex((candidate) => {
       if (!candidate?.is_outgoing || !isPlainText(candidate)) return false;
       if (normalizedText(candidate) !== normalizedText(message)) return false;
-      // Collapse the whole CRM -> synthetic DOM -> official Messenger chain.
-      // Two durable official ids remain two intentional sends.
       const asymmetricClientEcho = Boolean(candidate.client_message_id) !== Boolean(message.client_message_id);
-      const syntheticDomEcho = isSyntheticFacebookId(candidate) || isSyntheticFacebookId(message);
+      const syntheticDomEcho = isSyntheticId(candidate) || isSyntheticId(message);
       if (!asymmetricClientEcho && !syntheticDomEcho) return false;
       const candidateAt = messageTime(candidate);
       return !candidateAt || !messageAt || Math.abs(candidateAt - messageAt) <= 120000;
@@ -204,17 +234,14 @@ const reconcileOutgoingTextEchoes = (items = []) => {
       result.push(message);
       return;
     }
-
     const previous = result[matchIndex];
     const clientRow = previous.client_message_id ? previous : message;
     const observedRow = previous.client_message_id ? message : previous;
     const clientFbId = String(clientRow.fb_message_id || '');
     const observedFbId = String(observedRow.fb_message_id || '');
     const clientIsTemporary = !clientFbId || clientFbId.startsWith('pending_') || !clientFbId.startsWith('mid.');
-    // Distinct permanent Facebook ids are distinct sends, even when the user
-    // intentionally sends the exact same text several times in one minute.
     if (!clientIsTemporary && observedFbId && clientFbId !== observedFbId
-      && !isSyntheticFacebookId(previous) && !isSyntheticFacebookId(message)) {
+      && !isSyntheticId(previous) && !isSyntheticId(message)) {
       result.push(message);
       return;
     }
@@ -297,6 +324,8 @@ export default function App() {
   const [historySyncingThreadId, setHistorySyncingThreadId] = useState(null);
   const historySyncTimeoutRef = useRef(null);
   const requestedFacebookSyncRef = useRef(null);
+  const [sidebarSyncUntil, setSidebarSyncUntil] = useState(0);
+  const [sidebarSyncClock, setSidebarSyncClock] = useState(() => Date.now());
 
   const [campaignSelectionMode, setCampaignSelectionMode] = useState(false);
   const [selectedCampaignThreadIds, setSelectedCampaignThreadIds] = useState([]);
@@ -354,7 +383,7 @@ export default function App() {
         setLicenseStatus({
           isLicensed: false,
           reason: json.code || 'LICENSE_CHECK_FAILED',
-          message: json.message || 'Không thể kiểm tra bản quyền.'
+          message: json.message || 'KhÃ´ng thá»ƒ kiá»ƒm tra báº£n quyá»n.'
         });
       }
     } catch (e) {
@@ -366,8 +395,8 @@ export default function App() {
         isLicensed: false,
         reason: e?.name === 'AbortError' ? 'LICENSE_CHECK_TIMEOUT' : 'LICENSE_CHECK_FAILED',
         message: e?.name === 'AbortError'
-          ? 'Máy chủ bản quyền phản hồi quá lâu. Vui lòng thử lại.'
-          : 'Không thể kết nối để kiểm tra bản quyền.'
+          ? 'MÃ¡y chá»§ báº£n quyá»n pháº£n há»“i quÃ¡ lÃ¢u. Vui lÃ²ng thá»­ láº¡i.'
+          : 'KhÃ´ng thá»ƒ káº¿t ná»‘i Ä‘á»ƒ kiá»ƒm tra báº£n quyá»n.'
       });
     } finally {
       clearTimeout(timeout);
@@ -410,7 +439,7 @@ export default function App() {
       });
       const created = await res.json().catch(() => null);
       if (!res.ok) {
-        throw new Error(created?.error || 'Không thể tạo trạng thái mới.');
+        throw new Error(created?.error || 'KhÃ´ng thá»ƒ táº¡o tráº¡ng thÃ¡i má»›i.');
       }
       if (created?.id != null) {
         setLeadStatuses((prev) => (prev.some((s) => s.id === created.id) ? prev : [...prev, created]));
@@ -505,6 +534,49 @@ export default function App() {
   useEffect(() => { activeThreadIdRef.current = activeThreadId; }, [activeThreadId]);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
 
+  const sidebarSyncActive = isConnected && sidebarSyncUntil > sidebarSyncClock;
+  const sidebarSyncSecondsRemaining = sidebarSyncActive
+    ? Math.max(1, Math.ceil((sidebarSyncUntil - sidebarSyncClock) / 1000))
+    : 0;
+
+  useEffect(() => {
+    if (!sidebarSyncUntil) return undefined;
+    const updateClock = () => {
+      const now = Date.now();
+      setSidebarSyncClock(now);
+      if (now >= sidebarSyncUntil) setSidebarSyncUntil(0);
+    };
+    updateClock();
+    const timer = setInterval(updateClock, 1000);
+    return () => clearInterval(timer);
+  }, [sidebarSyncUntil]);
+
+  useEffect(() => {
+    if (!socket) return undefined;
+    const handleSyncWindowState = ({ enabled, expires_at } = {}) => {
+      const nextUntil = enabled ? Number(expires_at || 0) : 0;
+      setSidebarSyncUntil(nextUntil > Date.now() ? nextUntil : 0);
+      setSidebarSyncClock(Date.now());
+    };
+    socket.on('SIDEBAR_SYNC_WINDOW_STATE', handleSyncWindowState);
+    return () => socket.off('SIDEBAR_SYNC_WINDOW_STATE', handleSyncWindowState);
+  }, [socket]);
+
+  const handleToggleSidebarSync = useCallback(() => {
+    if (!socket || !isConnected) return;
+    const enable = !sidebarSyncActive;
+    socket.emit('SET_SIDEBAR_SYNC_WINDOW', {
+      enabled: enable,
+      duration_ms: 120000,
+      account_ids: accountsRef.current.map((account) => account.id).filter(Boolean)
+    });
+    // Optimistic feedback keeps the button responsive while the server starts
+    // or closes the two background Messenger surfaces.
+    const now = Date.now();
+    setSidebarSyncClock(now);
+    setSidebarSyncUntil(enable ? now + 120000 : 0);
+  }, [socket, isConnected, sidebarSyncActive]);
+
   const requestThreadNavigation = useCallback((thread) => {
     if (!thread) return;
     setActiveThreadId(thread.id);
@@ -521,13 +593,29 @@ export default function App() {
     setActiveThreadId(null);
     setThreads([]);
     setActiveTab(normalizedTab);
-    if (normalizedTab === 'WAITING' && socket && isConnected) {
+    if (normalizedTab === 'WAITING' && sidebarSyncActive && socket && isConnected) {
       for (const account of accountsRef.current) {
         if (!account?.id) continue;
         socket.emit('REQUEST_SYNC_MESSAGE_REQUESTS', { account_id: account.id });
       }
     }
-  }, [socket, isConnected]);
+  }, [socket, isConnected, sidebarSyncActive]);
+
+  // Message Requests live on a separate Facebook surface. Keep asking for
+  // that dedicated scan while WAITING is visible, including after a socket
+  // reconnect or when accounts finish loading after the user opened the tab.
+  useEffect(() => {
+    if (activeTab !== 'WAITING' || !sidebarSyncActive || !socket || !isConnected) return undefined;
+    const requestWaitingThreads = () => {
+      for (const account of accountsRef.current) {
+        if (!account?.id) continue;
+        socket.emit('REQUEST_SYNC_MESSAGE_REQUESTS', { account_id: account.id });
+      }
+    };
+    requestWaitingThreads();
+    const refreshTimer = setInterval(requestWaitingThreads, WAITING_REQUEST_REFRESH_MS);
+    return () => clearInterval(refreshTimer);
+  }, [activeTab, sidebarSyncActive, socket, isConnected, accounts]);
 
   const requestThreadMessageSync = useCallback((threadId, direction = 'initial', scrollDelta = 0) => {
     if (!socket || !isConnected || !threadId) return;
@@ -577,7 +665,7 @@ export default function App() {
         })
         .catch(() => {});
     };
-    const timer = setInterval(reconcileFromDatabase, 350);
+    const timer = setInterval(reconcileFromDatabase, 1000);
     return () => { stopped = true; clearInterval(timer); };
   }, [activeThreadId]);
 
@@ -633,7 +721,7 @@ export default function App() {
     })
       .then(async (response) => {
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Không tải được khả năng gửi.');
+        if (!response.ok) throw new Error(data.error || 'KhÃ´ng táº£i Ä‘Æ°á»£c kháº£ nÄƒng gá»­i.');
         return data;
       })
       .then(setRichCapabilities)
@@ -694,9 +782,13 @@ export default function App() {
             ? String(newMsg.attachment_id) === String(message.attachment_id)
             : true;
           const sameMediaType = !incomingMediaType || !existingMediaType || incomingMediaType === existingMediaType;
+          // Text can be intentionally sent twice. Only a still-pending local
+          // bubble may absorb its own DOM confirmation; a sent text is final.
+          const localDelivery = String(message.delivery_status || message.status || '').toLowerCase();
+          const awaitingTextConfirmation = ['pending', 'sending', 'queued', 'awaiting_confirmation'].includes(localDelivery);
           return newIsMedia
             ? existingIsMedia && sameAttachment && sameMediaType
-            : !existingIsMedia && String(message.content || '') === String(newMsg.content || '');
+            : awaitingTextConfirmation && !existingIsMedia && String(message.content || '') === String(newMsg.content || '');
         });
         if (newMsg.client_message_id) {
           // Feature 021: a Page send's local optimistic bubble is created
@@ -871,7 +963,7 @@ export default function App() {
               ...message,
               status: 'failed',
               delivery_status: 'failed',
-              error: typeof error === 'object' ? error : { message: error || (isAttachment ? 'Không gửi được ảnh.' : 'Không gửi được tin nhắn.') }
+              error: typeof error === 'object' ? error : { message: error || (isAttachment ? 'KhÃ´ng gá»­i Ä‘Æ°á»£c áº£nh.' : 'KhÃ´ng gá»­i Ä‘Æ°á»£c tin nháº¯n.') }
             }];
           })
         };
@@ -880,12 +972,12 @@ export default function App() {
 
 
     socket.on('INCOMING_CALL_RINGING', (callData) => {
-      console.log('[Socket.io] 🔔 INCOMING_CALL_RINGING:', callData);
+      console.log('[Socket.io] ðŸ”” INCOMING_CALL_RINGING:', callData);
       setIncomingCallInfo(callData);
     });
 
     socket.on('INCOMING_CALL_ENDED', (callData) => {
-      console.log('[Socket.io] 📴 INCOMING_CALL_ENDED:', callData);
+      console.log('[Socket.io] ðŸ“´ INCOMING_CALL_ENDED:', callData);
       setIncomingCallInfo(null);
     });
 
@@ -936,7 +1028,7 @@ export default function App() {
             ...message,
             status: 'failed',
             delivery_status: 'failed',
-            error: statusEvent.error || { message: 'Không gửi được ảnh.' }
+            error: statusEvent.error || { message: 'KhÃ´ng gá»­i Ä‘Æ°á»£c áº£nh.' }
           } : {
             ...message,
             attempt_id: statusEvent.attempt_id || message.attempt_id,
@@ -957,7 +1049,7 @@ export default function App() {
           next[threadId] = next[threadId].map((message) => {
             const matches = (client_message_id && message.client_message_id === client_message_id) || (message_id && Number(message.id) === Number(message_id));
             if (!matches || ['sent', 'delivered', 'read'].includes(String(message.delivery_status || message.status).toLowerCase())) return message;
-            return { ...message, status: 'failed', delivery_status: 'failed', error: { code: code || 'SEND_ERROR', message: error || 'Không gửi được tin nhắn.' } };
+            return { ...message, status: 'failed', delivery_status: 'failed', error: { code: code || 'SEND_ERROR', message: error || 'KhÃ´ng gá»­i Ä‘Æ°á»£c tin nháº¯n.' } };
           });
         });
         return next;
@@ -983,7 +1075,7 @@ export default function App() {
           return `fallback_${message.timestamp_ms || message.created_at || 0}_${message.is_outgoing ? 1 : 0}_${message.content || ''}`;
         };
 
-        // Nạp tin nhắn vừa sync
+        // Náº¡p tin nháº¯n vá»«a sync
         (syncedMsgs || []).forEach(m => {
           let key = messageKey(m);
           let reconciledMessage = m;
@@ -1038,7 +1130,7 @@ export default function App() {
           mergedMap.set(key, { ...reconciledMessage, thread_key: m.thread_key || thread_key, account_id: m.account_id || account_id, status: 'sent' });
         });
 
-        // Giữ lại các tin nhắn pending/failed/realtime chưa có trong bản sync
+        // Giá»¯ láº¡i cÃ¡c tin nháº¯n pending/failed/realtime chÆ°a cÃ³ trong báº£n sync
         existing.forEach(m => {
           const key = messageKey(m);
           const keepOptimistic = m.status === 'sending' || m.status === 'failed' || m.delivery_status === 'pending';
@@ -1303,7 +1395,7 @@ export default function App() {
   }, []);
 
   const handleStageAttachment = useCallback(async (file) => {
-    if (!activeThreadId) throw new Error('Chưa chọn hội thoại.');
+    if (!activeThreadId) throw new Error('ChÆ°a chá»n há»™i thoáº¡i.');
     const threadId = String(activeThreadId);
     const formData = new FormData();
     formData.append('file', file, file.name);
@@ -1315,7 +1407,7 @@ export default function App() {
     );
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const error = new Error(data.error || 'Không tải được file đính kèm.');
+      const error = new Error(data.error || 'KhÃ´ng táº£i Ä‘Æ°á»£c file Ä‘Ã­nh kÃ¨m.');
       error.code = data.code;
       throw error;
     }
@@ -1323,7 +1415,7 @@ export default function App() {
   }, [activeThreadId]);
 
   const handleDiscardAttachment = useCallback(async (attachmentId) => {
-    if (!activeThreadId) throw new Error('Chưa chọn hội thoại.');
+    if (!activeThreadId) throw new Error('ChÆ°a chá»n há»™i thoáº¡i.');
     const response = await fetch(
       '/api/threads/' + encodeURIComponent(String(activeThreadId)) +
         '/outbound-attachments/' + encodeURIComponent(attachmentId),
@@ -1331,7 +1423,7 @@ export default function App() {
     );
     if (response.status === 204) return;
     const data = await response.json().catch(() => ({}));
-    const error = new Error(data.error || 'Không gỡ được file đính kèm.');
+    const error = new Error(data.error || 'KhÃ´ng gá»¡ Ä‘Æ°á»£c file Ä‘Ã­nh kÃ¨m.');
     error.code = data.code;
     throw error;
   }, [activeThreadId]);
@@ -1354,11 +1446,18 @@ export default function App() {
           attachment_id: payloadOrText?.attachment_id || null,
           attachment: payloadOrText?.attachment || null
         };
-    if (!payload.client_message_id) throw new Error('Thiếu mã tin nhắn phía CRM.');
+    if (!payload.client_message_id) throw new Error('Thiáº¿u mÃ£ tin nháº¯n phÃ­a CRM.');
+    const hasAttachment = Boolean(payload.attachment_id || payload.attachment?.media_type || payload.attachment?.preview_url);
+    // An attachment must never reuse text left in the composer from an earlier
+    // send: its queue owns the media bubble and has no standalone caption.
+    const outboundContent = hasAttachment ? '' : String(payload.content || '').trim();
+    // Do not create a phantom CRM bubble for an empty transport event.
+    // Real video/image sends always carry an attachment identity.
+    if (!String(payload.content || '').trim() && !hasAttachment) return;
 
     const newMsg = {
       client_message_id: payload.client_message_id,
-      content: payload.content,
+      content: outboundContent,
       attachment_id: payload.attachment_id,
       attachment: payload.attachment,
       media_type: payload.attachment?.media_type || 'text',
@@ -1397,7 +1496,7 @@ export default function App() {
         contract_version: payload.attachment_id || payload.attachment ? 2 : 1,
         thread_id: threadIdStr,
         client_message_id: payload.client_message_id,
-        content: payload.content,
+        content: outboundContent,
         attachment_id: payload.attachment_id
       });
       return;
@@ -1411,7 +1510,7 @@ export default function App() {
               ...message,
               status: 'failed',
               delivery_status: 'failed',
-              error: { code: 'SOCKET_DISCONNECTED', message: 'CRM chưa kết nối backend.' }
+              error: { code: 'SOCKET_DISCONNECTED', message: 'CRM chÆ°a káº¿t ná»‘i backend.' }
             }
           : message
       ))
@@ -1456,12 +1555,12 @@ export default function App() {
 
   const handleSetReminder = async (threadId, dueAt, note) => {
     const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/reminder', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ due_at: dueAt, note }) });
-    const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Không thể lưu nhắc.');
+    const data = await res.json(); if (!res.ok) throw new Error(data.error || 'KhÃ´ng thá»ƒ lÆ°u nháº¯c.');
     await loadThreads(); return data;
   };
-  const handleCompleteReminder = async (threadId) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+'/reminder/complete',{method:'POST'}); const data=await res.json().catch(() => ({})); if(!res.ok) throw new Error(data.error || 'Không thể hoàn thành nhắc.'); await loadThreads(); };
-  const handleCancelReminder = async (threadId) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+'/reminder',{method:'DELETE'}); const data=await res.json().catch(() => ({})); if(!res.ok) throw new Error(data.error || 'Không thể hủy nhắc.'); await loadThreads(); };
-  const handleArchiveThread = async (threadId, restore=false) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+(restore?'/restore':'/archive'),{method:'POST'}); if(!res.ok) throw new Error('Không thể cập nhật lưu trữ.'); await loadThreads(); };
+  const handleCompleteReminder = async (threadId) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+'/reminder/complete',{method:'POST'}); const data=await res.json().catch(() => ({})); if(!res.ok) throw new Error(data.error || 'KhÃ´ng thá»ƒ hoÃ n thÃ nh nháº¯c.'); await loadThreads(); };
+  const handleCancelReminder = async (threadId) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+'/reminder',{method:'DELETE'}); const data=await res.json().catch(() => ({})); if(!res.ok) throw new Error(data.error || 'KhÃ´ng thá»ƒ há»§y nháº¯c.'); await loadThreads(); };
+  const handleArchiveThread = async (threadId, restore=false) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+(restore?'/restore':'/archive'),{method:'POST'}); if(!res.ok) throw new Error('KhÃ´ng thá»ƒ cáº­p nháº­t lÆ°u trá»¯.'); await loadThreads(); };
 
   const handleSaveContact = async (updatedContact) => {
     const contactThreadId = String(updatedContact.thread_id);
@@ -1472,7 +1571,7 @@ export default function App() {
     });
     const responsePayload = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(responsePayload?.error || `Lưu liên hệ thất bại (${res.status})`);
+      throw new Error(responsePayload?.error || `LÆ°u liÃªn há»‡ tháº¥t báº¡i (${res.status})`);
     }
     const persistedContact = { ...updatedContact, ...(responsePayload.contact || {}) };
 
@@ -1573,7 +1672,7 @@ export default function App() {
   const currentSenderIdentity = selectedThread ? {
     name: selectedThread.source_type === 'page_messenger'
       ? (selectedThread.source_name || currentInboxSource?.display_name || selectedThread.source_external_id || 'Facebook Page')
-      : (currentAccount?.name || selectedThread.source_name || selectedThread.account_id || 'Tài khoản Facebook'),
+      : (currentAccount?.name || selectedThread.source_name || selectedThread.account_id || 'TÃ i khoáº£n Facebook'),
     id: selectedThread.source_type === 'page_messenger'
       ? (selectedThread.source_external_id || currentInboxSource?.external_id || selectedThread.source_id)
       : selectedThread.account_id,
@@ -1584,7 +1683,7 @@ export default function App() {
   } : null;
   const activeContact = activeThreadId && selectedThread ? {
     thread_id: String(activeThreadId),
-    name: selectedThread.contact_name || selectedThread.name || 'Khách hàng',
+    name: selectedThread.contact_name || selectedThread.name || 'KhÃ¡ch hÃ ng',
     nickname: selectedThread.nickname || null,
     avatar_url: selectedThread.avatar_url,
     status: selectedThread.status,
@@ -1601,15 +1700,15 @@ export default function App() {
     ? selectedThread?.source_status && selectedThread.source_status !== 'ACTIVE'
     : isCurrentExtensionDisconnected;
   const currentSendDisabledReason = selectedThread?.source_type === 'page_messenger'
-    ? 'Đang chờ Page Messenger sẵn sàng. Vui lòng đợi trong giây lát.'
-    : 'Tài khoản Facebook chưa được kết nối. Vui lòng vào Quản lý và bấm Kết nối Facebook.';
+    ? 'Äang chá» Page Messenger sáºµn sÃ ng. Vui lÃ²ng Ä‘á»£i trong giÃ¢y lÃ¡t.'
+    : 'TÃ i khoáº£n Facebook chÆ°a Ä‘Æ°á»£c káº¿t ná»‘i. Vui lÃ²ng vÃ o Quáº£n lÃ½ vÃ  báº¥m Káº¿t ná»‘i Facebook.';
 
   const gridClass = `${leadPanelCollapsed ? 'app-grid-collapsed' : 'app-grid'}${activeView === 'employees' ? ' employee-view' : ''}`;
 
   const handleStartCall = useCallback((callType = 'audio') => {
     if (!activeThreadId || !selectedThread) return;
     if (!socket || !isConnected) {
-      alert('Chưa kết nối đến Server WebSocket!');
+      alert('ChÆ°a káº¿t ná»‘i Ä‘áº¿n Server WebSocket!');
       return;
     }
     socket.emit('TRIGGER_CALL', {
@@ -1636,7 +1735,7 @@ export default function App() {
   }, [socket, isConnected, threads, bulkHistoryProgress?.status]);
 
   if (authLoading) {
-    return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Đang kiểm tra phiên đăng nhập...</div>;
+    return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Äang kiá»ƒm tra phiÃªn Ä‘Äƒng nháº­p...</div>;
   }
 
   if (!sessionUser) {
@@ -1644,7 +1743,7 @@ export default function App() {
   }
 
   if (licenseStatus === null) {
-    return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Đang kiểm tra bản quyền...</div>;
+    return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Äang kiá»ƒm tra báº£n quyá»n...</div>;
   }
 
   return (
@@ -1676,6 +1775,9 @@ export default function App() {
         waitingCount={waitingCount}
         searchQuery={searchQuery} onSearchChange={setSearchQuery}
         isConnected={isConnected} onOpenSearch={() => setActiveModal('search')}
+        sidebarSyncActive={sidebarSyncActive}
+        sidebarSyncSecondsRemaining={sidebarSyncSecondsRemaining}
+        onToggleSidebarSync={handleToggleSidebarSync}
         accounts={accounts}
         inboxSources={inboxSources}
         leadStatuses={leadStatuses}
@@ -1723,7 +1825,6 @@ export default function App() {
               onRetryMessage={handleRetryMessage}
               historySyncing={String(historySyncingThreadId || '') === String(activeThreadId)}
               onViewportScroll={(scrollDelta) => {
-                if (selectedThread.source_type === 'page_messenger') return;
                 requestThreadMessageSync(
                   activeThreadId,
                   Number(scrollDelta) < 0 ? 'older' : 'viewport',
@@ -1752,7 +1853,7 @@ export default function App() {
             )}
           </div>
         ) : (
-          <EmptyState icon={MessageSquare} title="Chọn một hội thoại để bắt đầu nhắn tin" description="Tin nhắn và thông tin khách hàng sẽ xuất hiện tại đây." />
+          <EmptyState icon={MessageSquare} title="Chá»n má»™t há»™i thoáº¡i Ä‘á»ƒ báº¯t Ä‘áº§u nháº¯n tin" description="Tin nháº¯n vÃ  thÃ´ng tin khÃ¡ch hÃ ng sáº½ xuáº¥t hiá»‡n táº¡i Ä‘Ã¢y." />
         )}
       </div>
 
@@ -1761,7 +1862,7 @@ export default function App() {
         <LeadDetailsPanel contactInfo={activeContact} onSaveContact={handleSaveContact} onExportLeads={handleExportLeads} leadStatuses={leadStatuses} onCreateLeadStatus={handleCreateLeadStatus} onDeleteLeadStatus={handleDeleteLeadStatus} onSetReminder={handleSetReminder} onCompleteReminder={handleCompleteReminder} onCancelReminder={handleCancelReminder} onArchiveThread={handleArchiveThread} />
       )}
 
-      {/* Lead Drawer for ≤1199px */}
+      {/* Lead Drawer for â‰¤1199px */}
       {showLeadDrawer && (
         <>
           <div className="lead-drawer-backdrop open" onClick={() => setShowLeadDrawer(false)} role="presentation" />
@@ -1828,11 +1929,11 @@ export default function App() {
         onSelectThread={(tid) => setActiveThreadId(tid)}
         onAnswerCall={(action, thread_id, callback, source_tab_id = null, source_frame_id = 0, account_id = null, call_id = null) => {
           if (!socket) {
-            callback?.(false, 'Extension Facebook chưa kết nối');
+            callback?.(false, 'Extension Facebook chÆ°a káº¿t ná»‘i');
             return;
           }
 
-          console.log(`[App] 🎯 Emitting ANSWER_INCOMING_CALL (${action}) for thread ${thread_id}`);
+          console.log(`[App] ðŸŽ¯ Emitting ANSWER_INCOMING_CALL (${action}) for thread ${thread_id}`);
 
           let settled = false;
           let timeoutId = null;
@@ -1865,20 +1966,20 @@ export default function App() {
             finish(
               !!payload.success,
               payload.success
-                ? (action === 'accept' ? 'Đã chấp nhận cuộc gọi' : 'Đã từ chối cuộc gọi')
-                : (payload.error || 'Extension không bấm được nút cuộc gọi')
+                ? (action === 'accept' ? 'ÄÃ£ cháº¥p nháº­n cuá»™c gá»i' : 'ÄÃ£ tá»« chá»‘i cuá»™c gá»i')
+                : (payload.error || 'Extension khÃ´ng báº¥m Ä‘Æ°á»£c nÃºt cuá»™c gá»i')
             );
           };
 
           const ackHandler = (payload = {}) => {
             if (payload?.success) return;
-            finish(false, payload?.error || 'Không gửi được lệnh tới extension');
+            finish(false, payload?.error || 'KhÃ´ng gá»­i Ä‘Æ°á»£c lá»‡nh tá»›i extension');
           };
 
           socket.on?.('ANSWER_INCOMING_CALL_RESULT', resultHandler);
           socket.on?.('ANSWER_INCOMING_CALL_RESPONSE', ackHandler);
           timeoutId = setTimeout(() => {
-            finish(false, 'Hết thời gian chờ extension phản hồi');
+            finish(false, 'Háº¿t thá»i gian chá» extension pháº£n há»“i');
           }, 10000);
 
           socket.emit('ANSWER_INCOMING_CALL', { action, thread_id, source_tab_id, source_frame_id, account_id, call_id });

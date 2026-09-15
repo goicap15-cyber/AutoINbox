@@ -3,24 +3,31 @@ const assert = require('node:assert/strict');
 const schedulerSingleton = require('../../src/server/services/InboxSyncScheduler');
 const { InboxSyncScheduler } = schedulerSingleton;
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const enableTestSyncWindow = (scheduler, accountId = 'acc') => {
+  scheduler.registerAccount(accountId);
+  scheduler.accounts.get(accountId).syncEnabledUntil = Date.now() + 60000;
+};
 
 test('default lightweight inbox fallback targets near-realtime delivery', () => {
   const scheduler = new InboxSyncScheduler();
-  assert.equal(scheduler.sidebarIntervalMs, 350);
-  assert.equal(scheduler.sidebarCooldownMs, 250);
-  assert.equal(scheduler.requestsIntervalMs, 15000);
+  assert.equal(scheduler.sidebarIntervalMs, 2000);
+  assert.equal(scheduler.sidebarCooldownMs, 1200);
+  assert.equal(scheduler.requestsIntervalMs, 60000);
 });
 
-test('account registration dispatches the first realtime inbox scan immediately', () => {
+test('account registration keeps sidebar polling asleep until the operator opens a sync window', () => {
   const wsMessages = [];
   const ws = { readyState: 1, send: (payload) => wsMessages.push(JSON.parse(payload)) };
   const scheduler = new InboxSyncScheduler();
   scheduler.configure({ getConnection: () => ws, dispatchThreadMessagesSync: () => false });
   scheduler.registerAccount('acc');
-  assert.equal(wsMessages.length, 1);
-  assert.equal(wsMessages[0].type, 'SYNC_THREADS');
-  assert.equal(wsMessages[0].data.scan_mode, 'realtime');
-  scheduler.markSidebarResult('acc');
+  assert.equal(wsMessages.length, 0);
+  const state = scheduler.startSyncWindow('acc', 60000);
+  assert.equal(state.enabled, true);
+  assert.equal(wsMessages[0]?.type, 'SYNC_THREADS');
+  assert.equal(wsMessages[0]?.data?.scan_mode, 'realtime');
+  scheduler.stopSyncWindow('acc');
+  assert.equal(wsMessages.some((message) => message.type === 'SET_SIDEBAR_SYNC_WINDOW' && message.data.enabled === false), true);
   scheduler.unregisterAccount('acc');
 });
 
@@ -122,6 +129,7 @@ test('realtime sidebar polling continues while history crawl owns the account', 
     getConnection: () => ws,
     dispatchThreadMessagesSync: (job) => { dispatchedThreads.push(job.thread_id); return true; }
   });
+  enableTestSyncWindow(scheduler);
   scheduler.enqueueThreadSync({ account_id: 'acc', thread_id: 'history' });
   assert.equal(scheduler.requestSidebarSync('acc', 'scheduler_realtime', { scanMode: 'realtime' }), true);
   assert.deepEqual(dispatchedThreads, ['history']);
@@ -137,9 +145,25 @@ test('lightweight request polling reaches the extension with a bounded budget', 
   const ws = { readyState: 1, send: (payload) => wsMessages.push(JSON.parse(payload)) };
   const scheduler = new InboxSyncScheduler({ sidebarCooldownMs: 1 });
   scheduler.configure({ getConnection: () => ws, dispatchThreadMessagesSync: () => false });
+  enableTestSyncWindow(scheduler);
   assert.equal(scheduler.requestSidebarSync('acc', 'scheduler_requests', { scanMode: 'realtime_requests' }), true);
   assert.equal(wsMessages[0]?.data?.scan_mode, 'realtime_requests');
-  assert.equal(wsMessages[0]?.data?.time_budget_ms, 30000);
+  assert.equal(wsMessages[0]?.data?.time_budget_ms, 12000);
+  scheduler.markSidebarResult('acc');
+  scheduler.unregisterAccount('acc');
+});
+
+test('scheduled Requests scan yields to realtime while an explicit waiting-tab scan remains protected', () => {
+  const wsMessages = [];
+  const ws = { readyState: 1, send: (payload) => wsMessages.push(JSON.parse(payload)) };
+  const scheduler = new InboxSyncScheduler({ sidebarCooldownMs: 1 });
+  scheduler.configure({ getConnection: () => ws, dispatchThreadMessagesSync: () => false });
+  enableTestSyncWindow(scheduler);
+  scheduler.requestSidebarSync('acc', 'scheduler_requests', { scanMode: 'realtime_requests' });
+  const state = scheduler.accounts.get('acc');
+  state.lastSidebarSyncAt = Date.now() - 9000;
+  assert.equal(scheduler.requestSidebarSync('acc', 'scheduler_realtime', { scanMode: 'realtime' }), true);
+  assert.equal(wsMessages[1]?.data?.reason, 'realtime_preempt_requests');
   scheduler.markSidebarResult('acc');
   scheduler.unregisterAccount('acc');
 });
@@ -149,6 +173,7 @@ test('opening the waiting tab queues a request scan behind the active inbox scan
   const ws = { readyState: 1, send: (payload) => wsMessages.push(JSON.parse(payload)) };
   const scheduler = new InboxSyncScheduler({ sidebarCooldownMs: 1 });
   scheduler.configure({ getConnection: () => ws, dispatchThreadMessagesSync: () => false });
+  enableTestSyncWindow(scheduler);
   assert.equal(scheduler.requestSidebarSync('acc', 'scheduler_realtime', { scanMode: 'realtime' }), true);
   assert.equal(scheduler.requestMessageRequestsSync('acc'), false);
   scheduler.markSidebarResult('acc');
