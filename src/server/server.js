@@ -1595,6 +1595,29 @@ wss.on('connection', (ws, req) => {
           const isOutgoing = finalIsOutgoing;
           const isConfirmedIncoming = directionStatus === 'confirmed' && !isOutgoing;
 
+          // The history DOM observer can replay the operator's just-sent text
+          // as CONTACT through NEW_MESSAGE_RECEIVED. That path writes directly
+          // below and therefore bypasses THREAD_MESSAGES_SYNCED's batch guard.
+          // Bubble-suffixed ids are synthetic history identities; suppress only
+          // a recent exact outgoing match so legitimate old customer replies
+          // with the same wording remain untouched.
+          const incomingHistoryBubble = !isOutgoing
+            && String(m.media_type || 'text').toLowerCase() === 'text'
+            && /(?:__bubble_\\d+|^dom_|^history_)/i.test(String(m.fb_message_id || ''));
+          if (incomingHistoryBubble && ConversationRepository.hasRecentMatchingOutgoing(
+            canonicalThreadId || m.thread_id,
+            m.content,
+            db,
+            { windowMs: 5 * 60 * 1000, futureToleranceMs: 60 * 1000 }
+          )) {
+            console.log('[WS] Backend Guard: skip recent history bubble echo', {
+              thread_id: canonicalThreadId || m.thread_id,
+              fb_message_id: m.fb_message_id || null,
+              content: sanitizeLog(m.content, 60)
+            });
+            break;
+          }
+
           // A network/DOM observation with a conflicting incoming direction is
           // not authoritative for an operator send. The stored CRM outbound
           // row is authoritative, so discard the echo before it can become a
