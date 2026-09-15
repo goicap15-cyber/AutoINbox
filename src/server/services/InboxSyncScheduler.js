@@ -268,7 +268,8 @@ class InboxSyncScheduler {
     const extWs = this.getConnection(accId);
     if (!extWs || extWs.readyState !== 1) {
       console.warn(`[INBOX_SYNC_SKIP] account=${accId} reason=${reason} skip=extension_not_ready`);
-      this.scheduleSidebarReplay(accId, `${reason}_extension_replay`, 750);
+      const replayReason = String(reason || '').includes('_extension_replay') ? reason : `${reason}_extension_replay`;
+      this.scheduleSidebarReplay(accId, replayReason, 750);
       return false;
     }
 
@@ -470,9 +471,18 @@ class InboxSyncScheduler {
       // A user can select a blank thread while Chrome/the extension is still
       // reconnecting. Retain that explicit request instead of silently losing
       // it; replay is cancelled naturally if the operator selects another chat.
-      this.pendingThreadSyncs.set(job.key, { ...job, reason: `${job.reason}_extension_replay` });
-      const retryTimer = setTimeout(() => this.replayPendingThread(job.key), 750);
-      if (typeof retryTimer.unref === 'function') retryTimer.unref();
+      const retryCount = (job.retry_count || 0) + 1;
+      if (retryCount <= 5) {
+        const cleanReason = String(job.reason || '').includes('_extension_replay')
+          ? job.reason
+          : `${job.reason}_extension_replay`;
+        this.pendingThreadSyncs.set(job.key, { ...job, retry_count: retryCount, reason: cleanReason });
+        const retryTimer = setTimeout(() => this.replayPendingThread(job.key), 1000);
+        if (typeof retryTimer.unref === 'function') retryTimer.unref();
+      } else {
+        this.pendingThreadSyncs.delete(job.key);
+        console.warn(`[INBOX_SYNC_MESSAGES_ABORT] account=${accId} thread=${job.thread_id} reason=${job.reason} max_retries_exceeded`);
+      }
       setTimeout(() => this.drainThreadQueue(accId), 250);
       return;
     }

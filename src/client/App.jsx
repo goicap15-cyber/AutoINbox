@@ -190,6 +190,13 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
   });
   return result;
 };
+const isSyntheticId = (messageOrId) => {
+  const id = typeof messageOrId === 'string'
+    ? messageOrId
+    : String(messageOrId?.fb_message_id || messageOrId?.id || '');
+  return !id || /^(?:dom_|history_|sidebar_preview_|pending_|network_|websocket_|mercury_|xhr_)/i.test(id) || !id.startsWith('mid.');
+};
+
 // A CRM text send can briefly arrive twice: once as the local/client row and
 // once as Messenger's DOM row carrying only an fb_message_id. Merge only that
 // asymmetric pair. Two real sends both have their own client_message_id, so
