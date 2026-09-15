@@ -1490,7 +1490,8 @@ export default function App() {
 
     setMessages((prev) => ({
       ...prev,
-      [threadIdStr]: [...(prev[threadIdStr] || []), newMsg]
+      // Reconcile after optimistic append: history can insert an incoming echo just before CRM adds its outgoing bubble.
+      [threadIdStr]: reconcileOutgoingTextEchoes([...(prev[threadIdStr] || []), newMsg])
     }));
 
     // Socket.IO buffers outbound events during a short reconnect. The
