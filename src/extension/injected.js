@@ -338,6 +338,13 @@
   function resolveVideoForMessageNode(msgNode) {
     if (!msgNode) return { videoUrl: null, posterUrl: null };
     const videoEl = msgNode.querySelector('video') || msgNode;
+    const directSrc = (videoEl.currentSrc && /^https?:\/\//i.test(videoEl.currentSrc))
+      ? videoEl.currentSrc
+      : ((videoEl.src && /^https?:\/\//i.test(videoEl.src)) ? videoEl.src : (videoEl.getAttribute && videoEl.getAttribute('src') && /^https?:\/\//i.test(videoEl.getAttribute('src')) ? videoEl.getAttribute('src') : null));
+    if (directSrc) {
+      return { videoUrl: directSrc, posterUrl: videoEl.poster || videoEl.getAttribute?.('poster') || null };
+    }
+
     let res = extractVideoCdnFromReactNode(videoEl);
     if (!res.videoUrl && videoEl !== msgNode) {
       const msgRes = extractVideoCdnFromReactNode(msgNode);
@@ -367,9 +374,19 @@
         const msgNode = v.closest('[data-message-id]') || v.closest('[data-id]') || v;
         const mid = msgNode?.getAttribute?.('data-message-id') || msgNode?.getAttribute?.('data-id');
         let res = null;
-        if (mid && pageVideoCache.has(mid)) {
+
+        // Ưu tiên 1: Lấy trực tiếp src / currentSrc của thẻ video nếu là link https://
+        const directSrc = (v.currentSrc && /^https?:\/\//i.test(v.currentSrc))
+          ? v.currentSrc
+          : ((v.src && /^https?:\/\//i.test(v.src)) ? v.src : (v.getAttribute('src') && /^https?:\/\//i.test(v.getAttribute('src')) ? v.getAttribute('src') : null));
+        if (directSrc) {
+          res = { videoUrl: directSrc, posterUrl: v.poster || v.getAttribute('poster') || null };
+          if (mid) pageVideoCache.set(mid, res);
+        }
+
+        if (!res?.videoUrl && mid && pageVideoCache.has(mid)) {
           res = pageVideoCache.get(mid);
-        } else {
+        } else if (!res?.videoUrl) {
           res = resolveVideoForMessageNode(msgNode);
           if (res.videoUrl && mid) {
             pageVideoCache.set(mid, res);

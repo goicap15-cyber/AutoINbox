@@ -900,9 +900,18 @@ if (isBusiness) {
             if (messageListContainer) {
                 const mountedMsgEls = messageListContainer.querySelectorAll('[data-message-id]');
                 const mountedLikes = messageListContainer.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i]');
+                const mountedVideos = messageListContainer.querySelectorAll('video');
+                let videoSrcSignature = '';
+                for (let vi = 0; vi < mountedVideos.length; vi++) {
+                    const vel = mountedVideos[vi];
+                    const vSrc = vel.currentSrc || vel.src || vel.getAttribute('src') || vel.getAttribute('data-crm-video-url') || '';
+                    if (vSrc) {
+                        videoSrcSignature += `_v${vi}:${vSrc.substring(0, 40)}`;
+                    }
+                }
                 const firstMid = mountedMsgEls.length > 0 ? (mountedMsgEls[0].getAttribute('data-message-id') || '') : '';
                 const lastMid = mountedMsgEls.length > 0 ? (mountedMsgEls[mountedMsgEls.length - 1].getAttribute('data-message-id') || '') : '';
-                currentMountedSignature = `${currentThreadId}_${mountedMsgEls.length}_${mountedLikes.length}_${firstMid}_${lastMid}`;
+                currentMountedSignature = `${currentThreadId}_${mountedMsgEls.length}_${mountedLikes.length}_${firstMid}_${lastMid}${videoSrcSignature}`;
             }
 
             // Kích hoạt Baselining theo State Machine khi thread mới mở và DOM đã mount tin nhắn
@@ -1623,6 +1632,18 @@ if (isBusiness) {
             }
         }
     });
+
+    // Khi một thẻ video nạp xong link src/metadata từ mạng, reset signature để kích hoạt đồng bộ tức thì
+    document.addEventListener('loadeddata', (e) => {
+        if (e.target && e.target.tagName === 'VIDEO') {
+            lastSyncedMountedSignature = '';
+        }
+    }, true);
+    document.addEventListener('loadedmetadata', (e) => {
+        if (e.target && e.target.tagName === 'VIDEO') {
+            lastSyncedMountedSignature = '';
+        }
+    }, true);
 
     // Message listener for ACK and on-demand batch synchronization requests from background
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

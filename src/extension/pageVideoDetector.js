@@ -174,6 +174,7 @@
 
       const sourceCandidates = [
         video.currentSrc,
+        video.src,
         video.getAttribute('src'),
         ...Array.from(video.querySelectorAll('source[src]')).map((s) => s.getAttribute('src'))
       ].filter(Boolean);
