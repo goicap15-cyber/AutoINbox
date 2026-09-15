@@ -403,6 +403,16 @@ class ConversationRepository {
         const content = msg.content ?? msg.text ?? msg.cleaned ?? null;
         const mediaType = msg.media_type || (msg.media_url ? 'image' : 'text');
         const mediaUrl = msg.media_url || null;
+        // History crawlers can label an operator bubble as CONTACT/current_user.
+        // The existing outgoing row is authoritative; reject that incoming
+        // history observation before it reaches INSERT/UPSERT.
+        const historySource = String(msg.source || msg.timestamp_source || '').toLowerCase();
+        const isHistoryObservation = historySource.includes('history') || historySource.includes('dom_');
+        if (!isOutgoing && isHistoryObservation && mediaType === 'text'
+          && ConversationRepository.hasMatchingOutgoingText(threadId, content, database)) {
+          result.skippedCount += 1;
+          continue;
+        }
         const observedCreatedAt = msg.created_at || (observedTimestampMs > 0 ? new Date(observedTimestampMs).toISOString() : new Date().toISOString());
         let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
         let promotedSidebarPreview = false;
