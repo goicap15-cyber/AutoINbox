@@ -42,7 +42,7 @@
       seen.add(threadId);
       const row = link.closest('[role="row"], [role="listitem"], li') || link.parentElement || link;
       const text = normalize(row.textContent).slice(0, 320);
-      const unread = Boolean(row.querySelector('[data-testid="unread-count"], .unread, [aria-label*="unread" i], [aria-label*="Chưa đọc" i]'));
+      const unread = Boolean(row.querySelector('[data-testid="unread-count"], .unread, [aria-label*="unread" i], [aria-label*="Ch?a ??c" i]'));
       rows.push(`${threadId}|${unread ? 1 : 0}|${text}`);
       // Preserve the exact row while it is still mounted. Messenger can
       // virtualize it away between this mutation and background.executeScript.

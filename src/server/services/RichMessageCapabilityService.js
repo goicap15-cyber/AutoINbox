@@ -70,7 +70,7 @@ class RichMessageCapabilityService {
     let disabledReason = null;
     if (!featureReady) disabledReason = 'Tính năng gửi rich-message đang tắt.';
     else if (!sourceReady) disabledReason = 'Nguồn gửi chưa ở trạng thái hoạt động.';
-    else if (!connected) disabledReason = 'Extension của nguồn gửi chưa kết nối.';
+    else if (!connected) disabledReason = 'Extension c?a ngu?n g?i ch?a k?t n?i.';
 
     return {
       thread_id: route.thread_id,
@@ -82,7 +82,7 @@ class RichMessageCapabilityService {
       contract_version: 2,
       adapter_version: 'rich-message-v1',
       text: { enabled: textEnabled },
-      emoji: { enabled: textEnabled, quick_like: '👍' },
+      emoji: { enabled: textEnabled, quick_like: '??' },
       image: {
         enabled: imageEnabled,
         mime_types: imageEnabled ? [...IMAGE_MIME_TYPES] : [],

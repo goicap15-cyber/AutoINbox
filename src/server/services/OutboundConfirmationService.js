@@ -50,6 +50,15 @@ class OutboundConfirmationService {
       const expectedText = String(row.content || '').trim();
       const observedText = String(content || '').trim();
       if (expectedText && observedText && expectedText !== observedText) return false;
+      // A Facebook message id belongs to exactly one send. If it already
+      // confirmed a different attempt, this observation is a stale DOM or
+      // history echo of an older bubble in the same thread (live evidence:
+      // one mid.$..._media id "confirmed" two video sends 49 minutes apart),
+      // not proof for this candidate.
+      const recycled = database.prepare(
+        'SELECT id FROM outbound_attempts WHERE confirmation_message_id = ? AND id <> ?'
+      ).get(fbMessageId, row.id);
+      if (recycled) return false;
       return true;
     });
 

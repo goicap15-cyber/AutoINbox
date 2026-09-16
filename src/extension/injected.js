@@ -5,7 +5,7 @@
   // A newly-added account may need Facebook's encrypted-history PIN flow.
   // Keep that setup tab pristine: wrapping Fetch/XHR/WebSocket during Secure
   // Storage initialization can leave Facebook's dialog stuck on skeletons.
-  // sessionStorage lasts only for this tab; the later normal "Kết nối
+  // sessionStorage lasts only for this tab; the later normal "K?t n?i
   // Facebook" launch receives the full interceptor as usual.
   try {
     const pendingFromUrl = new URL(window.location.href).searchParams.has('crm_pending_key');
@@ -20,7 +20,7 @@
 
   window.__AUTOCHATBOT_INJECTED__ = true;
 
-  console.log('[FB Interceptor] 🚀 MAIN World Interceptor initialized at document_start');
+  console.log('[FB Interceptor] ?? MAIN World Interceptor initialized at document_start');
 
   function getCurrentUserId() {
     return document.cookie.match(/c_user=(\d+)/)?.[1] || null;

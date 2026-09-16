@@ -10,7 +10,7 @@ function normalizeInput(input) {
   const color = typeof input?.color === 'string' ? input.color.trim() : '';
 
   if (!name) {
-    throw new LeadStatusValidationError('Thiếu name hợp lệ');
+    throw new LeadStatusValidationError('Thi?u name h?p l?');
   }
   if (!/^#[0-9A-Fa-f]{6}$/.test(color)) {
     throw new LeadStatusValidationError(

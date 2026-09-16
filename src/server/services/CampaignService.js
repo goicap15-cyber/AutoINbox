@@ -122,7 +122,7 @@ class CampaignService {
       phone_capture_thank_you_text = null,
       phone_capture_status_id = null
     } = payload;
-    const cleanName = normalizedText(name) || 'Chiến dịch ' + new Date().toLocaleString('vi-VN');
+    const cleanName = normalizedText(name) || 'Chi?n d?ch ' + new Date().toLocaleString('vi-VN');
     const ids = [...new Set((thread_ids || []).map((threadId) => String(threadId)).filter(Boolean))];
     if (!ids.length) {
       throw new CampaignError(CAMPAIGN_ERROR_CODES.INVALID_RECIPIENT, 'Cần chọn ít nhất một hội thoại.');
@@ -130,7 +130,7 @@ class CampaignService {
     if (ids.length > config.maxRecipients) {
       throw new CampaignError(
         CAMPAIGN_ERROR_CODES.SEND_LIMIT_REACHED,
-        'Số người nhận vượt giới hạn campaign.',
+        'S? ng??i nh?n v??t gi?i h?n campaign.',
         { selected: ids.length, maximum: config.maxRecipients }
       );
     }
@@ -315,7 +315,7 @@ class CampaignService {
     if (!validMessageCount || campaign.messages.some((item) => item.validation_status !== 'valid')) {
       throw new CampaignError(
         CAMPAIGN_ERROR_CODES.MESSAGE_INVALID,
-        'Nội dung campaign chưa hợp lệ.',
+        'N?i dung campaign ch?a h?p l?.',
         { invalid_messages: campaign.messages.filter((item) => item.validation_status !== 'valid').length }
       );
     }
@@ -356,7 +356,7 @@ class CampaignService {
     if (ordered.length > Number(campaign.send_cap)) {
       throw new CampaignError(
         CAMPAIGN_ERROR_CODES.SEND_LIMIT_REACHED,
-        'Số lượt gửi dự kiến vượt send cap của campaign.',
+        'S? l??t g?i d? ki?n v??t send cap c?a campaign.',
         { planned: ordered.length, send_cap: campaign.send_cap }
       );
     }
@@ -412,7 +412,7 @@ class CampaignService {
     const campaign = this.assertTransition(campaignId, 'start', database);
     const config = { ...this.getConfig(), ...options };
     if (campaign.messages.some((message) => message.validation_status !== 'valid')) {
-      throw new CampaignError(CAMPAIGN_ERROR_CODES.NOT_READY, 'Campaign cần preview hợp lệ trước khi chạy.');
+      throw new CampaignError(CAMPAIGN_ERROR_CODES.NOT_READY, 'Campaign c?n preview h?p l? tr??c khi ch?y.');
     }
     const planned = campaign.recipients.filter(
       (recipient) => recipient.execution_order != null && recipient.status === 'pending'
@@ -427,7 +427,7 @@ class CampaignService {
       }
     }
     if (!planned.length || planned.length > campaign.send_cap) {
-      throw new CampaignError(CAMPAIGN_ERROR_CODES.SEND_LIMIT_REACHED, 'Execution order vượt giới hạn gửi.');
+      throw new CampaignError(CAMPAIGN_ERROR_CODES.SEND_LIMIT_REACHED, 'Execution order v??t gi?i h?n g?i.');
     }
     if (!config.testMode && campaign.pacing_ms < config.minimumPacingMs) {
       throw new CampaignError(
@@ -437,7 +437,7 @@ class CampaignService {
       );
     }
     if (this.isWithinQuietHours(campaign, options.now || new Date())) {
-      throw new CampaignError(CAMPAIGN_ERROR_CODES.QUIET_HOURS_ACTIVE, 'Campaign đang trong quiet hours.');
+      throw new CampaignError(CAMPAIGN_ERROR_CODES.QUIET_HOURS_ACTIVE, 'Campaign ?ang trong quiet hours.');
     }
     const accounts = [...new Set(planned.map((recipient) => recipient.account_id))];
     const messageCount = Math.max(1, campaign.messages?.length || 1);

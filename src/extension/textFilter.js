@@ -29,7 +29,7 @@
     /^Chỉ những người tham gia/i,
     /^Bản quyền Meta/i,
     /^Thêm tin nhắn được cá nhân h(?:óa|oá)\.?$/i,
-    /^(?:Chưa có tin nhắn|ChÃ†Â°a cÃƒÂ° tin nhÃ¡ÂºÂ¯n|No messages?)$/i,
+    /^(?:Chưa có tin nhắn|ChÃ†°a cÃƒ° tin nháº¯n|No messages?)$/i,
 
     // Right sidebar & header UI elements
     /^(?:Trang cá nhân|View profile)$/i,
@@ -77,7 +77,7 @@
     /^(?:ds){2,}$/i,
     /^\d{9,}$/,
 
-    // Media label placeholders (e.g. [Ảnh], [Video], [File], [Attachment])
+    // Media label placeholders (e.g. [ảnh], [Video], [File], [Attachment])
     /^\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment)\]?$/i,
 
     // Full date/time separator header Business Suite renders between message
@@ -155,7 +155,7 @@
     text = text.replace(/(?:\s+|\n|\r)\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}$/i, '').trim();
 
     if (/^(?:thích|like|biểu tượng thích|biểu tượng cảm xúc thích|gửi biểu tượng thích|thumbs up)$/i.test(text)) {
-      return '👍';
+      return '??';
     }
 
     if (!text) return '';

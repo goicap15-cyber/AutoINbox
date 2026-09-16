@@ -18,7 +18,7 @@ console.log('=== INSPECTING AND REPAIRING CORRUPTED TIMESTAMPS ===');
 
 // Group 3: 28/8/2026 (mid starts with SmeR)
 // Similar to 864, 865 which have 28/8/2026 17:06:00 (1787911560000)
-// Messages: "alooooo", "111111111", "test nha bạn"
+// Messages: "alooooo", "111111111", "test nha b?n"
 
 // Group 4: 31/8/2026 (mid starts with Smh2)
 // Message: "Vhj"

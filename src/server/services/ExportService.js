@@ -42,11 +42,11 @@ class ExportService {
     // Thiết lập Header Row với màu sắc đẹp
     sheet.columns = [
       { header: 'Họ tên khách hàng', key: 'ho_ten', width: 28 },
-      { header: 'Số điện thoại', key: 'so_dien_thoai', width: 18 },
+      { header: 'S? ?i?n tho?i', key: 'so_dien_thoai', width: 18 },
       { header: 'Email', key: 'email', width: 30 },
       { header: 'Ghi chú', key: 'ghi_chu', width: 40 },
       { header: 'Tài khoản FB', key: 'tai_khoan_fb', width: 20 },
-      { header: 'Hoạt động cuối', key: 'hoat_dong_cuoi', width: 22 },
+      { header: 'Ho?t ??ng cu?i', key: 'hoat_dong_cuoi', width: 22 },
       { header: 'Thẻ phân loại', key: 'tags', width: 20 }
     ];
 

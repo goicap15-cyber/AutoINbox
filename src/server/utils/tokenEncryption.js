@@ -11,7 +11,7 @@ const AUTH_TAG_LENGTH = 16;
 function getKey() {
   const secret = process.env.PAGE_TOKEN_SECRET;
   if (!secret) {
-    console.warn('[TOKEN_ENCRYPT] ⚠️ PAGE_TOKEN_SECRET not set. Token encryption will use fallback key.');
+    console.warn('[TOKEN_ENCRYPT] ?? PAGE_TOKEN_SECRET not set. Token encryption will use fallback key.');
     return crypto.createHash('sha256').update('default-insecure-key-change-me').digest();
   }
   return crypto.createHash('sha256').update(secret).digest();

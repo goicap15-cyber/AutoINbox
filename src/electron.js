@@ -115,7 +115,7 @@ async function createWindow() {
   });
 }
 
-// IPC: clear all session cookies then reload → proper logout in Electron
+// IPC: clear all session cookies then reload ? proper logout in Electron
 ipcMain.handle('crm-logout', async () => {
   try {
     const ses = session.defaultSession;

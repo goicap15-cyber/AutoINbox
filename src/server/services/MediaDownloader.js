@@ -46,16 +46,16 @@ class MediaDownloader {
               resolve(`/data/media/${threadId}/${fileName}`);
             });
           } else {
-            console.warn(`[MediaDownloader] Lỗi HTTP status ${response.statusCode} khi tải media`);
+            console.warn(`[MediaDownloader] L?i HTTP status ${response.statusCode} khi t?i media`);
             resolve(null);
           }
         }).on('error', (err) => {
-          console.error('[MediaDownloader] Lỗi kết nối tải media:', err.message);
+          console.error('[MediaDownloader] L?i k?t n?i t?i media:', err.message);
           resolve(null);
         });
       });
     } catch (err) {
-      console.error('[MediaDownloader] Exception khi tải media:', err.message);
+      console.error('[MediaDownloader] Exception khi t?i media:', err.message);
       return null;
     }
   }

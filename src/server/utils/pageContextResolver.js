@@ -31,7 +31,7 @@ function verifyPageOwnership(accountId, pageId, database) {
   const rawPageId = pageIdStr.startsWith('src_page_') ? pageIdStr.replace('src_page_', '') : pageIdStr;
 
   try {
-    // 1. Kiểm tra trực tiếp trong bảng inbox_sources
+    // 1. Ki?m tra tr?c ti?p trong b?ng inbox_sources
     const sourceStmt = database.prepare(`
       SELECT id, owner_account_id, external_id FROM inbox_sources
       WHERE external_id = ? OR id = ?
@@ -64,7 +64,7 @@ function verifyPageOwnership(accountId, pageId, database) {
       }
     }
 
-    // 2. Fallback kiểm tra trực tiếp qua bảng threads
+    // 2. Fallback ki?m tra tr?c ti?p qua b?ng threads
     try {
       const directThreadStmt = database.prepare(`
         SELECT id FROM threads

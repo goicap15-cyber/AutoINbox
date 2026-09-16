@@ -144,7 +144,7 @@ Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $targetP
   execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => {});
 }
 
-// Tự động cấp quyền (Micro, Camera, Popups, Notifications) cho Facebook trong Chrome Profile Preferences
+// T? ??ng c?p quy?n (Micro, Camera, Popups, Notifications) cho Facebook trong Chrome Profile Preferences
 function findBundledChromePidByProfile(profileDir, chromeExecutable) {
   if (process.platform !== 'win32' || !profileDir || !chromeExecutable) return null;
   const normalizedProfile = path.resolve(profileDir).replace(/\\/g, '/').replace(/'/g, "''");
@@ -237,7 +237,7 @@ function ensureProfilePermissions(profileDir) {
     fs.writeFileSync(prefPath, JSON.stringify(prefs, null, 2), 'utf8');
     console.log(`[ProcessManager] Đã tự động cấu hình Tiện ích (Extension) & Quyền cho Facebook trong profile ${profileDir}`);
   } catch (err) {
-    console.error('[ProcessManager] Lỗi tự động ghi quyền Preferences Chrome:', err.message);
+    console.error('[ProcessManager] L?i t? ??ng ghi quy?n Preferences Chrome:', err.message);
   }
 }
 
@@ -414,7 +414,7 @@ class ProcessManager {
       console.log(`[ProcessManager] Chrome Stable [PID ${child.pid}] đã tự cài extension cho account ${accountId}.`);
       return true;
     } catch (err) {
-      console.error(`[ProcessManager] Lỗi khởi chạy Chrome cho ${accountId}:`, err.message);
+      console.error(`[ProcessManager] L?i kh?i ch?y Chrome cho ${accountId}:`, err.message);
       return false;
     }
   }
@@ -626,7 +626,7 @@ class ProcessManager {
       const result = await hideFromTaskbar(currentProc.pid, currentProc.profileDir, 0, false);
       if (result?.success && this.displayOpTokens.get(accId) === opToken) {
         currentProc.displayMode = 'BACKGROUND';
-        console.log(`[ProcessManager] Tự động ẩn Chrome của account ${accId} khỏi Taskbar.`);
+        console.log(`[ProcessManager] T? ??ng ?n Chrome c?a account ${accId} kh?i Taskbar.`);
       }
       return result;
     });
@@ -846,7 +846,7 @@ if ($processedCount -eq 0) {
       console.log(`[ProcessManager] Đã dừng toàn bộ Chrome process tree account ${accId} (PID ${procInfo.pid}).`);
       return true;
     } catch (err) {
-      console.error(`[ProcessManager] Lỗi dừng process tree ${accId}:`, err.message);
+      console.error(`[ProcessManager] L?i d?ng process tree ${accId}:`, err.message);
       return false;
     }
   }

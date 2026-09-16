@@ -32,7 +32,7 @@ class AttachmentError extends Error {
 function toCampaignAttachmentError(error) {
   const messages = {
     ATTACHMENT_EMPTY: 'File rỗng hoặc không đọc được.',
-    ATTACHMENT_TOO_LARGE: 'File vượt giới hạn dung lượng.',
+    ATTACHMENT_TOO_LARGE: 'File v??t gi?i h?n dung l??ng.',
     ATTACHMENT_TYPE_MISMATCH: 'Loại file hoặc chữ ký file không được hỗ trợ.',
     ATTACHMENT_UNSUPPORTED: 'Loại file hoặc chữ ký file không được hỗ trợ.',
     ATTACHMENT_CORRUPT: 'Loại file hoặc chữ ký file không được hỗ trợ.',
@@ -56,7 +56,7 @@ class CampaignAttachmentService {
     if (!Buffer.isBuffer(buffer)) throw new AttachmentError('Multipart body không hợp lệ.');
     const boundaryMatch = String(contentType || '').match(/boundary=(?:"([^"]+)"|([^;]+))/i);
     const boundary = boundaryMatch?.[1] || boundaryMatch?.[2]?.trim();
-    if (!boundary) throw new AttachmentError('Thiếu multipart boundary.');
+    if (!boundary) throw new AttachmentError('Thi?u multipart boundary.');
     const source = buffer.toString('latin1');
     const delimiter = '--' + boundary;
     const fields = {};
@@ -86,7 +86,7 @@ class CampaignAttachmentService {
         fields[name] = Buffer.from(bodyText, 'latin1').toString('utf8');
       }
     }
-    if (!files.length) throw new AttachmentError('Thiếu file upload.');
+    if (!files.length) throw new AttachmentError('Thi?u file upload.');
     return { fields, file: files[0], files };
   }
 
@@ -113,7 +113,7 @@ class CampaignAttachmentService {
     const message = campaign.messages.find((item) => item.id === campaignMessageId);
     if (!message) throw new AttachmentError('Campaign message không hợp lệ.');
     if (!imageEnabled && !fileEnabled) {
-      throw new AttachmentError('Campaign attachment transport đang tắt.');
+      throw new AttachmentError('Campaign attachment transport ?ang t?t.');
     }
 
     let validated;
@@ -180,7 +180,7 @@ class CampaignAttachmentService {
   // grouping to reason about instead of N unrelated attachment rows. A
   // single file needs no manifest - kept identical to spec 039's behavior.
   static saveUploads({ campaignId, campaignMessageId, files = [] }, options = {}) {
-    if (!Array.isArray(files) || files.length === 0) throw new AttachmentError('Thiếu file upload.');
+    if (!Array.isArray(files) || files.length === 0) throw new AttachmentError('Thi?u file upload.');
     const database = options.database || require('../database/db');
     const saved = [];
     const transaction = database.transaction(() => {
@@ -228,7 +228,7 @@ class CampaignAttachmentService {
     }
     const message = campaign.messages.find((item) => item.id === campaignMessageId);
     if (!message) throw new AttachmentError('Campaign message không hợp lệ.');
-    if (!fileEnabled) throw new AttachmentError('Campaign file transport đang tắt.');
+    if (!fileEnabled) throw new AttachmentError('Campaign file transport ?ang t?t.');
 
     let totalBytes = 0;
     const safeEntries = [];

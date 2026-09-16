@@ -23,7 +23,7 @@ class LicenseChecker {
     this.cachedStatus = {
       isLicensed: false,
       reason: 'UNCHECKED',
-      message: 'Đang kiểm tra bản quyền...',
+      message: '?ang ki?m tra b?n quy?n...',
       key: '',
       expiresAt: null,
       daysRemaining: 0
@@ -31,7 +31,7 @@ class LicenseChecker {
     this.checkTimer = null;
   }
 
-  // Đọc Key lưu cục bộ trong data/license.json
+  // ??c Key l?u c?c b? trong data/license.json
   getSavedKey() {
     try {
       if (fs.existsSync(LICENSE_FILE)) {
@@ -69,7 +69,7 @@ class LicenseChecker {
     };
   }
 
-  // Gọi Central License Server kiểm tra bản quyền
+  // G?i Central License Server ki?m tra b?n quy?n
   async verify() {
     const savedKey = this.getSavedKey();
     if (!savedKey) {
@@ -97,7 +97,7 @@ class LicenseChecker {
         this.cachedStatus = {
           isLicensed: true,
           reason: 'VALID',
-          message: 'Bản quyền hợp lệ',
+          message: 'B?n quy?n h?p l?',
           key: savedKey,
           expiresAt: json.expiresAt,
           daysRemaining: json.daysRemaining,
@@ -154,7 +154,7 @@ class LicenseChecker {
         return next();
       }
 
-      // Kiểm tra cachedStatus
+      // Ki?m tra cachedStatus
       if (!this.cachedStatus.isLicensed) {
         // Re-verify nhanh
         await this.verify();

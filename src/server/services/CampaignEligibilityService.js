@@ -26,7 +26,7 @@ class CampaignEligibilityService {
     if (!attachments || attachments.length === 0) return true;
     const invalid = attachments.find((attachment) => attachment.validation_status !== 'valid');
     if (invalid) {
-      const error = new Error(invalid.validation_error || 'Attachment chưa hợp lệ.');
+      const error = new Error(invalid.validation_error || 'Attachment ch?a h?p l?.');
       error.code = 'ATTACHMENT_INVALID';
       throw error;
     }

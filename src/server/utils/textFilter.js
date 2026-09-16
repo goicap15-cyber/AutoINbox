@@ -9,7 +9,7 @@ const SYSTEM_PATTERNS = [
   // E2EE & Security Notices
   /Tin nhắn và cuộc gọi (?:đang )?được bảo mật/i,
   /bảo mật bằng tính năng mã hóa/i,
-  /bảo mật đầu cuối/i,
+  /b?o m?t ??u cu?i/i,
 
   // Footer, Privacy & Links
   /^Tìm hiểu thêm$/i,
@@ -19,20 +19,20 @@ const SYSTEM_PATTERNS = [
   /^Facebook$/i,
   /^Messenger$/i,
   /^Meta$/i,
-  /^Trang chủ$/i,
+  /^Trang ch?$/i,
   /^Khôi phục ngay$/i,
   /^Khôi phục tin nhắn$/i,
   /^Restore now$/i,
   /^Restore messages$/i,
   /^Personal chats are secured with end-to-end encryption/i,
-  /^Thiếu lịch sử chat/i,
-  /^Thiếu tin nhắn\.?$/i,
+  /^Thi?u l?ch s? chat/i,
+  /^Thi?u tin nh?n\.?$/i,
   /^Không khôi phục được tin nhắn\.?$/i,
   /^Bạn đã tạo nhóm này/i,
-  /^Chỉ những người tham gia/i,
-  /^Bản quyền Meta/i,
+  /^Ch? nh?ng ng??i tham gia/i,
+  /^B?n quy?n Meta/i,
   /^Thêm tin nhắn được cá nhân h(?:óa|oá)\.?$/i,
-  /^(?:Chưa có tin nhắn|ChÃ†Â°a cÃƒÂ° tin nhÃ¡ÂºÂ¯n|No messages?)$/i,
+  /^(?:Chưa có tin nhắn|ChÃ†°a cÃƒ° tin nháº¯n|No messages?)$/i,
 
   // Right sidebar & header UI elements
   /^(?:Trang cá nhân|View profile)$/i,
@@ -42,15 +42,15 @@ const SYSTEM_PATTERNS = [
   /^(?:Tùy chỉnh đoạn chat|Customize chat)$/i,
   /^(?:File phương tiện,? file và liên kết|Media,? files and links)$/i,
   /^(?:Quyền riêng tư và hỗ trợ|Privacy and support|Privacy & support)$/i,
-  /^(?:Chủ đề|Theme)$/i,
+  /^(?:Ch? ??|Theme)$/i,
   /^(?:Biểu tượng cảm xúc|Emoji)$/i,
-  /^(?:Biệt danh|Nicknames)$/i,
+  /^(?:Bi?t danh|Nicknames)$/i,
   /^(?:Tạo nhóm|Create group)$/i,
   /^(?:Thành viên|Members)$/i,
   /^(?:Tên người dùng|Username)$/i,
-  /^(?:Gỡ|Remove|Unsend)$/i,
-  /^(?:Trả lời|Reply)$/i,
-  /^(?:Chuyển tiếp|Forward)$/i,
+  /^(?:G?|Remove|Unsend)$/i,
+  /^(?:Tr? l?i|Reply)$/i,
+  /^(?:Chuy?n ti?p|Forward)$/i,
   /^(?:Ghim|Pin)$/i,
   /^(?:Sao chép|Copy)$/i,
 
@@ -77,7 +77,7 @@ const SYSTEM_PATTERNS = [
   /^(?:ds){2,}$/i,
   /^\d{9,}$/,
 
-  // Media label placeholders (e.g. [Ảnh], [Video], [File], [Attachment])
+  // Media label placeholders (e.g. [ảnh], [Video], [File], [Attachment])
   /^\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment)\]?$/i,
 
   // Full date/time separator header Business Suite renders between message
@@ -98,13 +98,13 @@ const SYSTEM_PATTERNS = [
   /^(?:Meta Business Suite|Liên kết|Chỉnh sửa|Trợ giúp|Tùy chọn khác|Cài đặt|Settings|Help|Edit)$/i,
   /^(?:Thông báo|Notifications)$/i,
   /^(?:Trình quản lý quảng cáo|Ads Manager)$/i,
-  /^(?:Hộp thư|Hộp thư đến|Inbox)$/i,
-  /^(?:Nội dung|Content)$/i,
+  /^(?:H?p th?|H?p th? ??n|Inbox)$/i,
+  /^(?:N?i dung|Content)$/i,
   /^(?:Nền tảng kết nối người sáng tạo(?: nội dung)?|Creator (?:Studio|platform))$/i,
   /^(?:Công cụ lập kế hoạch|Planner)$/i,
   /^(?:Quảng cáo|Ads)$/i,
   /^(?:Thông tin chi tiết|Insights)$/i,
-  /^(?:Kiếm tiền|Monetization)$/i,
+  /^(?:Ki?m ti?n|Monetization)$/i,
   /^(?:Tất cả(?: các)? công cụ|All tools)$/i
 ];
 
@@ -135,8 +135,8 @@ function cleanMessageText(rawText) {
 
   // 1. Strip accessibility prefix (handling 'Tin nhắn do X gửi lúc Thứ Năm 18:00ch:', 'Tin nhắn do X gửi lúc 18:00:', etc.)
   text = text.replace(/^(?:Nhập,\s*)?Tin nhắn do [\s\S]+? gửi lúc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:ch)?:|\b\d{1,2}:\d{2}(?:ch)?\s+)\s*/i, '').trim();
-  text = text.replace(/^(?:Nhập,\s*)?Message sent by [\s\S]+? at [^\n]*?(?::|\b\d{1,2}:\d{2}(?:[ap]m)?:|\b\d{1,2}:\d{2}(?:[ap]m)?\s+)\s*/i, '').trim();
-  text = text.replace(/^Nhập,\s*/i, '').trim();
+  text = text.replace(/^(?:Nh?p,\s*)?Message sent by [\s\S]+? at [^\n]*?(?::|\b\d{1,2}:\d{2}(?:[ap]m)?:|\b\d{1,2}:\d{2}(?:[ap]m)?\s+)\s*/i, '').trim();
+  text = text.replace(/^Nh?p,\s*/i, '').trim();
   text = text.replace(/^[:\s]+/, '').trim();
 
   const sentEmojiMatch = text.match(/^[^,\n]{1,80}\s+(?:đã gửi|sent),\s*(.+)$/i);
@@ -180,21 +180,21 @@ function isSidebarActivitySummary(text) {
   if (!value) return false;
   return /^(?:Bạn đã gửi|You (?:sent|shared))\s+(?:(?:một|1|an?|one)\s+)?(?:ảnh|photo|image|video|tệp|file|sticker|GIF)\.?$/iu.test(value)
     || /^.{1,80}\s+đã gửi\s+(?:một|1)\s+(?:ảnh|video|tệp|file|sticker|GIF)\.?$/iu.test(value)
-    || /^(?:Cuộc gọi nhỡ|Missed call)\.?$/iu.test(value);
+    || /^(?:Cu?c g?i nh?|Missed call)\.?$/iu.test(value);
 }
 
 const INVALID_CONTACT_NAME_PATTERNS = [
-  /^(?:Tất cả tin nhắn|Tất cả|All messages|All)$/i,
-  /(?:Tất cả tin nhắn\s*){2,}/i,
+  /^(?:T?t c? tin nh?n|T?t c?|All messages|All)$/i,
+  /(?:T?t c? tin nh?n\s*){2,}/i,
   /(?:All messages\s*){2,}/i,
-  /(?:Hộp thư đến\s*){2,}/i,
-  /(?:Hộp thư\s*){2,}/i,
+  /(?:H?p th? ??n\s*){2,}/i,
+  /(?:H?p th?\s*){2,}/i,
   /(?:Inbox\s*){2,}/i,
   /Meta Business Suite/i,
-  /^(?:Tin nhắn trực tiếp|Direct messages)$/i,
-  /^(?:Tin nhắn|Messages)$/i,
-  /^(?:Hộp thư đến|Hộp thư|Inbox)$/i,
-  /^(?:Chưa đọc|Unread)$/i,
+  /^(?:Tin nh?n tr?c ti?p|Direct messages)$/i,
+  /^(?:Tin nh?n|Messages)$/i,
+  /^(?:H?p th? ??n|H?p th?|Inbox)$/i,
+  /^(?:Ch?a ??c|Unread)$/i,
   /^(?:Đã xong|Done)$/i,
   /^(?:Gắn dấu sao|Đã gắn dấu sao|Starred)$/i,
   /^(?:Spam|Thư rác)$/i,

@@ -9,8 +9,8 @@
     const value = normalize(label);
     if (!value) return null;
 
-    if (/Tin nhắn do (?:Bạn|You) gửi|Message sent by you|You sent/i.test(value)) return true;
-    if (/Tin nhắn do .+? gửi|Message sent by .+?(?: at|$)/i.test(value)) return false;
+    if (/Tin nh?n do (?:B?n|You) g?i|Message sent by you|You sent/i.test(value)) return true;
+    if (/Tin nh?n do .+? g?i|Message sent by .+?(?: at|$)/i.test(value)) return false;
 
     const timedSender = value.match(/^Lúc\s+.+?,\s*(.+?):/i);
     if (timedSender) return /^(?:Bạn|You)$/i.test(normalize(timedSender[1]));

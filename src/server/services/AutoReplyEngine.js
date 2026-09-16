@@ -8,7 +8,7 @@ const db = require('../database/db');
 class AutoReplyEngine {
   /**
    * Kiểm tra và gửi auto-reply nếu nội dung tin nhắn khớp từ khóa.
-   * @param {object} msg - Tin nhắn vừa nhận được
+   * @param {object} msg - Tin nh?n v?a nh?n ???c
    * @param {function} sendFn - Hàm gửi tin nhắn: sendFn(thread_id, text)
    * @returns {boolean} true nếu đã tự động trả lời
    */
@@ -22,7 +22,7 @@ class AutoReplyEngine {
 
     const now = new Date();
     if (thread.ai_paused_until && new Date(thread.ai_paused_until) > now) {
-      console.log(`[AutoReply] Thread ${msg.thread_id} - AI tạm dừng đến ${thread.ai_paused_until}`);
+      console.log(`[AutoReply] Thread ${msg.thread_id} - AI t?m d?ng ??n ${thread.ai_paused_until}`);
       return false;
     }
 
@@ -39,12 +39,12 @@ class AutoReplyEngine {
       if (lowerContent.includes(keyword)) {
         // Cá nhân hóa template
         const response = this._interpolate(rule.response_template, {
-          ten_khach_hang: thread.contact_name || 'bạn',
+          ten_khach_hang: thread.contact_name || 'b?n',
           account_name: thread.account_id,
           keyword: rule.trigger_keyword
         });
 
-        console.log(`[AutoReply] Matched keyword "${rule.trigger_keyword}" → gửi tự động cho thread ${msg.thread_id}`);
+        console.log(`[AutoReply] Matched keyword "${rule.trigger_keyword}" ? g?i t? ??ng cho thread ${msg.thread_id}`);
         await sendFn(msg.thread_id, response);
         return true;
       }
@@ -62,7 +62,7 @@ class AutoReplyEngine {
 
   // ── CRUD Quản lý quy tắc Auto Reply ──
 
-  /** Tạo quy tắc mới */
+  /** T?o quy t?c m?i */
   createRule({ account_id, trigger_keyword, response_template, created_by_staff_id = null }) {
     const info = db.prepare(`
       INSERT INTO auto_replies (account_id, trigger_keyword, response_template, created_by_staff_id)

@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS removed_accounts (
     removed_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- 2b. Bảng Nguồn inbox hợp nhất: personal Messenger account hoặc Facebook Page
+-- 2b. B?ng Ngu?n inbox h?p nh?t: personal Messenger account ho?c Facebook Page
 CREATE TABLE IF NOT EXISTS inbox_sources (
     id TEXT PRIMARY KEY,
     source_type TEXT NOT NULL CHECK(source_type IN ('personal_messenger', 'page_messenger')),
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS inbox_sources (
     UNIQUE(source_type, external_id)
 );
 
--- 3. Bảng Hội thoại (Threads)
+-- 3. B?ng H?i tho?i (Threads)
 CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY,
     external_thread_id TEXT,
@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS conversation_reminders (
 );
 CREATE INDEX IF NOT EXISTS idx_conversation_reminders_due ON conversation_reminders(status, due_at);
 
--- 4. Bảng Tin nhắn (Messages)
+-- 4. B?ng Tin nh?n (Messages)
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     thread_id TEXT NOT NULL,
@@ -196,7 +196,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
 );
 
--- 6b. Bảng bằng chứng số điện thoại bắt được từ tin nhắn (spec 035)
+-- 6b. B?ng b?ng ch?ng s? ?i?n tho?i b?t ???c t? tin nh?n (spec 035)
 CREATE TABLE IF NOT EXISTS contact_phone_captures (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     thread_id TEXT NOT NULL,
@@ -234,7 +234,7 @@ CREATE TABLE IF NOT EXISTS ai_configs (
     FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 
--- INDICES TỐI ƯU
+-- INDICES T?I ?U
 CREATE INDEX IF NOT EXISTS idx_threads_account ON threads(account_id);
 CREATE INDEX IF NOT EXISTS idx_threads_assigned ON threads(assigned_user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);

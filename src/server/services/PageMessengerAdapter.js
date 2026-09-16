@@ -239,7 +239,7 @@ class PageMessengerAdapter {
 
       console.log(`[PAGE_SEND_RESULT] Queued successfully: queueId=${queueId}`);
       // Trả về success giả lập để CRM không báo lỗi, 
-      // queue worker sẽ dispatch thực tế.
+      // queue worker s? dispatch th?c t?.
       return { success: true, messageId: queueId, recipientId: recipientPsid };
       
       /* --- FALLBACK: OLD WEBHOOK FETCH LOGIC ---

@@ -21,15 +21,15 @@ function sleep(ms) {
 
 class BroadcastEngine {
   constructor() {
-    this._runningCampaigns = new Map(); // campaignId → { cancelled: bool }
+    this._runningCampaigns = new Map(); // campaignId ? { cancelled: bool }
   }
 
   /**
-   * Bắt đầu chiến dịch broadcast.
+   * B?t ??u chi?n d?ch broadcast.
    * @param {object} opts
    * @param {string} opts.account_id - ID tài khoản FB
    * @param {string[]} opts.thread_ids - Danh sách Thread IDs nhận tin
-   * @param {string} opts.message - Nội dung tin nhắn (hỗ trợ {ten_khach_hang})
+   * @param {string} opts.message - N?i dung tin nh?n (h? tr? {ten_khach_hang})
    * @param {function} opts.sendFn - Hàm gửi: async sendFn(thread_id, text) → void
    * @param {function} opts.onProgress - Callback: onProgress({ sent, total, thread_id, status })
    * @returns {string} campaignId
@@ -66,14 +66,14 @@ class BroadcastEngine {
         const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get(thread_id);
         const personalizedMsg = message.replace(
           /\{ten_khach_hang\}/g,
-          thread?.contact_name || 'bạn'
+          thread?.contact_name || 'b?n'
         );
 
         try {
           await sendFn(thread_id, personalizedMsg);
           sent++;
 
-          // Tăng daily count
+          // T?ng daily count
           db.prepare(`
             UPDATE accounts SET broadcast_daily_count = broadcast_daily_count + 1 WHERE id = ?
           `).run(account_id);
@@ -81,14 +81,14 @@ class BroadcastEngine {
           onProgress?.({ sent, total, thread_id, status: 'SENT', campaignId });
           console.log(`[Broadcast] [${sent}/${total}] Đã gửi đến ${thread_id}`);
         } catch (err) {
-          console.error(`[Broadcast] Lỗi gửi ${thread_id}:`, err.message);
+          console.error(`[Broadcast] L?i g?i ${thread_id}:`, err.message);
           onProgress?.({ sent, total, thread_id, status: 'ERROR', error: err.message, campaignId });
         }
 
         // Random delay trước khi gửi tiếp (trừ tin cuối cùng)
         if (sent < total && !state.cancelled) {
           const delay = randomDelay(MIN_DELAY_MS, MAX_DELAY_MS);
-          console.log(`[Broadcast] Chờ ${(delay / 1000).toFixed(1)}s trước khi gửi tiếp...`);
+          console.log(`[Broadcast] Ch? ${(delay / 1000).toFixed(1)}s tr??c khi g?i ti?p...`);
           await sleep(delay);
         }
       }
@@ -101,12 +101,12 @@ class BroadcastEngine {
     return campaignId;
   }
 
-  /** Huỷ chiến dịch đang chạy */
+  /** Hu? chi?n d?ch ?ang ch?y */
   cancelCampaign(campaignId) {
     const state = this._runningCampaigns.get(campaignId);
     if (state) {
       state.cancelled = true;
-      return { success: true, message: `Đang huỷ chiến dịch ${campaignId}...` };
+      return { success: true, message: `?ang hu? chi?n d?ch ${campaignId}...` };
     }
     return { success: false, error: 'Không tìm thấy chiến dịch' };
   }

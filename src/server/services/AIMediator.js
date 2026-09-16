@@ -1,7 +1,7 @@
 /**
  * AIMediator.js
- * Bộ điều phối Dual-AI Engine:
- * - Chọn provider: LOCAL_OLLAMA | CLOUD_OPENAI | CLOUD_GEMINI
+ * B? ?i?u ph?i Dual-AI Engine:
+ * - Ch?n provider: LOCAL_OLLAMA | CLOUD_OPENAI | CLOUD_GEMINI
  * - Quản lý lịch sử hội thoại ngữ cảnh (context window)
  * - Thuật toán AI Auto-Pause 30 phút khi nhân viên gõ tay
  */
@@ -10,17 +10,17 @@ const ollama = require('../connectors/ollamaConnector');
 const { openAIChat, geminiChat } = require('../connectors/cloudAiConnector');
 
 const AI_PAUSE_DURATION_MS = 30 * 60 * 1000; // 30 phút
-const MAX_HISTORY_TURNS = 10; // Giữ tối đa 10 lượt chat trong context
+const MAX_HISTORY_TURNS = 10; // Gi? t?i ?a 10 l??t chat trong context
 
 class AIMediator {
   /**
    * Xử lý tin nhắn mới đến từ khách hàng.
    * - Kiểm tra AI có bị pause không
-   * - Lấy config AI từ CSDL
+   * - L?y config AI t? CSDL
    * - Gọi đúng provider và trả về câu trả lời
    *
    * @param {object} msg - Tin nhắn khách hàng
-   * @param {function} sendFn - async sendFn(thread_id, text) → void
+   * @param {function} sendFn - async sendFn(thread_id, text) ? void
    * @returns {Promise<boolean>} true nếu AI đã trả lời
    */
   async processIncoming(msg, sendFn) {
@@ -30,9 +30,9 @@ class AIMediator {
     const thread = db.prepare('SELECT * FROM threads WHERE id = ?').get(msg.thread_id);
     if (!thread) return false;
 
-    // ── Kiểm tra AI Auto-Pause ──
+    // ?? Ki?m tra AI Auto-Pause ??
     if (thread.ai_paused_until && new Date(thread.ai_paused_until) > new Date()) {
-      console.log(`[AIMediator] AI tạm dừng đến ${thread.ai_paused_until} cho thread ${msg.thread_id}`);
+      console.log(`[AIMediator] AI t?m d?ng ??n ${thread.ai_paused_until} cho thread ${msg.thread_id}`);
       return false;
     }
 
@@ -63,7 +63,7 @@ class AIMediator {
     // ── Gọi đúng AI provider ──
     let aiResponse = '';
     try {
-      console.log(`[AIMediator] Đang gọi ${config.provider} - model: ${config.model_name}`);
+      console.log(`[AIMediator] ?ang g?i ${config.provider} - model: ${config.model_name}`);
 
       switch (config.provider) {
         case 'LOCAL_OLLAMA':
@@ -83,7 +83,7 @@ class AIMediator {
           return false;
       }
     } catch (err) {
-      console.error(`[AIMediator] Lỗi khi gọi AI (${config.provider}):`, err.message);
+      console.error(`[AIMediator] L?i khi g?i AI (${config.provider}):`, err.message);
       return false;
     }
 
@@ -103,7 +103,7 @@ class AIMediator {
   pauseForThread(thread_id) {
     const pauseUntil = new Date(Date.now() + AI_PAUSE_DURATION_MS).toISOString();
     db.prepare('UPDATE threads SET ai_paused_until = ? WHERE id = ?').run(pauseUntil, thread_id);
-    console.log(`[AIMediator] AI tạm dừng cho thread ${thread_id} đến ${pauseUntil}`);
+    console.log(`[AIMediator] AI t?m d?ng cho thread ${thread_id} ??n ${pauseUntil}`);
     return { paused: true, until: pauseUntil };
   }
 
@@ -113,7 +113,7 @@ class AIMediator {
    */
   resumeForThread(thread_id) {
     db.prepare('UPDATE threads SET ai_paused_until = NULL WHERE id = ?').run(thread_id);
-    console.log(`[AIMediator] AI tiếp tục hoạt động cho thread ${thread_id}`);
+    console.log(`[AIMediator] AI ti?p t?c ho?t ??ng cho thread ${thread_id}`);
     return { paused: false };
   }
 

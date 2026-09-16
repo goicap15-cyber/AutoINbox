@@ -28,7 +28,7 @@ if (process.resourcesPath) {
 }
 const db = new Database(DB_PATH, dbOpts);
 
-// Bật WAL Mode & Synchronous Normal cho hiệu năng tối đa
+// B?t WAL Mode & Synchronous Normal cho hi?u n?ng t?i ?a
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
@@ -46,7 +46,7 @@ if (dbExistedBeforeOpen) {
   }
 }
 
-// Nạp Schema SQL
+// N?p Schema SQL
 const schemaPath = path.join(__dirname, 'schema.sql');
 const schemaSql = fs.readFileSync(schemaPath, 'utf8');
 const existingQueueColumns = db.prepare('PRAGMA table_info(message_queue)').all()
@@ -303,7 +303,7 @@ const migrations = [
       const seedStatuses = db.prepare('SELECT COUNT(*) AS count FROM lead_statuses').get().count;
       if (seedStatuses === 0) {
         const insert = db.prepare('INSERT INTO lead_statuses (name, color) VALUES (?, ?)');
-        insert.run('Mới', '#2684ff');
+        insert.run('M?i', '#2684ff');
         insert.run('Đang xử lý', '#ff6b2c');
         insert.run('Đã chốt', '#0fbd74');
       }

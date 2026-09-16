@@ -5,7 +5,7 @@ function isChangedIncomingSidebarPreview({
   isActivitySummary,
   hasRecentMatchingOutbound = false
 }) {
-  if (!previousThread || !cleanLastMessage || /^(?:Chưa có tin nhắn|ChÃ†Â°a cÃƒÂ° tin nhÃ¡ÂºÂ¯n|No messages?)$/i.test(String(cleanLastMessage).trim())) return false;
+  if (!previousThread || !cleanLastMessage || /^(?:Chưa có tin nhắn|ChÃ†°a cÃƒ° tin nháº¯n|No messages?)$/i.test(String(cleanLastMessage).trim())) return false;
   if (isActivitySummary) return false;
   if (String(previousThread.last_message || '').trim() === String(cleanLastMessage).trim()) return false;
 

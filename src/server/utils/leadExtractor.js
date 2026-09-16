@@ -10,7 +10,7 @@
  */
 const { findPhoneNumbers } = require('./vietnamPhone');
 
-// Regex Email chuẩn RFC
+// Regex Email chu?n RFC
 const EMAIL_REGEX = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
 
 /**

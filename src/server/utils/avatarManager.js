@@ -23,7 +23,7 @@ function initAvatarDir() {
 
 initAvatarDir();
 
-// Helper: Tải tệp hỗ trợ chuyển hướng Redirect (301/302/307)
+// Helper: T?i t?p h? tr? chuy?n h??ng Redirect (301/302/307)
 function fetchWithRedirects(targetUrl, maxRedirects = 5) {
   return new Promise((resolve, reject) => {
     if (maxRedirects <= 0) return reject(new Error('Too many redirects'));
@@ -106,7 +106,7 @@ async function downloadAvatar(avatarUrl, threadId = null) {
       return null;
     }
   } catch (err) {
-    console.warn(`[AvatarManager] ⚠️ Lỗi tải avatar (${threadId}):`, err.message);
+    console.warn(`[AvatarManager] ?? L?i t?i avatar (${threadId}):`, err.message);
     return null;
   }
 }
@@ -145,7 +145,7 @@ async function saveAvatarFromBase64OrUrl(avatarData, threadId) {
       return await downloadAvatar(avatarData, threadId);
     }
   } catch (err) {
-    console.warn(`[AvatarManager] Lỗi lưu avatar (${threadId}):`, err.message);
+    console.warn(`[AvatarManager] L?i l?u avatar (${threadId}):`, err.message);
   }
   return null;
 }

@@ -84,7 +84,7 @@ class InboxSourceService {
         finalPageName = data.name || finalPageId;
         avatarUrl = data.picture?.data?.url || null;
     } else {
-        if (!finalPageId) throw new Error('Thiếu Page ID');
+        if (!finalPageId) throw new Error('Thi?u Page ID');
         // Avatar default for public page
         avatarUrl = `https://graph.facebook.com/${finalPageId}/picture?type=normal`;
     }
@@ -157,10 +157,10 @@ class InboxSourceService {
           (id, source_type, owner_account_id, external_id, display_name, status)
         VALUES (?, 'page_messenger', ?, ?, ?, 'ACTIVE')
       `).run(sourceId, accountId || null, String(pageId), pageName || ('Page ' + pageId));
-      console.log(`[PAGE_SOURCE] ✅ Tự động tạo page source: ${sourceId} (Page ${pageId})`);
+      console.log(`[PAGE_SOURCE] ? T? ??ng t?o page source: ${sourceId} (Page ${pageId})`);
     }
 
-    // 2. Bind thread → source if not already correct
+    // 2. Bind thread ? source if not already correct
     if (threadId) {
       const thread = database.prepare('SELECT source_id FROM threads WHERE id = ?').get(String(threadId));
       if (thread && thread.source_id !== sourceId) {

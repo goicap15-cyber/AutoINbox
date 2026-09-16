@@ -93,9 +93,9 @@
 
   /**
    * Đánh giá chi tiết trạng thái upload và tính sẵn sàng của nút Gửi trên Meta Business Suite
-   * @param {Document|Element} doc - DOM document hoặc container scope
+   * @param {Document|Element} doc - DOM document ho?c container scope
    * @param {string[]} searchNames - Danh sách tên file để đối chiếu
-   * @param {boolean} expectVideo - Cờ chỉ định đang mong đợi video
+   * @param {boolean} expectVideo - C? ch? ??nh ?ang mong ??i video
    * @returns {{ ready: boolean, send_found: boolean, has_staged_media: boolean, busy: number, matched_names: string[] }}
    */
   function evaluateBusinessSuiteUploadState(doc, searchNames = [], expectVideo = false) {

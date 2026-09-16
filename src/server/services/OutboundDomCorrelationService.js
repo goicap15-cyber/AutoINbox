@@ -301,6 +301,18 @@ class OutboundDomCorrelationService {
    */
   static confirmPendingOutbound(database, ioServer, pendingRow, { fbMessageId, tsMs = 0, tsSource = 'unknown', rawMessage }) {
     const confirmedId = fbMessageId || `dom_${pendingRow.client_message_id}`;
+    if (fbMessageId) {
+      // A real Facebook id confirms exactly one send. Reject echoes whose id
+      // was already consumed by another attempt (stale history bubble).
+      const ownAttempt = database.prepare('SELECT latest_attempt_id FROM messages WHERE id = ?').get(pendingRow.id);
+      const recycled = database.prepare(
+        'SELECT id FROM outbound_attempts WHERE confirmation_message_id = ?'
+      ).get(fbMessageId);
+      if (recycled && recycled.id !== ownAttempt?.latest_attempt_id) {
+        console.log(`[WS] Confirmation id ${fbMessageId} was already consumed by attempt ${recycled.id}; stale echo skipped.`);
+        return false;
+      }
+    }
     const existingConfirmed = database.prepare(
       'SELECT id, thread_id, is_outgoing, media_type, media_url, attachment_id, timestamp_ms FROM messages WHERE fb_message_id = ?'
     ).get(confirmedId);

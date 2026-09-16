@@ -61,8 +61,8 @@ class CampaignResponseStatsService {
       WHERE message_id IN (
         SELECT id FROM messages
         WHERE COALESCE(is_outgoing, 0) = 1
-          OR lower(COALESCE(content, '')) LIKE '%cuộc gọi%'
-          OR lower(COALESCE(content, '')) LIKE '%bỏ lỡ%'
+          OR lower(COALESCE(content, '')) LIKE '%cu?c g?i%'
+          OR lower(COALESCE(content, '')) LIKE '%b? l?%'
           OR lower(COALESCE(content, '')) LIKE '%đã nhỡ%'
           OR lower(COALESCE(content, '')) LIKE '%missed call%'
           OR lower(COALESCE(content, '')) LIKE '%call ended%'

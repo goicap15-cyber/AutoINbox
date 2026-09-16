@@ -422,7 +422,7 @@ class ConversationRepository {
           }
         }
         const cleanedContent = cleanMessageText(content);
-        if (!mediaUrl && (mediaType === 'text' || !mediaType) && (!cleanedContent || isSystemOrMetadataText(cleanedContent) || cleanedContent === 'Đang tải...')) {
+        if (!mediaUrl && (mediaType === 'text' || !mediaType) && (!cleanedContent || isSystemOrMetadataText(cleanedContent) || cleanedContent === '?ang t?i...')) {
           result.skippedCount += 1;
           continue;
         }

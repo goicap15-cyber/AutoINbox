@@ -1,4 +1,4 @@
-// ── Page Content Script for Business Suite Inbox ──────────────────────────────
+// ?? Page Content Script for Business Suite Inbox ??????????????????????????????
 // Injected into https://business.facebook.com/* via manifest.json
 
 // Prevent running in normal www.facebook.com personal chats
@@ -332,7 +332,7 @@ if (isBusiness) {
         if (!el) return false;
         const target = el.nodeType === 1 ? el : el.parentElement;
         if (!target) return false;
-        if (target.closest('nav, [role="navigation"], [data-surface*="nav"], header, [role="banner"], aside, [aria-label*="Điều hướng"], [aria-label*="Navigation"], [data-surface*="thread_list"], [role="gridcell"], form, [role="textbox"], [contenteditable="true"]')) {
+        if (target.closest('nav, [role="navigation"], [data-surface*="nav"], header, [role="banner"], aside, [aria-label*="?i?u h??ng"], [aria-label*="Navigation"], [data-surface*="thread_list"], [role="gridcell"], form, [role="textbox"], [contenteditable="true"]')) {
             return true;
         }
         try {
@@ -352,21 +352,21 @@ if (isBusiness) {
     // that must never leak into the currently-open thread's contact info.
     function findMessageListContainer() {
         const anchor = document.querySelector('[data-message-id]')
-            || document.querySelector('[aria-label*="Đoạn chat"]')
-            || document.querySelector('[aria-label*="tin nhắn"]');
+            || document.querySelector('[aria-label*="?o?n chat"]')
+            || document.querySelector('[aria-label*="tin nh?n"]');
         if (!anchor) return null;
         let curr = anchor.parentElement || anchor;
         while (curr && curr !== document.body) {
             if (curr.getAttribute) {
                 const label = (curr.getAttribute('aria-label') || '').toLowerCase();
                 const role = curr.getAttribute('role');
-                if (role === 'region' && (label.includes('tin nhắn') || label.includes('message') || label.includes('msg') || label.includes('chat'))) {
+                if (role === 'region' && (label.includes('tin nh?n') || label.includes('message') || label.includes('msg') || label.includes('chat'))) {
                     return curr;
                 }
                 if (role === 'grid' && !label.includes('hội thoại') && !label.includes('cuộc trò chuyện') && !label.includes('thread')) {
                     return curr;
                 }
-                if (role === 'main' && !label.includes('bảng feed') && !label.includes('sidebar')) {
+                if (role === 'main' && !label.includes('b?ng feed') && !label.includes('sidebar')) {
                     return curr;
                 }
             }
@@ -391,7 +391,7 @@ if (isBusiness) {
             const rowAria = (messageRow?.getAttribute?.('aria-label') || '').toLowerCase();
             const combinedAria = elAria + ' ' + rowAria;
 
-            if (combinedAria.includes('tin nhắn do bạn gửi') || combinedAria.includes('message from you') || combinedAria.includes('you sent')) {
+            if (combinedAria.includes('tin nh?n do b?n g?i') || combinedAria.includes('message from you') || combinedAria.includes('you sent')) {
                 return { direction: true, source: 'aria_label', confidence: 'high' };
             }
 
@@ -425,7 +425,7 @@ if (isBusiness) {
             // 3. Kiểm tra avatar của khách hàng đi kèm trong cụm tin nhắn
             let hasContactAvatar = null;
             if (messageRow) {
-                hasContactAvatar = messageRow.querySelector?.('img[alt*="đại diện" i], img[alt*="profile" i], [aria-label*="ảnh đại diện" i], [aria-label*="profile picture" i]');
+                hasContactAvatar = messageRow.querySelector?.('img[alt*="??i di?n" i], img[alt*="profile" i], [aria-label*="?nh ??i di?n" i], [aria-label*="profile picture" i]');
                 if (!hasContactAvatar && currentContactName && typeof currentContactName === 'string') {
                     const cleanName = currentContactName.trim();
                     if (cleanName.length >= 2) {
@@ -674,7 +674,7 @@ if (isBusiness) {
                     rawUnits.push({
                         element: likeNode,
                         fbMessageId: li === 0 && !hasSubstantialText ? fbMessageId : null,
-                        resolved: { kind: 'text', text: '👍' },
+                        resolved: { kind: 'text', text: '??' },
                         isStandaloneLike: true
                     });
                 }
@@ -689,7 +689,7 @@ if (isBusiness) {
             rawUnits.push({
                 element: cand,
                 fbMessageId: ownMsgId || null,
-                resolved: { kind: 'text', text: '👍' },
+                resolved: { kind: 'text', text: '??' },
                 isStandaloneLike: true
             });
         }
@@ -1247,7 +1247,7 @@ if (isBusiness) {
     // find - a picker emoji, a sticker, or a photo. Priority: real text >
     // picker-emoji alt > media (img src or CSS background-image). Verified
     // live against three real samples in the same test thread:
-    //   - emoji:  <img alt="💩" src=".../emoji.php/v9/.../1f4a9.png">
+    //   - emoji:  <img alt="??" src=".../emoji.php/v9/.../1f4a9.png">
     //   - photo/img-sticker (DOM-identical, can't be told apart): <img alt
     //     class="img" src="https://scontent...fbcdn.net/v/t1.15752-9/...">
     //   - CSS-background sticker (no <img> at all): <div role="img"
@@ -1265,7 +1265,7 @@ if (isBusiness) {
 
         // 1. Kiểm tra text trực tiếp
         const trimmed = (rawText || '').trim();
-        if (trimmed === '👍') return true;
+        if (trimmed === '??') return true;
         if (/^(?:thích|like|biểu tượng thích|biểu tượng cảm xúc thích|gửi biểu tượng thích|thumbs up)$/i.test(trimmed)) {
             return true;
         }
@@ -1372,7 +1372,7 @@ if (isBusiness) {
 
         // Ưu tiên kiểm tra Nút Thích / Like (Thumbs Up 👍) đầu tiên
         if (isLikeElementOrWrapper(messageIdNode, cleanedText || rawText)) {
-            return { kind: 'text', text: '👍' };
+            return { kind: 'text', text: '??' };
         }
 
         // Call Log Guard: Never treat a call notification wrapper (which may contain avatar/icon <img>) as an image attachment!
@@ -1405,7 +1405,7 @@ if (isBusiness) {
             const alt = (img.getAttribute('alt') || '').toLowerCase();
             if (alt.includes('ảnh đại diện') || alt.includes('profile picture') || alt.includes('biểu tượng cảm xúc')) continue;
 
-            const isAvatar = img.closest && img.closest('[aria-label*="Ảnh đại diện"], [aria-label*="profile"], [data-surface*="profile"]');
+            const isAvatar = img.closest && img.closest('[aria-label*="ảnh đại diện"], [aria-label*="profile"], [data-surface*="profile"]');
             if (isAvatar) continue;
             if ((img.width > 0 && img.width <= 36) || (img.height > 0 && img.height <= 36)) continue;
 
@@ -1441,7 +1441,7 @@ if (isBusiness) {
         for (const img of imgs) {
             const alt = (img.getAttribute('alt') || '').trim();
             if (alt && (alt === '👍' || /^(?:thích|like)$/i.test(alt))) {
-                return { kind: 'text', text: '👍' };
+                return { kind: 'text', text: '??' };
             }
             if (alt && alt.length <= 8 && !/[A-Za-z]/.test(alt)) {
                 return { kind: 'emoji_text', text: alt };
@@ -1530,7 +1530,7 @@ if (isBusiness) {
         ));
 
         let effectiveFbMessageId = fbMessageId;
-        if (text === '👍' && messageListContainer) {
+        if (text === '??' && messageListContainer) {
             // Nút Like độc lập (cả Like của Page lẫn Like của Khách) đã nằm trong khung chat
             // được quản lý đồng bộ chính xác theo thứ tự DOM bởi Batch Sync (PAGE_THREAD_MESSAGES_SYNCED_V1).
             // Không bắn lẻ qua NEW_PAGE_MESSAGE_FROM_DOM để tránh gán sai sequence_order ở đuôi DB.

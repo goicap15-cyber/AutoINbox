@@ -130,7 +130,7 @@ class CampaignRouteService {
         source_name: effectiveSourceName,
         eligibility_status: 'invalid_route',
         eligibility_reason: 'SOURCE_NOT_FOUND',
-        reason_message: 'Nguồn Page thiếu Page ID hợp lệ.',
+        reason_message: 'Ngu?n Page thi?u Page ID h?p l?.',
         capabilities: { text: false, image: false }
       };
     }

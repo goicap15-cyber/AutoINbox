@@ -292,7 +292,7 @@ class CampaignRunner {
           (typeof error?.message === 'string' && (
             error.message.includes('SEND_LIMIT_REACHED') ||
             error.message.includes('giới hạn gửi trong ngày') ||
-            error.message.includes('giới hạn gửi')
+            error.message.includes('gi?i h?n g?i')
           ));
 
         if (isDailyCapReached) {

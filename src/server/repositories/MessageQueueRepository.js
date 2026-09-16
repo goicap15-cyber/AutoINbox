@@ -19,7 +19,7 @@ class MessageQueueRepository {
       // Preserve the declared media type. Video is a first-class v2 attachment
       // (the envelope validator and Messenger adapter support video); coercing
       // it to "file" prevents the server from applying media dispatch
-      // confirmation and leaves the CRM bubble in "Thử lại".      // contract_version=2 whenever there's an attachment (or manifest) to
+      // confirmation and leaves the CRM bubble in "Th? l?i".      // contract_version=2 whenever there's an attachment (or manifest) to
       // verify, so QueueWorker.buildAttachment()/buildAttachmentManifest()
       // actually run their byte-size/checksum integrity check before dispatch
       // (they gate on this column) - matters for campaign image/file sends

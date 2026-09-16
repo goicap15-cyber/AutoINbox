@@ -1,4 +1,4 @@
-// Parses the "Kết nối Page" input field, which only ever advertises two
+// Parses the "K?t n?i Page" input field, which only ever advertises two
 // accepted formats (per its own placeholder text): a raw numeric Page ID, or
 // a facebook.com/profile.php?id=<id> link. No Graph API call is involved -
 // the extension handles send/receive via DOM automation, so a vanity-name

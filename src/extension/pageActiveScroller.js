@@ -118,7 +118,7 @@
     if (!el || typeof el.closest !== 'function') return false;
 
     // Loại trừ navigation và sidebar
-    const isNav = el.closest('[role="navigation"], [data-surface*="thread_list"], .sidebar, [aria-label*="Hội thoại"], [aria-label*="Chats"]');
+    const isNav = el.closest('[role="navigation"], [data-surface*="thread_list"], .sidebar, [aria-label*="H?i tho?i"], [aria-label*="Chats"]');
     if (isNav) return false;
 
     const hasScroll = el.scrollHeight > el.clientHeight + 10;
@@ -157,7 +157,7 @@
       if (!node) return { node, score: -1 };
       // Loại trừ navigation và sidebar
       if (typeof node.closest === 'function') {
-        const isNav = node.closest('[role="navigation"], [data-surface*="thread_list"], .sidebar, [aria-label*="Hội thoại"], [aria-label*="Chats"]');
+        const isNav = node.closest('[role="navigation"], [data-surface*="thread_list"], .sidebar, [aria-label*="H?i tho?i"], [aria-label*="Chats"]');
         if (isNav) return { node, score: -1 };
       }
 
@@ -197,7 +197,7 @@
       try { scroller.focus({ preventScroll: true }); } catch (e) {}
     }
 
-    // 2. Cuộn cơ học bằng scrollBy
+    // 2. Cu?n c? h?c b?ng scrollBy
     if (typeof scroller.scrollBy === 'function') {
       scroller.scrollBy({ top: -distance, behavior: 'auto' });
     } else if (typeof scroller.scrollTop === 'number') {
@@ -218,7 +218,7 @@
         // Silent catch for test env
       }
 
-      // 4. Dispatch WheelEvent bổ trợ
+      // 4. Dispatch WheelEvent b? tr?
       try {
         let wheelEvt;
         if (typeof WheelEvent === 'function') {

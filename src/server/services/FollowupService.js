@@ -15,7 +15,7 @@ class FollowupService {
     const dueAt = new Date(dueAtValue);
     const note = String(noteValue || '').trim();
     if (!Number.isFinite(dueAt.getTime()) || dueAt.getTime() <= now) {
-      const error = new Error('Thời điểm nhắc phải ở tương lai.');
+      const error = new Error('Th?i ?i?m nh?c ph?i ? t??ng lai.');
       error.statusCode = 400;
       throw error;
     }

@@ -4,7 +4,7 @@ class SearchService {
   /**
    * Tìm kiếm siêu tốc toàn văn bản trong tin nhắn bằng SQLite FTS5
    * @param {string} keyword - Từ khóa cần tìm
-   * @param {number} limit - Số kết quả tối đa trả về
+   * @param {number} limit - S? k?t qu? t?i ?a tr? v?
    * @returns {Array} Danh sách kết quả
    */
   searchMessages(keyword, limit = 50) {

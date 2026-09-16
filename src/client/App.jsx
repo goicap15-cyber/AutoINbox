@@ -32,7 +32,7 @@ const WAITING_REQUEST_REFRESH_MS = 15000;
 // contact record has a verified name.
 function isPlaceholderContactName(value) {
   const normalized = String(value || '').trim().toLocaleLowerCase('vi-VN');
-  return !normalized || normalized === 'khÃ¡ch hÃ ng' || normalized === 'customer';
+  return !normalized || normalized === 'khách hàng' || normalized === 'customer';
 }
 
 function getVerifiedContactName(contact) {
@@ -399,7 +399,7 @@ export default function App() {
         setLicenseStatus({
           isLicensed: false,
           reason: json.code || 'LICENSE_CHECK_FAILED',
-          message: json.message || 'KhÃ´ng thá»ƒ kiá»ƒm tra báº£n quyá»n.'
+          message: json.message || 'Không thá»ƒ kiá»ƒm tra bản quyền.'
         });
       }
     } catch (e) {
@@ -411,8 +411,8 @@ export default function App() {
         isLicensed: false,
         reason: e?.name === 'AbortError' ? 'LICENSE_CHECK_TIMEOUT' : 'LICENSE_CHECK_FAILED',
         message: e?.name === 'AbortError'
-          ? 'MÃ¡y chá»§ báº£n quyá»n pháº£n há»“i quÃ¡ lÃ¢u. Vui lÃ²ng thá»­ láº¡i.'
-          : 'KhÃ´ng thá»ƒ káº¿t ná»‘i Ä‘á»ƒ kiá»ƒm tra báº£n quyá»n.'
+          ? 'Máy chủ bản quyền phản há»“i quá lâu. Vui lòng thử lại.'
+          : 'Không thá»ƒ kết ná»‘i Ä‘á»ƒ kiá»ƒm tra bản quyền.'
       });
     } finally {
       clearTimeout(timeout);
@@ -455,7 +455,7 @@ export default function App() {
       });
       const created = await res.json().catch(() => null);
       if (!res.ok) {
-        throw new Error(created?.error || 'KhÃ´ng thá»ƒ táº¡o tráº¡ng thÃ¡i má»›i.');
+        throw new Error(created?.error || 'Không thá»ƒ tạo trạng thái má»›i.');
       }
       if (created?.id != null) {
         setLeadStatuses((prev) => (prev.some((s) => s.id === created.id) ? prev : [...prev, created]));
@@ -737,7 +737,7 @@ export default function App() {
     })
       .then(async (response) => {
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'KhÃ´ng táº£i Ä‘Æ°á»£c kháº£ nÄƒng gá»­i.');
+        if (!response.ok) throw new Error(data.error || 'Không tải Ä‘ược khả nÄƒng gửi.');
         return data;
       })
       .then(setRichCapabilities)
@@ -979,7 +979,7 @@ export default function App() {
               ...message,
               status: 'failed',
               delivery_status: 'failed',
-              error: typeof error === 'object' ? error : { message: error || (isAttachment ? 'KhÃ´ng gá»­i Ä‘Æ°á»£c áº£nh.' : 'KhÃ´ng gá»­i Ä‘Æ°á»£c tin nháº¯n.') }
+              error: typeof error === 'object' ? error : { message: error || (isAttachment ? 'Không gửi Ä‘ược ảnh.' : 'Không gửi Ä‘ược tin nhắn.') }
             }];
           })
         };
@@ -1044,7 +1044,7 @@ export default function App() {
             ...message,
             status: 'failed',
             delivery_status: 'failed',
-            error: statusEvent.error || { message: 'KhÃ´ng gá»­i Ä‘Æ°á»£c áº£nh.' }
+            error: statusEvent.error || { message: 'Không gửi Ä‘ược ảnh.' }
           } : {
             ...message,
             attempt_id: statusEvent.attempt_id || message.attempt_id,
@@ -1065,7 +1065,7 @@ export default function App() {
           next[threadId] = next[threadId].map((message) => {
             const matches = (client_message_id && message.client_message_id === client_message_id) || (message_id && Number(message.id) === Number(message_id));
             if (!matches || ['sent', 'delivered', 'read'].includes(String(message.delivery_status || message.status).toLowerCase())) return message;
-            return { ...message, status: 'failed', delivery_status: 'failed', error: { code: code || 'SEND_ERROR', message: error || 'KhÃ´ng gá»­i Ä‘Æ°á»£c tin nháº¯n.' } };
+            return { ...message, status: 'failed', delivery_status: 'failed', error: { code: code || 'SEND_ERROR', message: error || 'Không gửi Ä‘ược tin nhắn.' } };
           });
         });
         return next;
@@ -1091,7 +1091,7 @@ export default function App() {
           return `fallback_${message.timestamp_ms || message.created_at || 0}_${message.is_outgoing ? 1 : 0}_${message.content || ''}`;
         };
 
-        // Náº¡p tin nháº¯n vá»«a sync
+        // Nạp tin nhắn vừa sync
         (syncedMsgs || []).forEach(m => {
           let key = messageKey(m);
           let reconciledMessage = m;
@@ -1146,7 +1146,7 @@ export default function App() {
           mergedMap.set(key, { ...reconciledMessage, thread_key: m.thread_key || thread_key, account_id: m.account_id || account_id, status: 'sent' });
         });
 
-        // Giá»¯ láº¡i cÃ¡c tin nháº¯n pending/failed/realtime chÆ°a cÃ³ trong báº£n sync
+        // Giữ lại các tin nhắn pending/failed/realtime chưa có trong bản sync
         existing.forEach(m => {
           const key = messageKey(m);
           const keepOptimistic = m.status === 'sending' || m.status === 'failed' || m.delivery_status === 'pending';
@@ -1411,7 +1411,7 @@ export default function App() {
   }, []);
 
   const handleStageAttachment = useCallback(async (file) => {
-    if (!activeThreadId) throw new Error('ChÆ°a chá»n há»™i thoáº¡i.');
+    if (!activeThreadId) throw new Error('Chưa chọn há»™i thoại.');
     const threadId = String(activeThreadId);
     const formData = new FormData();
     formData.append('file', file, file.name);
@@ -1423,7 +1423,7 @@ export default function App() {
     );
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const error = new Error(data.error || 'KhÃ´ng táº£i Ä‘Æ°á»£c file Ä‘Ã­nh kÃ¨m.');
+      const error = new Error(data.error || 'Không tải Ä‘ược file Ä‘ính kèm.');
       error.code = data.code;
       throw error;
     }
@@ -1431,7 +1431,7 @@ export default function App() {
   }, [activeThreadId]);
 
   const handleDiscardAttachment = useCallback(async (attachmentId) => {
-    if (!activeThreadId) throw new Error('ChÆ°a chá»n há»™i thoáº¡i.');
+    if (!activeThreadId) throw new Error('Chưa chọn há»™i thoại.');
     const response = await fetch(
       '/api/threads/' + encodeURIComponent(String(activeThreadId)) +
         '/outbound-attachments/' + encodeURIComponent(attachmentId),
@@ -1439,7 +1439,7 @@ export default function App() {
     );
     if (response.status === 204) return;
     const data = await response.json().catch(() => ({}));
-    const error = new Error(data.error || 'KhÃ´ng gá»¡ Ä‘Æ°á»£c file Ä‘Ã­nh kÃ¨m.');
+    const error = new Error(data.error || 'Không gỡ Ä‘ược file Ä‘ính kèm.');
     error.code = data.code;
     throw error;
   }, [activeThreadId]);
@@ -1462,7 +1462,7 @@ export default function App() {
           attachment_id: payloadOrText?.attachment_id || null,
           attachment: payloadOrText?.attachment || null
         };
-    if (!payload.client_message_id) throw new Error('Thiáº¿u mÃ£ tin nháº¯n phÃ­a CRM.');
+    if (!payload.client_message_id) throw new Error('Thiếu mã tin nhắn phía CRM.');
     const hasAttachment = Boolean(payload.attachment_id || payload.attachment?.media_type || payload.attachment?.preview_url);
     // Preserve caption/text when attachment is present
     const outboundContent = String(payload.content || '').trim();
@@ -1526,7 +1526,7 @@ export default function App() {
               ...message,
               status: 'failed',
               delivery_status: 'failed',
-              error: { code: 'SOCKET_DISCONNECTED', message: 'CRM chÆ°a káº¿t ná»‘i backend.' }
+              error: { code: 'SOCKET_DISCONNECTED', message: 'CRM chưa kết ná»‘i backend.' }
             }
           : message
       ))
@@ -1571,12 +1571,12 @@ export default function App() {
 
   const handleSetReminder = async (threadId, dueAt, note) => {
     const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/reminder', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ due_at: dueAt, note }) });
-    const data = await res.json(); if (!res.ok) throw new Error(data.error || 'KhÃ´ng thá»ƒ lÆ°u nháº¯c.');
+    const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Không thá»ƒ lưu nhắc.');
     await loadThreads(); return data;
   };
-  const handleCompleteReminder = async (threadId) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+'/reminder/complete',{method:'POST'}); const data=await res.json().catch(() => ({})); if(!res.ok) throw new Error(data.error || 'KhÃ´ng thá»ƒ hoÃ n thÃ nh nháº¯c.'); await loadThreads(); };
-  const handleCancelReminder = async (threadId) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+'/reminder',{method:'DELETE'}); const data=await res.json().catch(() => ({})); if(!res.ok) throw new Error(data.error || 'KhÃ´ng thá»ƒ há»§y nháº¯c.'); await loadThreads(); };
-  const handleArchiveThread = async (threadId, restore=false) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+(restore?'/restore':'/archive'),{method:'POST'}); if(!res.ok) throw new Error('KhÃ´ng thá»ƒ cáº­p nháº­t lÆ°u trá»¯.'); await loadThreads(); };
+  const handleCompleteReminder = async (threadId) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+'/reminder/complete',{method:'POST'}); const data=await res.json().catch(() => ({})); if(!res.ok) throw new Error(data.error || 'Không thá»ƒ hoàn thành nhắc.'); await loadThreads(); };
+  const handleCancelReminder = async (threadId) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+'/reminder',{method:'DELETE'}); const data=await res.json().catch(() => ({})); if(!res.ok) throw new Error(data.error || 'Không thá»ƒ hủy nhắc.'); await loadThreads(); };
+  const handleArchiveThread = async (threadId, restore=false) => { const res=await fetch('/api/threads/'+encodeURIComponent(threadId)+(restore?'/restore':'/archive'),{method:'POST'}); if(!res.ok) throw new Error('Không thá»ƒ cập nhật lưu trữ.'); await loadThreads(); };
 
   const handleSaveContact = async (updatedContact) => {
     const contactThreadId = String(updatedContact.thread_id);
@@ -1587,7 +1587,7 @@ export default function App() {
     });
     const responsePayload = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(responsePayload?.error || `LÆ°u liÃªn há»‡ tháº¥t báº¡i (${res.status})`);
+      throw new Error(responsePayload?.error || `Lưu liên há»‡ thất bại (${res.status})`);
     }
     const persistedContact = { ...updatedContact, ...(responsePayload.contact || {}) };
 
@@ -1688,7 +1688,7 @@ export default function App() {
   const currentSenderIdentity = selectedThread ? {
     name: selectedThread.source_type === 'page_messenger'
       ? (selectedThread.source_name || currentInboxSource?.display_name || selectedThread.source_external_id || 'Facebook Page')
-      : (currentAccount?.name || selectedThread.source_name || selectedThread.account_id || 'TÃ i khoáº£n Facebook'),
+      : (currentAccount?.name || selectedThread.source_name || selectedThread.account_id || 'Tài khoản Facebook'),
     id: selectedThread.source_type === 'page_messenger'
       ? (selectedThread.source_external_id || currentInboxSource?.external_id || selectedThread.source_id)
       : selectedThread.account_id,
@@ -1699,7 +1699,7 @@ export default function App() {
   } : null;
   const activeContact = activeThreadId && selectedThread ? {
     thread_id: String(activeThreadId),
-    name: selectedThread.contact_name || selectedThread.name || 'KhÃ¡ch hÃ ng',
+    name: selectedThread.contact_name || selectedThread.name || 'Khách hàng',
     nickname: selectedThread.nickname || null,
     avatar_url: selectedThread.avatar_url,
     status: selectedThread.status,
@@ -1716,15 +1716,15 @@ export default function App() {
     ? selectedThread?.source_status && selectedThread.source_status !== 'ACTIVE'
     : isCurrentExtensionDisconnected;
   const currentSendDisabledReason = selectedThread?.source_type === 'page_messenger'
-    ? 'Äang chá» Page Messenger sáºµn sÃ ng. Vui lÃ²ng Ä‘á»£i trong giÃ¢y lÃ¡t.'
-    : 'TÃ i khoáº£n Facebook chÆ°a Ä‘Æ°á»£c káº¿t ná»‘i. Vui lÃ²ng vÃ o Quáº£n lÃ½ vÃ  báº¥m Káº¿t ná»‘i Facebook.';
+    ? 'Đang chờ Page Messenger sẵn sàng. Vui lòng Ä‘ợi trong giây lát.'
+    : 'Tài khoản Facebook chưa được kết nối. Vui lòng vào Quản lý và bấm Kết nối Facebook.';
 
   const gridClass = `${leadPanelCollapsed ? 'app-grid-collapsed' : 'app-grid'}${activeView === 'employees' ? ' employee-view' : ''}`;
 
   const handleStartCall = useCallback((callType = 'audio') => {
     if (!activeThreadId || !selectedThread) return;
     if (!socket || !isConnected) {
-      alert('ChÆ°a káº¿t ná»‘i Ä‘áº¿n Server WebSocket!');
+      alert('Chưa kết nối đến Server WebSocket!');
       return;
     }
     socket.emit('TRIGGER_CALL', {
@@ -1751,7 +1751,7 @@ export default function App() {
   }, [socket, isConnected, threads, bulkHistoryProgress?.status]);
 
   if (authLoading) {
-    return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Äang kiá»ƒm tra phiÃªn Ä‘Äƒng nháº­p...</div>;
+    return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Đang kiá»ƒm tra phiên Ä‘Äƒng nhập...</div>;
   }
 
   if (!sessionUser) {
@@ -1759,7 +1759,7 @@ export default function App() {
   }
 
   if (licenseStatus === null) {
-    return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Äang kiá»ƒm tra báº£n quyá»n...</div>;
+    return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Đang kiá»ƒm tra bản quyền...</div>;
   }
 
   return (
@@ -1869,7 +1869,7 @@ export default function App() {
             )}
           </div>
         ) : (
-          <EmptyState icon={MessageSquare} title="Chá»n má»™t há»™i thoáº¡i Ä‘á»ƒ báº¯t Ä‘áº§u nháº¯n tin" description="Tin nháº¯n vÃ  thÃ´ng tin khÃ¡ch hÃ ng sáº½ xuáº¥t hiá»‡n táº¡i Ä‘Ã¢y." />
+          <EmptyState icon={MessageSquare} title="Chọn má»™t há»™i thoại Ä‘á»ƒ bắt Ä‘ầu nhắn tin" description="Tin nhắn và thông tin khách hàng sẽ xuất hiện tại đây." />
         )}
       </div>
 
@@ -1945,7 +1945,7 @@ export default function App() {
         onSelectThread={(tid) => setActiveThreadId(tid)}
         onAnswerCall={(action, thread_id, callback, source_tab_id = null, source_frame_id = 0, account_id = null, call_id = null) => {
           if (!socket) {
-            callback?.(false, 'Extension Facebook chÆ°a káº¿t ná»‘i');
+            callback?.(false, 'Extension Facebook chưa kết ná»‘i');
             return;
           }
 
@@ -1982,20 +1982,20 @@ export default function App() {
             finish(
               !!payload.success,
               payload.success
-                ? (action === 'accept' ? 'ÄÃ£ cháº¥p nháº­n cuá»™c gá»i' : 'ÄÃ£ tá»« chá»‘i cuá»™c gá»i')
-                : (payload.error || 'Extension khÃ´ng báº¥m Ä‘Æ°á»£c nÃºt cuá»™c gá»i')
+                ? (action === 'accept' ? 'Đã chấp nhận cuá»™c gọi' : 'Đã từ chá»‘i cuá»™c gọi')
+                : (payload.error || 'Extension không bấm Ä‘ược nút cuá»™c gọi')
             );
           };
 
           const ackHandler = (payload = {}) => {
             if (payload?.success) return;
-            finish(false, payload?.error || 'KhÃ´ng gá»­i Ä‘Æ°á»£c lá»‡nh tá»›i extension');
+            finish(false, payload?.error || 'Không gửi Ä‘ược lá»‡nh tá»›i extension');
           };
 
           socket.on?.('ANSWER_INCOMING_CALL_RESULT', resultHandler);
           socket.on?.('ANSWER_INCOMING_CALL_RESPONSE', ackHandler);
           timeoutId = setTimeout(() => {
-            finish(false, 'Háº¿t thá»i gian chá» extension pháº£n há»“i');
+            finish(false, 'Hết thời gian chờ extension phản há»“i');
           }, 10000);
 
           socket.emit('ANSWER_INCOMING_CALL', { action, thread_id, source_tab_id, source_frame_id, account_id, call_id });

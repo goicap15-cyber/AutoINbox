@@ -78,7 +78,7 @@
       return d.getTime();
     }
 
-    // 3. Tiếng Anh: "9:15 AM, Sep 10, 2026" or "Sep 10, 2026 at 9:15 AM"
+    // 3. Ti?ng Anh: "9:15 AM, Sep 10, 2026" or "Sep 10, 2026 at 9:15 AM"
     const enMatch = str.match(/(\d{1,2}):(\d{2})\s*(AM|PM)\s*,\s*([A-Za-z]+)\s*(\d{1,2})(?:[,\s]+(\d{4}))?/i);
     if (enMatch) {
       let hours = parseInt(enMatch[1], 10);
@@ -161,15 +161,15 @@
       };
     }
 
-    // Thứ hai, Thứ ba... / T2, T3, T4, T5, T6, T7, CN / Monday, Tuesday...
+    // Th? hai, Th? ba... / T2, T3, T4, T5, T6, T7, CN / Monday, Tuesday...
     const dayOfWeekVi = {
-      'chủ nhật': 0, 'cn': 0,
-      'thứ hai': 1, 'thứ 2': 1, 't2': 1,
-      'thứ ba': 2, 'thứ 3': 2, 't3': 2,
-      'thứ tư': 3, 'thứ 4': 3, 't4': 3,
-      'thứ năm': 4, 'thứ 5': 4, 't5': 4,
+      'ch? nh?t': 0, 'cn': 0,
+      'th? hai': 1, 'th? 2': 1, 't2': 1,
+      'th? ba': 2, 'th? 3': 2, 't3': 2,
+      'th? t?': 3, 'th? 4': 3, 't4': 3,
+      'th? n?m': 4, 'th? 5': 4, 't5': 4,
       'thứ sáu': 5, 'thứ 6': 5, 't6': 5,
-      'thứ bảy': 6, 'thứ 7': 6, 't7': 6
+      'th? b?y': 6, 'th? 7': 6, 't7': 6
     };
     const dayOfWeekEn = {
       sunday: 0, sun: 0,
@@ -269,7 +269,7 @@
       }
     }
 
-    // 3. aria-label hoặc data-tooltip-content
+    // 3. aria-label ho?c data-tooltip-content
     if (typeof domNode.getAttribute === 'function') {
       const ariaLabel = domNode.getAttribute('aria-label');
       if (ariaLabel) {

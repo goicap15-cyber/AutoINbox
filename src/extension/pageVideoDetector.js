@@ -15,7 +15,7 @@
 
   const OPEN_VIDEO_LABEL_PATTERN = /(?:phát|mở|xem|play|open|watch)?\s*video/i;
   const CALL_EXCLUDE_PATTERN = /(?:cuộc gọi|video call|call video|đã nhỡ|bỏ lỡ|missed call)/i;
-  const COMPOSER_EXCLUDE_SELECTOR = '[data-surface*="composer"], form, footer, [aria-label*="soạn tin" i], [aria-label*="nhập tin" i]';
+  const COMPOSER_EXCLUDE_SELECTOR = '[data-surface*="composer"], form, footer, [aria-label*="so?n tin" i], [aria-label*="nh?p tin" i]';
 
   function isExcludedCall(text) {
     return text && CALL_EXCLUDE_PATTERN.test(text);
@@ -40,7 +40,7 @@
 
   /**
    * Trích xuất link CDN video hoặc thumbnail từ cây React Fiber của phần tử DOM
-   * @param {Element} node - Element node cần kiểm tra
+   * @param {Element} node - Element node c?n ki?m tra
    * @returns {{ videoUrl: string|null, posterUrl: string|null }}
    */
   function extractVideoCdnFromReact(node) {
@@ -141,7 +141,7 @@
 
   /**
    * Phát hiện video bên trong một messageIdNode (vỏ bọc tin nhắn [data-message-id])
-   * @param {Element} messageNode - Element node của tin nhắn
+   * @param {Element} messageNode - Element node c?a tin nh?n
    * @param {string} [captionText] - Nội dung text đã được lọc
    * @returns {{ isVideo: boolean, mediaUrl?: string|null, caption?: string|null, posterUrl?: string|null }}
    */
