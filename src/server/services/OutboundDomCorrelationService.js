@@ -78,11 +78,19 @@ class OutboundDomCorrelationService {
   static mergeMediaCompanion(database, threadId, message, isOutgoing) {
     const parentFbMessageId = this.mediaParentMessageId(message?.fb_message_id);
     if (!parentFbMessageId) return null;
+    // Search parent WITHOUT filtering by is_outgoing: the parent row may have
+    // been wrongly stored as is_outgoing=0 by a noisy history crawl even though
+    // the _media companion (created at send time) carries is_outgoing=1. We
+    // always preserve the highest confidence direction after the merge.
     const parent = database.prepare(`
       SELECT * FROM messages
-      WHERE thread_id = ? AND fb_message_id = ? AND is_outgoing = ?
+      WHERE thread_id = ? AND fb_message_id = ?
       LIMIT 1
-    `).get(threadId, parentFbMessageId, isOutgoing ? 1 : 0);
+    `).get(threadId, parentFbMessageId);
+    // If either the _media companion or the parent was confirmed outgoing,
+    // the merged row must also be outgoing. Never let an incoming parent
+    // overwrite an outgoing companion.
+    const mergedIsOutgoing = (isOutgoing || Number(parent?.is_outgoing) === 1) ? 1 : 0;
 
     // For our own send, Facebook emits a text/base row plus a _media row,
     // while CRM already owns a temporary attachment row. Upgrade that durable
@@ -135,6 +143,10 @@ class OutboundDomCorrelationService {
         timestamp_ms = CASE WHEN ? > 0 THEN ? ELSE timestamp_ms END,
         timestamp_source = COALESCE(?, timestamp_source),
         sequence_order = COALESCE(?, sequence_order),
+        is_outgoing = ?,
+        sender_id = CASE WHEN ? = 1 THEN COALESCE(sender_id, 'current_user') ELSE sender_id END,
+        sender_role = CASE WHEN ? = 1 THEN 'operator' ELSE sender_role END,
+        direction_status = CASE WHEN ? = 1 THEN 'confirmed' ELSE direction_status END,
         content = CASE
           WHEN TRIM(COALESCE(content, '')) GLOB '[0-9]*'
            AND LENGTH(TRIM(COALESCE(content, ''))) <= 2
@@ -145,6 +157,8 @@ class OutboundDomCorrelationService {
       message.media_url || null, message.local_media_path || null,
       Number(message.timestamp_ms) || 0, Number(message.timestamp_ms) || 0, message.timestamp_source || null,
       Number.isFinite(Number(message.sequence_order)) ? Number(message.sequence_order) : null,
+      mergedIsOutgoing,
+      mergedIsOutgoing, mergedIsOutgoing, mergedIsOutgoing,
       Number(message.timestamp_ms) || 0, parent.id);
     return database.prepare('SELECT * FROM messages WHERE id = ?').get(parent.id);
   }

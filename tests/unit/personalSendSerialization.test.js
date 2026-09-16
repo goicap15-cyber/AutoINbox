@@ -61,15 +61,14 @@ test('a later hydrated observation enriches an existing incoming video row', () 
   assert.match(serverSource, /let mediaWasUpdated = false/);
   assert.match(serverSource, /media_url = COALESCE\(NULLIF\(\?, ''\), media_url\)/);
   assert.match(serverSource, /!directionWasUpdated && !mediaWasUpdated/);
-  assert.match(bubbleSource, /mediaType !== 'text' && mediaType !== 'call'/);
+  assert.match(bubbleSource, /hasRenderableMedia/);
   assert.doesNotMatch(viewerSource, /Video đang đồng bộ/);
 });
 
-test('url-less video hydration stays silent until the real media URL is available', () => {
+test('url-less video hydration stays silent or shows syncing indicator until the real media URL is available', () => {
   const viewerSource = fs.readFileSync('src/client/components/MediaViewer.jsx', 'utf8');
-  const silentGuard = viewerSource.indexOf('if (!displayUrl) return null;');
-  assert.ok(silentGuard >= 0);
-  assert.doesNotMatch(viewerSource, /Video đang đồng bộ/);
+  assert.match(viewerSource, /if \(!displayUrl\)/);
+  assert.match(viewerSource, /Đang đồng bộ video\.\.\./);
 });
 
 test('campaign personal sends use durable external thread identity and fail closed on contact mismatch', () => {
@@ -100,7 +99,7 @@ test('campaign recipient composer is thread-bound even when selected contacts sh
 test('a trusted attachment click is a single submit and history retains url-less media confirmations', () => {
   const extensionSource = fs.readFileSync('src/extension/background.js', 'utf8');
   const serverSource = fs.readFileSync('src/server/server.js', 'utf8');
-  const branchStart = extensionSource.indexOf('if (clickDetails.button_center)');
+  const branchStart = extensionSource.indexOf('if (hasValidCenter)');
   const trustedClickBranch = extensionSource.slice(branchStart, extensionSource.indexOf('} else {', branchStart));
   assert.match(trustedClickBranch, /trusted_send_single_dispatch/);
   assert.doesNotMatch(trustedClickBranch, /dispatchTrustedEnter/);

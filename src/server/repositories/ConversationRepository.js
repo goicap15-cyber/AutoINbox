@@ -615,6 +615,17 @@ class ConversationRepository {
       WHERE thread_id = ?
     `).all(threadId);
 
+    if (rows.length < 2) return rows.length;
+
+    function parseSafeUtcTimestamp(row) {
+      const ms = Number(row?.timestamp_ms || 0);
+      if (Number.isFinite(ms) && ms > 0) return ms;
+      if (!row?.created_at) return 0;
+      const s = String(row.created_at).trim();
+      if (s.endsWith('Z')) return Date.parse(s) || 0;
+      return Date.parse(s.replace(' ', 'T') + 'Z') || 0;
+    }
+
     rows.sort((a, b) => {
       const seqA = ConversationRepository.extractFbMessageSequence(a.fb_message_id);
       const seqB = ConversationRepository.extractFbMessageSequence(b.fb_message_id);
@@ -623,8 +634,8 @@ class ConversationRepository {
         if (cmp !== 0) return cmp;
       }
 
-      const tsA = Number(a.timestamp_ms || 0) || (a.created_at ? new Date(a.created_at).getTime() : 0);
-      const tsB = Number(b.timestamp_ms || 0) || (b.created_at ? new Date(b.created_at).getTime() : 0);
+      const tsA = parseSafeUtcTimestamp(a);
+      const tsB = parseSafeUtcTimestamp(b);
       const minuteA = Math.floor(tsA / 60000);
       const minuteB = Math.floor(tsB / 60000);
       if (minuteA !== minuteB && minuteA > 0 && minuteB > 0) {
@@ -754,9 +765,31 @@ class ConversationRepository {
     }
 
     const isPageObservation = source === 'page_dom_observer';
+    // Personal Messenger crawler (dom_observer) and history sync (dom_history_sync)
+    // can also produce noisy direction readings on restart. Apply the same 2-strike
+    // hysteresis so a single bad crawl scan never corrupts a stored direction.
+    const isCrawlObservation = isPageObservation || source === 'dom_observer' || source === 'dom_history_sync';
     const existingIsPending = existingMsg.direction_status === 'pending';
     const shouldPromotePending = isPageObservation && existingIsPending;
-    const shouldUpdateDirection = isPageObservation && (
+
+    // Hard guard: if the stored row is already confirmed outgoing (is_outgoing=1),
+    // a crawl/history source alone must never flip it to incoming. Only an
+    // explicit, authoritative source (e.g. facebook_payload, network confirmation)
+    // may override a confirmed outgoing row.
+    const crawlTriesToFlipOutgoing = isCrawlObservation
+      && Number(existingMsg.is_outgoing) === 1
+      && normalizedOutgoing === 0
+      && existingMsg.direction_status === 'confirmed';
+    if (crawlTriesToFlipOutgoing) {
+      // Record as a candidate but do NOT commit under any circumstance.
+      // This prevents a consistently-wrong geometry reading on a wide video
+      // from ever flipping our own sent media to incoming.
+      console.log(`[ConversationRepo] 🛡️ Blocked crawl flip of confirmed outgoing row: ${stableMessageId} (source=${source})`);
+      directionFlipCandidates.delete(stableMessageId);
+      if (!shouldUpdateTimestamp) return { updated: false, reason: 'crawl_blocked_outgoing_flip' };
+    }
+
+    const shouldUpdateDirection = !crawlTriesToFlipOutgoing && isCrawlObservation && (
       shouldPromotePending
       || shouldCommitDirectionFlip(stableMessageId, existingMsg.is_outgoing, normalizedOutgoing)
     );

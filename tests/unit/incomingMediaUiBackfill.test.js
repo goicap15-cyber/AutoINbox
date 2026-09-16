@@ -4,8 +4,7 @@ const fs = require('fs');
 
 test('late incoming media is inserted by durable sequence instead of being discarded', () => {
   const source = fs.readFileSync('src/client/App.jsx', 'utf8');
-  assert.match(source, /const isIncomingMedia = !message\?\.is_outgoing/);
-  assert.match(source, /\['image', 'video', 'voice', 'file'\]/);
+  assert.match(source, /incomingSequence <= newestVisibleSequence/);
   assert.match(source, /result\.splice\(insertAt >= 0 \? insertAt : result\.length, 0, message\)/);
 });
 
@@ -41,7 +40,7 @@ test('realtime customer messages survive extension websocket reconnects', () => 
 test('an already-open Messenger tab can replace a stale content observer', () => {
   const content = fs.readFileSync('src/extension/content.js', 'utf8');
   assert.match(content, /typeof previousContentInstance === 'object'/);
-  assert.match(content, /replayStableIncomingTail\(initialThreadId\)/);
+  assert.match(content, /seedBaseline\(initialThreadId\)/);
 });
 
 test('realtime media uses row-scoped sources and every message carries DOM position', () => {

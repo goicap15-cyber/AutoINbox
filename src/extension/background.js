@@ -2840,10 +2840,12 @@ async function findAttachButtonCenter(tabId, timeoutMs = 6000, preferredKind = '
       const exactLabels = [
         'Đính kèm file', 'Đính kèm ảnh', 'Đính kèm PDF', 'Đính kèm tệp', 'Đính kèm hình ảnh',
         'Thêm file', 'Thêm ảnh', 'Attach a file', 'Attach photo', 'Attach file',
-        'Đính kèm ảnh/video', 'Thêm ảnh/video', 'Attach photo or video', 'Attach video'
+        'Đính kèm ảnh/video', 'Thêm ảnh/video', 'Attach photo or video', 'Attach video',
+        'Đính kèm file hoặc ảnh', 'Đính kèm ảnh hoặc video', 'Mở tính năng chọn ảnh', 'Chọn ảnh'
       ];
       const prefixLabels = [
-        'Đính kèm file', 'Đính kèm tệp', 'Đính kèm ảnh', 'Đính kèm', 'Thêm file', 'Thêm ảnh', 'Attach'
+        'Đính kèm file', 'Đính kèm tệp', 'Đính kèm ảnh', 'Đính kèm hình ảnh', 'Đính kèm', 'Thêm file', 'Thêm ảnh', 'Attach',
+        'Mở tính năng chọn ảnh', 'Chọn ảnh'
       ];
       const normalizeLabel = (value) => String(value || '')
         .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -2879,8 +2881,8 @@ async function findAttachButtonCenter(tabId, timeoutMs = 6000, preferredKind = '
             }
           }
         }
-        // Exact match boost for verified Business Suite paperclip: <div role="button" aria-label="Đính kèm file">
-        if (/^(đính kèm file|đính kèm tệp|attach a file|attach file)$/i.test(rawLabel.trim())) {
+        // Exact match boost for verified Business Suite paperclip and Messenger attach buttons
+        if (/^(đính kèm file|đính kèm tệp|đính kèm ảnh|đính kèm hình ảnh|attach a file|attach file|attach photo)/i.test(rawLabel.trim())) {
           score += 150;
         }
         if (element.getAttribute('role') === 'button' || element.tagName === 'BUTTON') {
@@ -2934,6 +2936,11 @@ async function findAttachButtonCenter(tabId, timeoutMs = 6000, preferredKind = '
           if (desired === 'image') return /image|photo|png|jpe?g|webp/.test(accept);
           return true;
         });
+        if (compatible) {
+          const clickTarget = compatible.closest('[role="button"], button, label') || compatible.parentElement || compatible;
+          const targetRect = clickTarget.getBoundingClientRect();
+          if (targetRect.width > 0 && targetRect.height > 0) return clickTarget;
+        }
         return compatible ? (compatible.parentElement || compatible) : null;
       };
       const deadline = Date.now() + (payload.timeoutMs || 6000);
@@ -3027,48 +3034,77 @@ async function stageAttachmentViaFileChooser(tabId, point, attachmentOrList, { p
     let chooserParams = null;
 
     if (preferDirectInput) {
-      const evaluated = await chrome.debugger.sendCommand(target, 'Runtime.evaluate', {
-        expression: `(() => {
-          const desiredKind = ${JSON.stringify(mediaKind)};
-          const visibleComposerControl = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
-            .filter((element) => {
-              const rect = element.getBoundingClientRect();
-              const label = String(element.getAttribute('aria-label') || '').toLowerCase();
-              return rect.width > 0 && rect.height > 0 && !label.includes('search') && !label.includes('tìm kiếm');
-            })
-            .sort((left, right) => {
-              const leftRect = left.getBoundingClientRect();
-              const rightRect = right.getBoundingClientRect();
-              return (rightRect.width * rightRect.height) - (leftRect.width * leftRect.height);
-            })[0] || null;
-          const composerScope = visibleComposerControl?.closest('[role="main"]') || document;
-          const newestFirst = [...composerScope.querySelectorAll('input[type="file"]')].reverse();
-          const acceptsKind = (input) => {
-            const accept = String(input.getAttribute('accept') || '').toLowerCase();
-            if (!accept) return true;
-            if (desiredKind === 'video') return /video|mp4|mov|webm|avi|\*/.test(accept);
-            if (desiredKind === 'image') return /image|photo|png|jpe?g|webp|\*/.test(accept);
-            return true;
-          };
-          // Prefer an input that explicitly accepts the requested media kind.
-          // A generic accept="" input is only a fallback; taking it first can
-          // route MP4 into an unrelated uploader mounted elsewhere in main.
-          const explicitInput = newestFirst.find((input) => {
-            const accept = String(input.getAttribute('accept') || '').toLowerCase();
-            return Boolean(accept) && acceptsKind(input);
-          }) || null;
-          const genericInput = newestFirst.find((input) => !String(input.getAttribute('accept') || '').trim()) || null;
-          const matchingInput = explicitInput || genericInput;
-          // Never push a video into an image-only input. If Messenger has not
-          // mounted a compatible input yet, use the trusted chooser path.
-          return matchingInput || (desiredKind === 'file' ? newestFirst[0] : null);
-        })()`,
-        returnByValue: false
-      }).catch(() => null);
-      if (evaluated?.result?.objectId) chooserParams = { objectId: evaluated.result.objectId };
+      try {
+        const evaluated = await chrome.debugger.sendCommand(target, 'Runtime.evaluate', {
+          expression: `(() => {
+            const desiredKind = ${JSON.stringify(mediaKind)};
+            const visibleComposerControl = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
+              .filter((element) => {
+                const rect = element.getBoundingClientRect();
+                const label = String(element.getAttribute('aria-label') || '').toLowerCase();
+                return rect.width > 0 && rect.height > 0 && !label.includes('search') && !label.includes('tìm kiếm');
+              })
+              .sort((left, right) => {
+                const leftRect = left.getBoundingClientRect();
+                const rightRect = right.getBoundingClientRect();
+                return (rightRect.width * rightRect.height) - (leftRect.width * leftRect.height);
+              })[0] || null;
+            const composerScope = visibleComposerControl?.closest('[role="main"]') || document;
+            const newestFirst = [...composerScope.querySelectorAll('input[type="file"]')].reverse();
+            const acceptsKind = (input) => {
+              const accept = String(input.getAttribute('accept') || '').toLowerCase();
+              if (!accept) return true;
+              if (desiredKind === 'video') return /video|mp4|mov|webm|avi|\*/.test(accept);
+              if (desiredKind === 'image') return /image|photo|png|jpe?g|webp|\*/.test(accept);
+              return true;
+            };
+            // Prefer an input that explicitly accepts the requested media kind.
+            // A generic accept="" input is only a fallback; taking it first can
+            // route MP4 into an unrelated uploader mounted elsewhere in main.
+            const explicitInput = newestFirst.find((input) => {
+              const accept = String(input.getAttribute('accept') || '').toLowerCase();
+              return Boolean(accept) && acceptsKind(input);
+            }) || null;
+            const genericInput = newestFirst.find((input) => !String(input.getAttribute('accept') || '').trim()) || null;
+            const matchingInput = explicitInput || genericInput;
+            // Never push a video into an image-only input. If Messenger has not
+            // mounted a compatible input yet, use the trusted chooser path.
+            return matchingInput || (desiredKind === 'file' ? newestFirst[0] : null);
+          })()`,
+          returnByValue: false
+        }).catch(() => null);
+
+        if (evaluated?.result?.objectId && evaluated?.result?.subtype === 'node') {
+          const nodeResult = await chrome.debugger.sendCommand(target, 'DOM.requestNode', {
+            objectId: evaluated.result.objectId
+          }).catch(() => null);
+
+          if (nodeResult?.nodeId) {
+            await chrome.debugger.sendCommand(target, 'DOM.setFileInputFiles', {
+              files: paths,
+              nodeId: nodeResult.nodeId
+            });
+
+            await chrome.debugger.sendCommand(target, 'Runtime.callFunctionOn', {
+              objectId: evaluated.result.objectId,
+              functionDeclaration: `function() {
+                try {
+                  this.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                  this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                } catch (e) {}
+              }`
+            }).catch(() => null);
+
+            chooserParams = { nodeId: nodeResult.nodeId, directSuccess: true };
+          }
+        }
+      } catch (directError) {
+        console.warn('[FB Engine] Direct file input failed, falling back to file chooser dialog interception:', directError?.message || directError);
+        chooserParams = null;
+      }
     }
 
-    if (!chooserParams) {
+    if (!chooserParams?.directSuccess) {
       if (!point) {
         const pointError = new Error('Không tìm thấy icon đính kèm hoặc input file của Messenger');
         pointError.code = 'ATTACHMENT_STAGE_FAILED';
@@ -3097,19 +3133,19 @@ async function stageAttachmentViaFileChooser(tabId, point, attachmentOrList, { p
         }
         if (!chooserParams) throw error;
       }
-    }
 
-    if (!chooserParams?.backendNodeId && !chooserParams?.nodeId && !chooserParams?.objectId) {
-      throw new Error('Không xác định được input file của Messenger');
+      if (!chooserParams?.backendNodeId && !chooserParams?.nodeId && !chooserParams?.objectId) {
+        throw new Error('Không xác định được input file của Messenger');
+      }
+      await chrome.debugger.sendCommand(target, 'DOM.setFileInputFiles', {
+        files: paths,
+        ...(chooserParams.objectId
+          ? { objectId: chooserParams.objectId }
+          : chooserParams.backendNodeId
+            ? { backendNodeId: chooserParams.backendNodeId }
+            : { nodeId: chooserParams.nodeId })
+      });
     }
-    await chrome.debugger.sendCommand(target, 'DOM.setFileInputFiles', {
-      files: paths,
-      ...(chooserParams.objectId
-        ? { objectId: chooserParams.objectId }
-        : chooserParams.backendNodeId
-          ? { backendNodeId: chooserParams.backendNodeId }
-          : { nodeId: chooserParams.nodeId })
-    });
 
     if (isFileTransport) {
       const basenames = paths.map((filePath) => filePath.split(/[\\/]/).pop());
@@ -6422,12 +6458,34 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           }
 
           if (mediaUrl || isVideoMessage) {
-            const mediaRect = (mediaElement || mediaAnchor || semanticVideoElement || row).getBoundingClientRect();
-            const directionRect = historyDirectionContainer.getBoundingClientRect();
-            const relativeCenter = directionRect.width > 0
-              ? (mediaRect.left + mediaRect.width / 2 - directionRect.left) / directionRect.width
-              : 0.5;
-            const mediaOutgoing = relativeCenter >= 0.55;
+            // Priority 1: aria-label text is the most reliable direction signal.
+            let mediaOutgoing;
+            const labelSaysOutgoing = /do B\u1ea1n g\u1eedi|Tin nh\u1eafn do B\u1ea1n g\u1eedi l\u00fac|B\u1ea1n \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(effectiveLabel);
+            const labelSaysIncoming = !labelSaysOutgoing && /Tin nh\u1eafn do .+ g\u1eedi l\u00fac|Message sent by/i.test(effectiveLabel);
+            if (labelSaysOutgoing) {
+              mediaOutgoing = true;
+            } else if (labelSaysIncoming) {
+              mediaOutgoing = false;
+            } else {
+              // Geometry fallback: use actual media element rect, not the full-row wrapper.
+              // The row wrapper (div[role="article"]) is always 100% wide so its center
+              // is ~50% — wrongly reads as incoming when threshold is >= 0.55.
+              const mediaRect = (mediaElement || mediaAnchor || semanticVideoElement || row).getBoundingClientRect();
+              const directionRect = historyDirectionContainer.getBoundingClientRect();
+              if (directionRect.width > 0 && mediaRect.width > 0) {
+                // For wide media elements (> 40% of container), use right edge proximity.
+                const mediaWidthRatio = mediaRect.width / directionRect.width;
+                if (mediaWidthRatio > 0.40) {
+                  const rightEdgeRatio = (mediaRect.right - directionRect.left) / directionRect.width;
+                  mediaOutgoing = rightEdgeRatio >= 0.80;
+                } else {
+                  const relativeCenter = (mediaRect.left + mediaRect.width / 2 - directionRect.left) / directionRect.width;
+                  mediaOutgoing = relativeCenter >= 0.55;
+                }
+              } else {
+                mediaOutgoing = false;
+              }
+            }
             const mediaNativeId = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id')
               || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id') || row.getAttribute('data-id') || null;
             const mediaStableId = mediaNativeId

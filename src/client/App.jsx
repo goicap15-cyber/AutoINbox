@@ -1514,11 +1514,19 @@ export default function App() {
       delivery_status: 'pending'
     };
 
-    setMessages((prev) => ({
-      ...prev,
-      // Reconcile after optimistic append: history can insert an incoming echo just before CRM adds its outgoing bubble.
-      [threadIdStr]: reconcileOutgoingTextEchoes([...(prev[threadIdStr] || []), newMsg])
-    }));
+    setMessages((prev) => {
+      const currentList = prev[threadIdStr] || [];
+      const maxSequence = currentList.reduce((max, m) => Math.max(max, Number(m?.sequence_order ?? m?.id) || 0), 0);
+      const optimisticMsg = {
+        ...newMsg,
+        sequence_order: maxSequence + 1
+      };
+      return {
+        ...prev,
+        // Reconcile after optimistic append: history can insert an incoming echo just before CRM adds its outgoing bubble.
+        [threadIdStr]: reconcileOutgoingTextEchoes([...currentList, optimisticMsg])
+      };
+    });
 
     // Socket.IO buffers outbound events during a short reconnect. The
     // extension worker is deliberately refreshed after desktop startup, and

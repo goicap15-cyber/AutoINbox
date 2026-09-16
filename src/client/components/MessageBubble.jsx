@@ -79,7 +79,11 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   // CRM sent the image separately. Hide that transport artefact.
   // Facebook can surface a transport caption as a second text bubble beside an outgoing
   // image/video. The media bubble is the canonical representation in CRM.
-  const isMediaPlaceholderText = /^\s*\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment|GIF)\]?\s*$/i.test(String(content || '').trim());
+  const isMediaPlaceholderText = (
+    /^\s*\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment|GIF)\]?\s*$/i.test(String(content || '').trim()) ||
+    /^\s*(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?(?:\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm|chiều|sáng|tối))?|\d{1,2}\s*(?:ch|sa|am|pm|chiều|sáng|tối))\s*$/i.test(String(content || '').trim()) ||
+    /^\s*(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?(?:\d{1,2}(?::\d{2})?(?:\s*(?:ch|sa|am|pm))?\s+)?\d{1,2}\s+(?:Tháng|thg)\s+\d{1,2}(?:,?\s*\d{4})?\s*$/i.test(String(content || '').trim())
+  );
   const visibleContent = (hasMedia && (isOutgoing || isMediaPlaceholderText)) ? '' : content;
   const isLikeText = (content?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(content?.trim() || '')) ||
                      (visibleContent?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(visibleContent?.trim() || ''));

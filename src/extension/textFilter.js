@@ -61,12 +61,16 @@
     // Accessibility / System standalone
     /^(?:Tin nhắn do|Message sent by) .+?(?:gửi lúc|at) .+?:\s*.*$/i,
     /^Nhấn Enter để gửi$/i,
+    /^(?:Bản nháp:?|Draft:?)\s*.*$/i,
     // Meta Business Suite lead-activity UI, not a message from the customer.
     /^Đã tự động tạo hoạt động về khách hàng tiềm năng cho bạn dựa trên cuộc trò chuyện này[.!…]*$/i,
 
-    // Standalone Timestamps (e.g. 09:09, 16:36 T5, 18:00 T5, 12:30 AM, T5, CN)
-    /^\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM))?$/i,
+    // Standalone Timestamps (e.g. 09:09, 16:36 T5, 18:00 T5, 12:30 AM, 20ch, 19ch, 8sa, 20:00ch, T5, CN)
+    /^(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM|ch|sa|chiều|sáng|tối))?$/i,
+    /^(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?\d{1,2}\s*(?:ch|sa|am|pm|chiều|sáng|tối)$/i,
     /^(?:T[2-7]|CN)$/i,
+    // Short date/time separator headers (e.g. "53 9 Tháng 9, 2026", "9 Tháng 9", "Thứ Năm, 9 Tháng 9")
+    /^(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?(?:\d{1,2}(?::\d{2})?(?:\s*(?:ch|sa|am|pm))?\s+)?\d{1,2}\s+(?:Tháng|thg)\s+\d{1,2}(?:,?\s*\d{4})?$/i,
 
     // Video player duration timestamps (e.g. 0:00 / 0:19, 00:00 / 01:23, 0:03, 0:19)
     /^\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}$/i,
@@ -147,7 +151,10 @@
     text = text.replace(/(?<=\S)(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen)$/i, '').trim();
 
     // 3. Strip leading/trailing timestamps ONLY if isolated/standalone on line
-    text = text.replace(/^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?\s*$/i, '').replace(/(?:\n|\r)\s*\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i, '').trim();
+    text = text.replace(/^(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?(?:\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM|ch|sa|chiều|sáng|tối))?|\d{1,2}\s*(?:ch|sa|am|pm|chiều|sáng|tối)|T[2-7]|CN)\s*$/i, '')
+      .replace(/(?:\n|\r|\s{2,})\s*(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?(?:\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM|ch|sa|chiều|sáng|tối))?|\d{1,2}\s*(?:ch|sa|am|pm|chiều|sáng|tối)|T[2-7]|CN)$/i, '').trim();
+    text = text.replace(/^(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?(?:\d{1,2}(?::\d{2})?(?:\s*(?:ch|sa|am|pm))?\s+)?\d{1,2}\s+(?:Tháng|thg)\s+\d{1,2}(?:,?\s*\d{4})?\s*$/i, '')
+      .replace(/(?:\n|\r|\s{2,})\s*(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?(?:\d{1,2}(?::\d{2})?(?:\s*(?:ch|sa|am|pm))?\s+)?\d{1,2}\s+(?:Tháng|thg)\s+\d{1,2}(?:,?\s*\d{4})?$/i, '').trim();
     text = text.replace(/^[:\s]+/, '').trim();
 
     // 4. Strip video player duration timestamps (e.g. 0:00 / 0:19)

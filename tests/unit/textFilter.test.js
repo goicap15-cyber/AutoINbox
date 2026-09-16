@@ -82,9 +82,18 @@ test('rejects the Business Suite "add a personalized message" CTA leaking in as 
   assert.equal(clean('Thêm tin nhắn được cá nhân hoá.'), '');
 });
 
-test('rejects the short date-only separator "20 Tháng 4" leaking in as a fake message (2026-08-20 live report)', () => {
-  assert.equal(clean('20 Tháng 4'), '');
-  assert.equal(clean('6 Tháng 8, 2026'), '');
-  assert.equal(clean('13:52 6 Tháng 8, 2026'), '');
+test('rejects standalone and trailing time/date noise fragments', () => {
+  assert.equal(clean('20ch'), '');
+  assert.equal(clean('19ch'), '');
+  assert.equal(clean('8sa'), '');
+  assert.equal(clean('20:00ch'), '');
+  assert.equal(clean('53 9 Tháng 9'), '');
+  assert.equal(clean('53 9 Tháng 9, 2026'), '');
+  assert.equal(clean('Thứ Năm, 9 Tháng 9'), '');
+  assert.equal(clean('9 Tháng 9'), '');
+  assert.equal(clean('9 thg 9'), '');
+  assert.equal(clean('Hello world  20ch'), 'Hello world');
+  assert.equal(clean('Hello world\n20ch'), 'Hello world');
 });
+
 

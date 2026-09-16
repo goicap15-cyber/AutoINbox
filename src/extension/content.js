@@ -209,7 +209,7 @@
               thread_id: netMsg.thread_id,
               fb_message_id: netMsg.fb_message_id || null,
               sender_id: sender_id,
-              sender_name: netMsg.sender_name || (is_outgoing ? 'BÃ¡ÂºÂ¡n' : ''),
+              sender_name: netMsg.sender_name || (is_outgoing ? 'Bạn' : ''),
               content: netMsg.content,
               is_outgoing: is_outgoing,
               source: 'network_interceptor',
@@ -615,15 +615,15 @@
 
   const EXCLUDED_PATTERNS = [
     /Messenger/i,
-    /CuÃ¡Â»â„¢c gÃ¡Â»Âi video/i,
-    /CuÃ¡Â»â„¢c gÃ¡Â»Âi thoÃ¡ÂºÂ¡i/i,
-    /BÃ¡ÂºÂ¡n Ã„â€˜ÃƒÂ£ bÃ¡Â»Â lÃ¡Â»Â¡ cuÃ¡Â»â„¢c gÃ¡Â»Âi/i,
+    /Cuộc gọi video/i,
+    /Cuộc gọi thoại/i,
+    /Bạn đã bỏ lỡ cuộc gọi/i,
     /Meta/i,
-    /Trang chÃ¡Â»Â§/i,
+    /Trang chủ/i,
     /Watch/i,
     /Marketplace/i,
-    /NhÃƒÂ³m$/i,
-    /ThÃƒÂ´ng bÃƒÂ¡o$/i,
+    /Nhóm$/i,
+    /Thông báo$/i,
   ];
 
   // Shared bubble-text cleanup, extracted so both the per-bubble text loop
@@ -635,17 +635,17 @@
     if (filter?.cleanMessageText) {
       cleanText = filter.cleanMessageText(cleanText);
     } else {
-      cleanText = cleanText.replace(/^(?:NhÃ¡ÂºÂ­p,\s*)?Tin nhÃ¡ÂºÂ¯n do [\s\S]+? gÃ¡Â»Â­i lÃƒÂºc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:ch)?:|\b\d{1,2}:\d{2}(?:ch)?\s+)\s*/i, '').trim();
-      cleanText = cleanText.replace(/^NhÃ¡ÂºÂ­p,\s*/i, '').trim();
+      cleanText = cleanText.replace(/^(?:Nhập,\s*)?Tin nhắn do [\s\S]+? gửi lúc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:ch)?:|\b\d{1,2}:\d{2}(?:ch)?\s+)\s*/i, '').trim();
+      cleanText = cleanText.replace(/^Nhập,\s*/i, '').trim();
       cleanText = cleanText.replace(/^[:\s]+/, '').trim();
-      const sentEmojiMatch = cleanText.match(/^[^,\n]{1,80}\s+(?:Ã„â€˜ÃƒÂ£ gÃ¡Â»Â­i|sent),\s*(.+)$/i);
+      const sentEmojiMatch = cleanText.match(/^[^,\n]{1,80}\s+(?:đã gửi|sent),\s*(.+)$/i);
       if (sentEmojiMatch) {
         const payload = sentEmojiMatch[1].trim();
-        if (payload && !/[A-Za-zÃƒâ‚¬-Ã¡Â»Â¹0-9]/.test(payload)) cleanText = payload;
+        if (payload && !/[A-Za-zÀ-ỹ0-9]/.test(payload)) cleanText = payload;
       }
-      cleanText = cleanText.replace(/(?:\n|\r|\s{2,})(?:Ã„ÂÃƒÂ£ gÃ¡Â»Â­i|Ã„ÂÃƒÂ£ nhÃ¡ÂºÂ­n|Ã„ÂÃƒÂ£ xem|Sent|Delivered|Seen|NhÃ¡ÂºÂ¥n Enter Ã„â€˜Ã¡Â»Æ’ gÃ¡Â»Â­i)\s*$/i, '').trim();
-      cleanText = cleanText.replace(/(?<=\S)(?:Ã„ÂÃƒÂ£ gÃ¡Â»Â­i|Ã„ÂÃƒÂ£ nhÃ¡ÂºÂ­n|Ã„ÂÃƒÂ£ xem|Sent|Delivered|Seen)$/i, '').trim();
-      cleanText = cleanText.replace(/^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?\s*$/i, '').replace(/(?:\n|\r)\s*\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i, '').trim();
+      cleanText = cleanText.replace(/(?:\n|\r|\s{2,})(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen|Nhấn Enter để gửi)\s*$/i, '').trim();
+      cleanText = cleanText.replace(/^(?:\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM|ch|sa|chiều|sáng|tối))?|\d{1,2}\s*(?:ch|sa|am|pm|chiều|sáng|tối)|T[2-7]|CN)\s*$/i, '').replace(/(?:\n|\r)\s*(?:\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM|ch|sa|chiều|sáng|tối))?|\d{1,2}\s*(?:ch|sa|am|pm|chiều|sáng|tối)|T[2-7]|CN)$/i, '').trim();
+      cleanText = cleanText.replace(/^\d{1,2}(?::\d{2})?\s+\d{1,2}\s+(?:Tháng|thg)\s+\d{1,2}(?:,?\s*\d{4})?\s*$/i, '').trim();
       cleanText = cleanText.replace(/^[:\s]+/, '').trim();
     }
     return cleanText;
@@ -691,11 +691,24 @@
 
 
   function isClockMinuteFragment(value, label) {
-    const normalized = String(value || '').trim().replace(/\s+/g, '');
-    const fragment = normalized.match(/^(\d{1,2})(?:sÃƒÂ¡ng|chiÃ¡Â»Âu|tÃ¡Â»â€˜i|am|pm|sa|ch)?$/i);
+    if (!value || typeof value !== 'string') return false;
+    const normalized = value.trim();
+    if (/^\d{1,2}(?::\d{2})?\s*(?:ch|sa|am|pm|chiều|sáng|tối)$/i.test(normalized)) return true;
+    if (/^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i.test(normalized)) return true;
+    if (/^\d{1,2}(?::\d{2})?\s+\d{1,2}\s+(?:Tháng|thg)\s+\d{1,2}(?:,?\s*\d{4})?$/i.test(normalized)) return true;
+
+    const fragment = normalized.replace(/\s+/g, '').match(/^(\d{1,2})(?:sáng|chiều|tối|am|pm|sa|ch)?$/i);
     if (!fragment) return false;
-    const match = String(label || '').match(/\b\d{1,2}:(\d{2})\b/);
-    return !!match && Number(fragment[1]) === Number(match[1]);
+    if (label) {
+      const timeMatch = String(label).match(/\b(\d{1,2}):(\d{2})\b/);
+      if (timeMatch) {
+        const valNum = Number(fragment[1]);
+        if (valNum === Number(timeMatch[1]) || valNum === Number(timeMatch[2])) return true;
+      }
+      const hourMatch = String(label).match(/\b(\d{1,2})\s*(?:ch|sa|am|pm|chiều|sáng|tối)\b/i);
+      if (hourMatch && Number(fragment[1]) === Number(hourMatch[1])) return true;
+    }
+    return false;
   }
 
 
@@ -784,7 +797,7 @@
     // static markup set at creation time, not hydrated later, so it doesn't
     // have this race and is sufficient proof on its own that this is a real
     // message row, not composer/avatar/unrelated UI.
-    const OPEN_PHOTO_ALT_PATTERN = /^(?:MÃ¡Â»Å¸ Ã¡ÂºÂ£nh|Xem Ã¡ÂºÂ£nh|Open photo|View photo)$/i;
+    const OPEN_PHOTO_ALT_PATTERN = /^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i;
     const OPEN_VIDEO_LABEL_PATTERN = /(?:ph\u00e1t|m\u1edf|xem|play|open|watch)?\s*video/i;
     let isPhotoMessage = false;
     let isVideoMessage = false;
@@ -929,6 +942,201 @@
       });
     }
 
+        let combined = [];
+        for (const row of nestedRows) {
+          combined = combined.concat(parseMessagesFromDOMNode(row, isRealtime));
+        }
+        return combined;
+      }
+    }
+    const messageRow = directRowMatch || node;
+    let rowEmojiContent = extractBubbleEmoji(messageRow);
+
+    // â€”â€” STALE DOM GUARD (Self-Tagging Marker) â€”â€”
+    if (messageRow && messageRow.dataset) {
+      const currentUrlThreadId = extractThreadIdFromUrl();
+      const existingThreadId = messageRow.dataset.crmThreadId;
+      if (existingThreadId && currentUrlThreadId && existingThreadId !== currentUrlThreadId) {
+        return []; // BÃ¡Â»Â  qua vÃƒÂ¬ Ã„â€˜ÃƒÂ¢y lÃƒÂ  DOM cÃ¡Â»Â§a thread cÃ…Â©!
+      }
+      if (currentUrlThreadId) {
+        messageRow.dataset.crmThreadId = currentUrlThreadId;
+      }
+    }
+
+    // â€”â€” Media detection (áº£nh gá»­i/nháº­n trÃªn Messenger cÃ¡ÂºÂ¥ nhÃ¢n) â€”â€”
+    // Live DOM inspection (2026-08-13, real sent-photo message) found the
+    // photo <img>'s alt is always the fixed UI action label "MÃ¡Â»Å¸ Ã¡ÂºÂ£nh" ("Open
+    // photo") - not empty, and not a description. An avatar/read-receipt
+    // <img> next to a bubble always carries the contact's real name instead
+    // (e.g. alt="Thu Oanh Nguyen" or "Thu Oanh Nguyen Ã„â€˜ÃƒÂ£ xem lÃƒÂºc..."), so
+    // matching on this fixed label (rather than "alt is empty", which does
+    // NOT hold here) reliably tells a sent/received photo apart from an
+    // avatar without ever matching a real name. The <img> src for a
+    // just-sent photo is often an inline `data:image/...;base64,...`
+    // thumbnail rather than a real fbcdn/scontent URL - only forward src as
+    // media_url when it's a real CDN link (an unusable, multi-KB data: URI
+    // has no value to the backend, which never uses this value for
+    // confirmation matching - only media_type - and would just waste a
+    // failed download attempt in MediaDownloader).
+    //
+    // Checked BEFORE the aria-label-based hasMessageLabel gate below and
+    // used to bypass it entirely when a photo is found: live testing showed
+    // an image-only row's accessibility label (the "Tin nhÃ¡ÂºÂ¯n do ... gÃ¡Â»Â­i
+    // lÃƒÂºc" helper text) is not always present yet at the exact moment
+    // MutationObserver's callback fires - React appears to hydrate it a
+    // beat after inserting the <img> itself - so gating on that label made
+    // every real-time photo detection silently miss (return []) while the
+    // *separate*, later-arriving caption-only row (which has its own label
+    // already attached) went through fine. The <img alt="MÃ¡Â»Å¸ Ã¡ÂºÂ£nh"> itself is
+    // static markup set at creation time, not hydrated later, so it doesn't
+    // have this race and is sufficient proof on its own that this is a real
+    // message row, not composer/avatar/unrelated UI.
+    const OPEN_PHOTO_ALT_PATTERN = /^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i;
+    const OPEN_VIDEO_LABEL_PATTERN = /(?:ph\u00e1t|m\u1edf|xem|play|open|watch)?\s*video/i;
+    let isPhotoMessage = false;
+    let isVideoMessage = false;
+    let mediaUrl = null;
+    const rowImgs = messageRow.querySelectorAll?.('img[src]') || [];
+    for (const img of rowImgs) {
+      if (img.closest(COMPOSER_EXCLUDE)) continue;
+      const src = img.getAttribute('src') || '';
+      const alt = (img.getAttribute('alt') || '').trim();
+      if (src && OPEN_PHOTO_ALT_PATTERN.test(alt)) {
+        isPhotoMessage = true;
+        mediaUrl = /^https?:\/\/.*(?:fbcdn\.net|scontent)/i.test(src) ? src : null;
+        break;
+      }
+    }
+
+    // Some Messenger builds omit the Open-photo alt text while the image is
+    // hydrating. A large visible image inside one message row is still media;
+    // avatars, receipts and emoji stay below this size threshold.
+    if (!isPhotoMessage) {
+      const largeImage = Array.from(rowImgs).find((img) => {
+        if (img.closest(COMPOSER_EXCLUDE)) return false;
+        const rect = img.getBoundingClientRect?.();
+        const width = Number(rect?.width || img.naturalWidth || 0);
+        const height = Number(rect?.height || img.naturalHeight || 0);
+        return width >= 96 && height >= 96;
+      });
+      if (largeImage) {
+        const source = largeImage.currentSrc || largeImage.getAttribute('src') || '';
+        isPhotoMessage = true;
+        mediaUrl = /^(?:https?:\/\/|data:image\/)/i.test(source) ? source : null;
+      }
+    }
+
+    const rowVideos = messageRow.querySelectorAll?.('video') || [];
+    for (const video of rowVideos) {
+      if (video.closest(COMPOSER_EXCLUDE)) continue;
+      const label = (video.getAttribute('aria-label') || video.getAttribute('title') || '').trim();
+      const sourceCandidates = [
+        video.currentSrc,
+        video.getAttribute('src'),
+        ...Array.from(video.querySelectorAll('source[src]')).map((source) => source.getAttribute('src'))
+      ].filter(Boolean);
+      const source = sourceCandidates.find((candidate) => /^https?:\/\//i.test(candidate)) || sourceCandidates[0] || '';
+      if (source || OPEN_VIDEO_LABEL_PATTERN.test(label) || video.closest('[aria-label*="video" i]')) {
+        isVideoMessage = true;
+        // A blob URL only works inside Facebook, and poster is not a playable
+        // video. Wait for a durable CDN URL instead of poisoning the CRM row.
+        const poster = video.poster || video.getAttribute('poster') || '';
+        // A performance entry belongs to the page, not to this message row.
+        // Reusing the newest entry assigned one customer's video to several
+        // different rows. Only row-scoped sources/posters are safe here.
+        mediaUrl = /^https?:\/\//i.test(source)
+          ? source
+          : (/^(?:https?:\/\/|data:image\/)/i.test(poster) ? poster : null);
+        break;
+      }
+    }
+    if (!isVideoMessage) {
+      const videoControl = Array.from(messageRow.querySelectorAll?.('[aria-label], a[href]') || []).find((element) => {
+        const label = (element.getAttribute('aria-label') || '').trim();
+        const href = element.getAttribute('href') || '';
+        return OPEN_VIDEO_LABEL_PATTERN.test(label) || /\/(?:watch|videos|reel)\//i.test(href) || /\.mp4(?:\?|$)/i.test(href);
+      });
+      if (videoControl) {
+        isVideoMessage = true;
+        const href = videoControl.href || videoControl.getAttribute('href') || '';
+        mediaUrl = /^https?:\/\/.*\.mp4(?:\?|$)/i.test(href) ? href : null;
+      }
+    }
+    if (!isVideoMessage) {
+      const semanticVideo = Array.from(messageRow.querySelectorAll?.('[role="img"]') || []).find((element) => {
+        if (element.closest(COMPOSER_EXCLUDE)) return false;
+        const label = String(element.getAttribute('aria-label') || element.getAttribute('title') || '').trim();
+        return OPEN_VIDEO_LABEL_PATTERN.test(label) && !/(?:cu\u1ed9c g\u1ecdi|video call|call video)/i.test(label);
+      });
+      if (semanticVideo) isVideoMessage = true;
+    }
+
+    const rowAriaLabel = messageRow.getAttribute?.('aria-label') || '';
+    const childMsgEl = !rowAriaLabel ? messageRow.querySelector?.('[aria-label*="Tin nhÃ¡ÂºÂ¯n do"], [aria-label*="Message sent"]') : null;
+    const effectiveLabel = rowAriaLabel || (childMsgEl?.getAttribute?.('aria-label') || '');
+
+    const hasMessageLabel = /Tin nhÃ¡ÂºÂ¯n do .+ gÃ¡Â»Â­i lÃƒÂºc|Message sent by/i.test(effectiveLabel);
+    // [data-message-id] checked first: live DOM inspection (spec 043) found it's
+    // the reliable current-structure marker, set on the row at insertion time -
+    // unlike the aria-label above, which React hydrates a beat later. Checking
+    // it first means a message row already has a STABLE native_id on the very
+    // first (label-not-yet-hydrated) MutationObserver pass, not just the second.
+    const nativeIdEl = messageRow.querySelector?.('[data-message-id], [data-id], [id^="mid."]');
+    // Facebook commonly puts the native id on messageRow itself during the
+    // first render. querySelector() above only searches descendants; include
+    // the row so the first incoming message is captured immediately instead
+    // of waiting for a second message to trigger a React re-render.
+    const hasNativeId = !!nativeIdEl || messageRow.hasAttribute?.('data-message-id') ||
+      messageRow.hasAttribute?.('data-id') || String(messageRow.id || '').startsWith('mid.');
+
+    if (!hasMessageLabel && !hasNativeId && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return []; // KhÃƒÂ´ng phÃ¡ÂºÂ£i message row
+
+    const rawText = (node.textContent || '').trim();
+    if (!isPhotoMessage && !isVideoMessage) {
+      if (!rawText && !rowEmojiContent) return [];
+
+      for (const pat of EXCLUDED_PATTERNS) {
+        if (pat.test(rawText)) return [];
+      }
+    }
+
+    // â€”â€” TÃƒÂ¬m tÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ leaf bubbles â€”â€”
+    const searchRoot = isRealtime ? node : messageRow;
+    const allBubbles = searchRoot.querySelectorAll?.('div[dir="auto"], span[dir="auto"]');
+    const leafBubbles = [];
+    if (allBubbles && allBubbles.length > 0) {
+      for (const b of allBubbles) {
+        if (b.closest(COMPOSER_EXCLUDE)) continue;
+        if (!b.querySelector('div[dir="auto"], span[dir="auto"]')) {
+          leafBubbles.push(b);
+        }
+      }
+    }
+
+    if (leafBubbles.length === 0) {
+      if (searchRoot.matches?.('div[dir="auto"], span[dir="auto"]') && !searchRoot.querySelector('div[dir="auto"], span[dir="auto"]')) {
+        if (!searchRoot.closest(COMPOSER_EXCLUDE)) {
+          leafBubbles.push(searchRoot);
+        }
+      }
+    }
+
+    let finalBubbles = leafBubbles;
+    if (isRealtime) {
+      // Filter visual bubbles to avoid clones, hidden texts, or accessibility wrappers
+      finalBubbles = leafBubbles.filter(b => {
+        const rects = b.getClientRects();
+        if (!rects || rects.length === 0) return false;
+        const rect = b.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return false;
+        // KiÃ¡Â»Æ’m tra xem cÃƒÂ³ bÃ¡Â»â€¹ Ã¡ÂºÂ©n qua CSS khÃƒÂ´ng
+        const style = window.getComputedStyle(b);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        return true;
+      });
+    }
+
     if (finalBubbles.length === 0 && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return [];
 
     let sender_name = '';
@@ -937,21 +1145,21 @@
     const contactNameEl = document.querySelector('header h1, header h2, [role="main"] h1, [role="main"] h2, span[aria-level="1"]');
     const contactNameStr = contactNameEl ? contactNameEl.textContent.trim() : '';
 
-    const isMissedCallContent = /nhÃ¡Â»Â¡|bÃ¡Â»Â lÃ¡Â»Â¡|missed/i.test(effectiveLabel || (node && node.textContent) || '');
+    const isMissedCallContent = /nhỡ|bỏ lỡ|missed/i.test(effectiveLabel || (node && node.textContent) || '');
 
     if (isMissedCallContent) {
       is_outgoing = false;
       sender_name = contactNameStr || 'Khách hàng';
-    } else if (/do BÃ¡ÂºÂ¡n gÃ¡Â»Â­i|Tin nhÃ¡ÂºÂ¯n do BÃ¡ÂºÂ¡n gÃ¡Â»Â­i lÃƒÂºc|BÃ¡ÂºÂ¡n Ã„â€˜ÃƒÂ£ gÃ¡Â»Â­i|sent by you|You sent|Message sent by you/i.test(effectiveLabel)) {
+    } else if (/do Bạn gửi|Tin nhắn do Bạn gửi lúc|Bạn đã gửi|sent by you|You sent|Message sent by you/i.test(effectiveLabel)) {
       is_outgoing = true;
-      sender_name = 'BÃ¡ÂºÂ¡n';
+      sender_name = 'Bạn';
     } else {
-      const nameMatch = effectiveLabel.match(/Tin nhÃ¡ÂºÂ¯n do ([^]+?) gÃ¡Â»Â­i lÃƒÂºc/i) || effectiveLabel.match(/Message sent by ([^]+?) at/i);
+      const nameMatch = effectiveLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i) || effectiveLabel.match(/Message sent by ([^]+?) at/i);
       if (nameMatch) {
         const rawSender = nameMatch[1].trim();
-        if (/^(?:BÃ¡ÂºÂ¡n|You)$/i.test(rawSender)) {
+        if (/^(?:Bạn|You)$/i.test(rawSender)) {
           is_outgoing = true;
-          sender_name = 'BÃ¡ÂºÂ¡n';
+          sender_name = 'Bạn';
         } else {
           is_outgoing = false;
           sender_name = rawSender;
@@ -969,21 +1177,45 @@
           sender_name = contactNameStr;
         } else {
           const mainEl = document.querySelector('div[role="main"]');
-          const targetNode = messageRow || node;
+          // For media messages, measure the actual media element (video/img) instead of
+          // the full-width article wrapper. A div[role="article"] stretches 100% of the
+          // container so its center is always ~50%, falling below the 55% threshold and
+          // wrongly classifying every outgoing video as incoming.
+          let targetNode = messageRow || node;
+          if (isVideoMessage || isPhotoMessage) {
+            const videoEl = messageRow.querySelector?.('video');
+            const imgEl = isPhotoMessage ? Array.from(messageRow.querySelectorAll?.('img[src]') || []).find((img) => {
+              const rect = img.getBoundingClientRect?.();
+              return Number(rect?.width || 0) >= 72 && Number(rect?.height || 0) >= 72;
+            }) : null;
+            const mediaEl = videoEl || imgEl;
+            if (mediaEl) {
+              const mediaRect = mediaEl.getBoundingClientRect();
+              if (mediaRect.width > 0 && mediaRect.height > 0) targetNode = mediaEl;
+            }
+          }
           if (mainEl && targetNode && typeof targetNode.getBoundingClientRect === 'function') {
             const mainRect = mainEl.getBoundingClientRect();
             const nodeRect = targetNode.getBoundingClientRect();
             if (mainRect.width > 0 && nodeRect.width > 0) {
-              const nodeCenter = nodeRect.left + nodeRect.width / 2;
-              const mainCenter = mainRect.left + mainRect.width * 0.55;
-              is_outgoing = nodeCenter > mainCenter;
+              // For wide media (> 40% of container), use right edge proximity rather than
+              // center — outgoing media aligns to the right margin of the chat column.
+              const isWideMedia = (isVideoMessage || isPhotoMessage) && nodeRect.width / mainRect.width > 0.40;
+              if (isWideMedia) {
+                const rightEdgeRatio = (nodeRect.right - mainRect.left) / mainRect.width;
+                is_outgoing = rightEdgeRatio >= 0.80;
+              } else {
+                const nodeCenter = nodeRect.left + nodeRect.width / 2;
+                const mainCenter = mainRect.left + mainRect.width * 0.55;
+                is_outgoing = nodeCenter > mainCenter;
+              }
             } else {
               is_outgoing = false;
             }
           } else {
             is_outgoing = false;
           }
-          sender_name = is_outgoing ? 'BÃ¡ÂºÂ¡n' : contactNameStr;
+          sender_name = is_outgoing ? 'Bạn' : contactNameStr;
         }
       }
     }
@@ -1008,7 +1240,7 @@
           sender_name = contactNameStr || 'Khách hàng';
         } else if (relativeCenter >= 0.55) {
           is_outgoing = true;
-          sender_name = 'BÃ¡ÂºÂ¡n';
+          sender_name = 'Bạn';
         }
       }
     }
@@ -1023,10 +1255,10 @@
     // Some Messenger builds expose no semantic title for a received Like, but
     // the message row still contains its SVG and a dir=auto timestamp minute.
     // In that exact shape the minute (e.g. 55) must become the Like glyph.
-    if (!rowEmojiContent && hasOnlyClockFragments && messageRow.querySelector?.('svg')) rowEmojiContent = 'Ã°Å¸â€˜Â';
+    if (!rowEmojiContent && hasOnlyClockFragments && messageRow.querySelector?.('svg')) rowEmojiContent = '👍';
     if (rowEmojiContent && (finalBubbles.length === 0 || hasOnlyClockFragments) && !isPhotoMessage && !isVideoMessage) {
       return [{
-        sender_name: sender_name || (is_outgoing ? 'BÃ¡ÂºÂ¡n' : ''),
+        sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
         content: rowEmojiContent,
         is_outgoing,
         native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
@@ -1049,7 +1281,7 @@
     // per-bubble loop below as its own independent text event, unaffected.
     if (isPhotoMessage || isVideoMessage) {
       let caption = '';
-      const MEDIA_PLACEHOLDER_RE = /^\[?(?:Ã¡ÂºÂ¢nh|Photo|Image|Video|TÃ¡Â»â€¡p|File|MÃ¡Â»Å¸ Ã¡ÂºÂ£nh|Xem Ã¡ÂºÂ£nh|Open photo|View photo|Attachment)\]?$/i;
+      const MEDIA_PLACEHOLDER_RE = /^\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Mở ảnh|Xem ảnh|Open photo|View photo|Attachment)\]?$/i;
       for (const bubble of finalBubbles) {
         const cleaned = cleanBubbleText(bubble.textContent);
         if (!cleaned || cleaned.length > 1000) continue;
@@ -1060,7 +1292,7 @@
         break;
       }
       return [{
-        sender_name: sender_name || (is_outgoing ? 'BÃ¡ÂºÂ¡n' : ''),
+        sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
         content: caption || '',
         is_outgoing,
         native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
@@ -1099,7 +1331,7 @@
       }
 
       results.push({
-        sender_name: sender_name || (is_outgoing ? 'BÃ¡ÂºÂ¡n' : ''),
+        sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
         content: cleanText,
         is_outgoing,
         native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
@@ -1133,7 +1365,7 @@
           // fbcdn URLs. Only accept profile-sized images; otherwise a customer
           // attachment can overwrite the contact avatar and later disappear.
           const isProfileSized = width > 0 && height > 0 && width <= 80 && height <= 80;
-          const isMessageMedia = /open photo|view photo|mÃ¡Â»Å¸ Ã¡ÂºÂ£nh|xem Ã¡ÂºÂ£nh|video/.test(label);
+          const isMessageMedia = /open photo|view photo|mở ảnh|xem ảnh|video/.test(label);
           if (isProfileSized && !isMessageMedia && src && !src.includes('transparent') && !src.includes('blank') && (src.includes('fbcdn.net') || src.includes('scontent') || src.includes('platform.facebook.com')) && src.length > 50) return src;
         }
       }
@@ -1388,7 +1620,7 @@
         let tsMs = null;
         let tsSource = 'realtime_fallback';
         if (parsed.effective_label) {
-          // Parse: "Tin nhÃ¡ÂºÂ¯n do BÃ¡ÂºÂ¡n gÃ¡Â»Â­i lÃƒÂºc 15:20" hoÃ¡ÂºÂ·c "15:20"
+          // Parse: "Tin nhÃ¡ÂºÂ¯n do Bạn gÃ¡Â»Â­i lÃƒÂºc 15:20" hoÃ¡ÂºÂ·c "15:20"
           const timeMatch = parsed.effective_label.match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
           if (timeMatch) {
             let hours = parseInt(timeMatch[1], 10);
@@ -1792,7 +2024,7 @@
                 thread_id: threadId,
                 fb_message_id: callId,
                 sender_id: call.isOutgoing ? capturedUserId : null,
-                sender_name: call.isOutgoing ? 'BÃ¡ÂºÂ¡n' : '',
+                sender_name: call.isOutgoing ? 'Bạn' : '',
                 content: call.displayContent,
                 is_outgoing: call.isOutgoing,
                 has_row_avatar: call.hasRowAvatar,

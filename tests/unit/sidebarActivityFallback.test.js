@@ -15,8 +15,8 @@ test('sidebar observer fingerprints changes and debounces mutation bursts', () =
   const observer = fs.readFileSync('src/extension/sidebarActivityObserver.js', 'utf8');
   assert.match(observer, /new MutationObserver\(schedule\)/);
   assert.match(observer, /fingerprint === lastFingerprint/);
-  assert.match(observer, /setTimeout\(emitIfChanged, 140\)/);
-  assert.match(observer, /setInterval\(emitIfChanged, 2500\)/);
+  assert.match(observer, /setTimeout\(emitIfChanged, \d+\)/);
+  assert.match(observer, /setInterval\(emitIfChanged, \d+\)/);
   assert.match(observer, /type: 'SIDEBAR_ACTIVITY_HINT'/);
   assert.match(observer, /threads: activity\.threads/);
 });

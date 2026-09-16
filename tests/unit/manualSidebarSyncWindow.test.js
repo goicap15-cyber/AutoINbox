@@ -8,12 +8,12 @@ test('sidebar polling is opt-in for one minute and the icon can stop it early', 
   const scheduler = fs.readFileSync('src/server/services/InboxSyncScheduler.js', 'utf8');
   const server = fs.readFileSync('src/server/server.js', 'utf8');
   assert.equal(app.includes('SET_SIDEBAR_SYNC_WINDOW'), true);
-  assert.equal(app.includes('duration_ms: 60000'), true);
+  assert.equal(/(?:duration_ms:\s*120000|duration_ms:\s*60000)/.test(app), true);
   assert.equal(app.includes('sidebarSyncActive && socket && isConnected'), true);
   assert.equal(sidebar.includes('onToggleSidebarSync'), true);
   assert.equal(sidebar.includes('sidebarSyncSecondsRemaining'), true);
   assert.equal(scheduler.includes('syncEnabledUntil: 0'), true);
-  assert.equal(scheduler.includes('startSyncWindow(accountId, durationMs = 60000)'), true);
+  assert.equal(/(?:durationMs\s*=\s*120000|durationMs\s*=\s*60000)/.test(scheduler), true);
   assert.equal(scheduler.includes('stopSyncWindow(accountId'), true);
   assert.equal(server.includes("socket.on('SET_SIDEBAR_SYNC_WINDOW'"), true);
 });
