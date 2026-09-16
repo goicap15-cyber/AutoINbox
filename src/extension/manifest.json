@@ -31,9 +31,7 @@
     "https://*.facebook.com/*",
     "https://*.messenger.com/*",
     "http://localhost/*",
-    "ws://localhost/*",
-    "http://127.0.0.1/*",
-    "ws://127.0.0.1/*"
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "background.js"

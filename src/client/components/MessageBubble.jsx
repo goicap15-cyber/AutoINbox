@@ -79,7 +79,8 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   // CRM sent the image separately. Hide that transport artefact.
   // Facebook can surface a transport caption as a second text bubble beside an outgoing
   // image/video. The media bubble is the canonical representation in CRM.
-  const visibleContent = isOutgoing && hasMedia ? '' : content;
+  const isMediaPlaceholderText = /^\s*\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment|GIF)\]?\s*$/i.test(String(content || '').trim());
+  const visibleContent = (hasMedia && (isOutgoing || isMediaPlaceholderText)) ? '' : content;
   const isLikeText = (content?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(content?.trim() || '')) ||
                      (visibleContent?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(visibleContent?.trim() || ''));
   const isQuickLike = !isCallMessage && !isUnsent && isLikeText;

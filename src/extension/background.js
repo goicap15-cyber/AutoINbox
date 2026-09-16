@@ -1965,23 +1965,33 @@ async function confirmPersonalAttachmentFromRenderedBubble({ tabId, threadId, ac
   while (Date.now() < deadline) {
     const result = await chrome.scripting.executeScript({
       target: { tabId },
-      func: (expectedType, excludedIds) => {
+      func: (expectedType, excludedIds, rememberSeen) => {
         const excluded = new Set(excludedIds || []);
+        if (rememberSeen && !window.__crmSeenAttachmentIds) {
+          window.__crmSeenAttachmentIds = new Set(excluded);
+        }
+        const seen = window.__crmSeenAttachmentIds;
         const candidates = [...document.querySelectorAll('[role="row"], [role="article"]')].reverse();
         for (const row of candidates) {
           const idElement = row.matches?.('[data-message-id]') ? row : row.querySelector('[data-message-id]');
           const messageId = String(idElement?.getAttribute('data-message-id') || '');
           if (!messageId || excluded.has(messageId) || messageId.startsWith('pending_')) continue;
+          // An id Facebook assigned before this send started belongs to an
+          // older bubble still in the viewport (observed live: a mid.$..._media
+          // id confirmed two video sends 49 minutes apart). It must never be
+          // reported as this send's confirmation; wait for a genuinely new id.
+          if (seen && seen.has(messageId)) continue;
           const label = `${row.getAttribute('aria-label') || ''} ${idElement?.getAttribute('aria-label') || ''}`;
           if (!/(?:Bạn|You)(?::|\s|$)/i.test(label)) continue;
           const hasVideo = Boolean(row.querySelector('video'));
           const hasImage = Boolean(row.querySelector('img'));
           if (expectedType === 'video' ? !hasVideo : !hasImage || hasVideo) continue;
+          if (seen) seen.add(messageId);
           return { message_id: messageId, media_type: expectedType };
         }
         return null;
       },
-      args: [mediaType, [...knownIds]]
+      args: [mediaType, [...knownIds], true]
     }).then((rows) => rows?.[0]?.result || null).catch(() => null);
     if (result?.message_id) {
       sendToBackend('NEW_MESSAGE_RECEIVED', {
@@ -3076,6 +3086,7 @@ async function stageAttachmentViaFileChooser(tabId, point, attachmentOrList, { p
         chooserParams = await chooserOpened;
       } catch (error) {
         console.warn('[FB Engine] fileChooserOpened timeout, attempting DOM fallback for input[type="file"]');
+        if (mediaKind !== 'file') throw error;
         const doc = await chrome.debugger.sendCommand(target, 'DOM.getDocument').catch(() => null);
         if (doc?.root) {
           const node = await chrome.debugger.sendCommand(target, 'DOM.querySelector', {
@@ -3190,20 +3201,25 @@ async function stagePersonalMessengerAttachment(tabId, attachmentOrManifest) {
     : items.some((item) => item?.media_type === 'image' || String(item?.mime_type || '').startsWith('image/'))
       ? 'image'
       : 'file';
-  const point = await findAttachButtonCenter(tabId, 6000, preferredKind);
   try {
-    // Prefer the composer input whose accept attribute matches image/video.
-    // If Messenger has not mounted one yet, the same helper falls back to its
-    // trusted attach-control chooser path.
-    // Messenger keeps stale generic file inputs mounted after navigation.
-    // Setting an MP4 on one of those inputs can succeed at CDP level while
-    // never reaching the composer (no preview and no Send button). Videos
-    // therefore use the trusted attach-button chooser, whose backendNodeId is
-    // emitted by Chrome for the exact input Facebook opened. Keep the faster
-    // direct-input path for images, which is already live-verified.
-    await stageAttachmentViaFileChooser(tabId, point, attachmentOrManifest, {
-      preferDirectInput: preferredKind !== 'video'
-    });
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const point = await findAttachButtonCenter(tabId, 6000, preferredKind);
+      try {
+        await stageAttachmentViaFileChooser(tabId, point, attachmentOrManifest, {
+          preferDirectInput: preferredKind !== 'video'
+        });
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt >= 2) break;
+        console.warn(`[FB Engine] Attachment staging attempt ${attempt} failed (${error?.code || error?.message}); resetting composer draft and retrying once`);
+        dirtyAttachmentDraftTabs.add(tabId);
+        await isolateFailedMediaDraftBeforeSend(tabId).catch(() => null);
+        await delay(500);
+      }
+    }
+    throw lastError;
   } catch (error) {
     const wrapped = new Error(error?.message || 'Messenger không nhận attachment');
     wrapped.code = 'ATTACHMENT_STAGE_FAILED';

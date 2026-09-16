@@ -795,22 +795,53 @@ function deleteOutboundMessageRows({ messageId = null, threadId = null, clientMe
   })(rows.map((row) => row.id));
 }
 
+function emitOutboundCleanupResolved(threadId, pendingRow, confirmedRow) {
+  // The deleted row's optimistic bubble in the CRM is keyed by
+  // client_message_id. Deleting silently left it spinning forever, so tell
+  // the UI how the underlying send actually ended.
+  const clientMessageId = String(pendingRow?.client_message_id || '');
+  if (!clientMessageId.startsWith('client_') && !clientMessageId.startsWith('queue_')) return;
+  io.emit('MESSAGE_SENT', {
+    thread_id: String(threadId),
+    client_message_id: clientMessageId,
+    fb_message_id: confirmedRow?.fb_message_id || undefined,
+    status: 'sent'
+  });
+}
+
 function cleanupStalePendingOutbound(threadId) {
   if (!threadId) return 0;
+  // A queue row whose attempt link was severed (its pending message row was
+  // deleted by an earlier cleanup) can never leave 'processing' on its own.
+  db.prepare(`
+    UPDATE message_queue SET status = 'failed', error_reason = 'ATTEMPT_LOST'
+    WHERE status = 'processing' AND outbound_attempt_id IS NULL
+      AND processed_at IS NOT NULL AND processed_at < datetime('now', '-5 minutes')
+  `).run();
+
   const confirmedOutgoing = db.prepare(`
-    SELECT content, media_type, timestamp_ms FROM messages
+    SELECT content, media_type, timestamp_ms, fb_message_id FROM messages
     WHERE thread_id = ? AND is_outgoing = 1 AND fb_message_id LIKE 'mid.%'
   `).all(String(threadId));
   if (!confirmedOutgoing.length) return 0;
 
   const confirmedContents = new Set(confirmedOutgoing.map(c => (c.content || '').trim()).filter(Boolean));
+  // Carry the live attempt/queue status: an in-flight rich send owns a pending
+  // row here while its video is still uploading, and must never look "stale"
+  // just because an older media in the same thread was confirmed recently.
   const stalePending = db.prepare(`
-    SELECT id, content, media_type, attachment_id, timestamp_ms FROM messages
-    WHERE thread_id = ? AND is_outgoing = 1 AND (fb_message_id LIKE 'pending_%' OR fb_message_id NOT LIKE 'mid.%')
+    SELECT p.id, p.client_message_id, p.content, p.media_type, p.attachment_id, p.timestamp_ms,
+           a.status AS attempt_status, aq.status AS queue_status
+    FROM messages p
+    LEFT JOIN outbound_attempts a ON a.id = p.latest_attempt_id
+    LEFT JOIN message_queue aq ON aq.outbound_attempt_id = a.id
+    WHERE p.thread_id = ? AND p.is_outgoing = 1 AND (p.fb_message_id LIKE 'pending_%' OR p.fb_message_id NOT LIKE 'mid.%')
   `).all(String(threadId));
 
   let deletedCount = 0;
   for (const pending of stalePending) {
+    if (['queued', 'dispatching', 'awaiting_confirmation'].includes(String(pending.attempt_status || ''))) continue;
+    if (['pending', 'processing'].includes(String(pending.queue_status || ''))) continue;
     const pContent = (pending.content || '').trim();
     if (pContent && confirmedContents.has(pContent)) {
       // Bảo vệ: Nếu tin nhắn pending có đính kèm media (video/ảnh/tệp),
@@ -818,7 +849,9 @@ function cleanupStalePendingOutbound(threadId) {
       if (pending.attachment_id || (pending.media_type && pending.media_type !== 'text')) {
         continue;
       }
+      const confirmedRow = confirmedOutgoing.find(c => (c.content || '').trim() === pContent);
       deleteOutboundMessageRows({ messageId: pending.id });
+      emitOutboundCleanupResolved(threadId, pending, confirmedRow);
       deletedCount++;
       continue;
     }
@@ -829,6 +862,7 @@ function cleanupStalePendingOutbound(threadId) {
       );
       if (matchingMidMedia) {
         deleteOutboundMessageRows({ messageId: pending.id });
+        emitOutboundCleanupResolved(threadId, pending, matchingMidMedia);
         deletedCount++;
       }
     }
