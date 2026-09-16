@@ -128,15 +128,15 @@ class ConversationRepository {
   }
 
   static promoteSidebarPreview({ threadId, fbMessageId, content, isOutgoing, timestampMs }, database = getDefaultDb()) {
-    if (!threadId || !fbMessageId || isOutgoing || !content || String(fbMessageId).startsWith('sidebar_preview_')) return null;
+    if (!threadId || !fbMessageId || !content || String(fbMessageId).startsWith('sidebar_preview_')) return null;
     const observedTimestamp = Number(timestampMs) || 0;
     const candidates = database.prepare(`
       SELECT id, fb_message_id FROM messages
       WHERE thread_id = ? AND fb_message_id LIKE 'sidebar_preview_%'
-        AND is_outgoing = 0 AND COALESCE(content, '') = COALESCE(?, '')
+        AND is_outgoing = ? AND COALESCE(content, '') = COALESCE(?, '')
         AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 120000)
       ORDER BY id DESC LIMIT 2
-    `).all(threadId, content, observedTimestamp, observedTimestamp);
+    `).all(threadId, isOutgoing ? 1 : 0, content, observedTimestamp, observedTimestamp);
     if (candidates.length !== 1) return null;
     try {
       database.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?').run(String(fbMessageId), candidates[0].id);
@@ -461,6 +461,25 @@ class ConversationRepository {
               existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
             }
           } catch (_) { /* non-fatal: fall through to normal insert path */ }
+        }
+        if (!existing && isOutgoing && msg.fb_message_id && String(msg.fb_message_id).startsWith('mid.') && content) {
+          try {
+            const pendingCandidate = database.prepare(`
+              SELECT id, fb_message_id, client_message_id FROM messages
+              WHERE thread_id = ? AND is_outgoing = 1
+                AND (fb_message_id LIKE 'pending_%' OR delivery_status = 'pending')
+                AND COALESCE(content, '') = COALESCE(?, '')
+                AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 120000)
+              ORDER BY id DESC LIMIT 1
+            `).get(threadId, content, observedTimestampMs, observedTimestampMs);
+            if (pendingCandidate) {
+              database.prepare(
+                'UPDATE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\') WHERE id = ?'
+              ).run(String(msg.fb_message_id), pendingCandidate.id);
+              stableId = String(msg.fb_message_id);
+              existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+            }
+          } catch (_) { /* non-fatal */ }
         }
         if (!existing && msg.fb_message_id) {
           const promoted = ConversationRepository.promoteSidebarPreview({

@@ -123,9 +123,26 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
   result.forEach((message, index) => identities(message).forEach((key) => indexByIdentity.set(key, index)));
 
   cleanIncoming.forEach((message) => {
-    const matchedIndex = identities(message)
+    let matchedIndex = identities(message)
       .map((key) => indexByIdentity.get(key))
       .find((index) => index !== undefined);
+    if (matchedIndex === undefined && message?.is_outgoing && String(message?.fb_message_id || '').startsWith('mid.')) {
+      const incomingText = String(message.content || '').trim();
+      const incomingAt = Number(message.timestamp_ms) || Date.parse(message.created_at || '') || 0;
+      const optimisticIdx = result.findIndex((candidate) => {
+        if (!candidate?.is_outgoing) return false;
+        const candFbId = String(candidate?.fb_message_id || '');
+        const candClientId = String(candidate?.client_message_id || '');
+        const isTemporary = candClientId || candFbId.startsWith('pending_') || !candFbId.startsWith('mid.');
+        if (!isTemporary) return false;
+        if (String(candidate.content || '').trim() !== incomingText) return false;
+        const candidateAt = Number(candidate.timestamp_ms) || Date.parse(candidate.created_at || '') || 0;
+        return !incomingAt || !candidateAt || Math.abs(incomingAt - candidateAt) <= 120000;
+      });
+      if (optimisticIdx >= 0) {
+        matchedIndex = optimisticIdx;
+      }
+    }
     if (matchedIndex === undefined) {
       const incomingSequence = Number(message?.sequence_order ?? message?.id);
       const previousId = String(message?.dom_previous_message_id || '');
@@ -937,7 +954,10 @@ export default function App() {
           .then(r => r.json())
           .then(data => {
             if (Array.isArray(data)) {
-              setMessages(prev => ({ ...prev, [tidStr]: mergeMessagesWithoutReordering(prev[tidStr] || [], preserveOrderAnchors(data, prev[tidStr] || [])) }));
+              setMessages(prev => ({
+                ...prev,
+                [tidStr]: reconcileOutgoingTextEchoes(mergeMessagesWithoutReordering(prev[tidStr] || [], preserveOrderAnchors(data, prev[tidStr] || [])))
+              }));
             }
           })
           .catch(() => {});

@@ -227,3 +227,70 @@ test('5. Pending message gets official Facebook ID without inserting a new row',
   assert.equal(rows[0].fb_message_id, 'mid.official_5555');
   assert.equal(rows[0].delivery_status, 'sent');
 });
+
+test('6. Outgoing Page message with sidebar_preview_ is promoted to mid.$ without inserting duplicate row', () => {
+  const db = createTestDb();
+  const threadId = 'thread_page_outgoing_test';
+  ConversationRepository.upsertThread({ id: threadId, account_id: 'acc_1' }, db);
+
+  // 6a. Sidebar preview captures outgoing message from Page
+  const previewTime = Date.now();
+  ConversationRepository.saveMessagesTransaction(threadId, [{
+    fb_message_id: 'sidebar_preview_thread_page_outgoing_test_hash_123',
+    sender_id: 'PAGE',
+    content: 'Dạ shop xin chào bạn!',
+    is_outgoing: true,
+    timestamp_ms: previewTime,
+    source: 'sidebar_preview'
+  }], db);
+
+  let rows = db.prepare('SELECT * FROM messages WHERE thread_id = ?').all(threadId);
+  assert.equal(rows.length, 1, 'Initially 1 sidebar preview row');
+  assert.equal(rows[0].is_outgoing, 1);
+
+  // 6b. Official Facebook mid arrives from main chat bubble sync
+  ConversationRepository.saveMessagesTransaction(threadId, [{
+    fb_message_id: 'mid.$cAAQWv0d54Lem1wFJumgpbxYQUHqQ',
+    sender_id: 'PAGE',
+    content: 'Dạ shop xin chào bạn!',
+    is_outgoing: true,
+    timestamp_ms: previewTime + 500,
+    source: 'dom_observer'
+  }], db);
+
+  rows = db.prepare('SELECT * FROM messages WHERE thread_id = ?').all(threadId);
+  assert.equal(rows.length, 1, 'Must still be exactly 1 row in DB (promoted in-place)');
+  assert.equal(rows[0].fb_message_id, 'mid.$cAAQWv0d54Lem1wFJumgpbxYQUHqQ');
+});
+
+test('7. Outgoing pending message without client_message_id in sync payload is upgraded in-place', () => {
+  const db = createTestDb();
+  const threadId = 'thread_pending_no_client_id_test';
+  ConversationRepository.upsertThread({ id: threadId, account_id: 'acc_1' }, db);
+
+  // 7a. Pending outgoing message created by CRM
+  const sendTime = Date.now();
+  db.prepare(`
+    INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, is_outgoing, delivery_status, timestamp_ms)
+    VALUES (?, 'pending_client_7777', 'client_7777', 'STAFF', 'Nội dung chat kiểm tra x2', 1, 'pending', ?)
+  `).run(threadId, sendTime);
+
+  let rows = db.prepare('SELECT * FROM messages WHERE thread_id = ?').all(threadId);
+  assert.equal(rows.length, 1, 'Initially 1 pending row');
+
+  // 7b. Facebook sync returns official mid but lacks client_message_id
+  ConversationRepository.saveMessagesTransaction(threadId, [{
+    fb_message_id: 'mid.$official_mid_7777',
+    sender_id: 'STAFF',
+    content: 'Nội dung chat kiểm tra x2',
+    is_outgoing: true,
+    timestamp_ms: sendTime + 200,
+    source: 'facebook_sync'
+  }], db);
+
+  rows = db.prepare('SELECT * FROM messages WHERE thread_id = ?').all(threadId);
+  assert.equal(rows.length, 1, 'Must still be exactly 1 row (upgraded in-place)');
+  assert.equal(rows[0].fb_message_id, 'mid.$official_mid_7777');
+  assert.equal(rows[0].delivery_status, 'sent');
+});
+
