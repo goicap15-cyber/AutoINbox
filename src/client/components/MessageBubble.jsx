@@ -80,7 +80,9 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   // Facebook can surface a transport caption as a second text bubble beside an outgoing
   // image/video. The media bubble is the canonical representation in CRM.
   const visibleContent = isOutgoing && hasMedia ? '' : content;
-  const isQuickLike = !isCallMessage && !isUnsent && !hasMedia && (visibleContent?.trim() === '👍' || /^(?:thích|like)$/i.test(visibleContent?.trim() || ''));
+  const isLikeText = (content?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(content?.trim() || '')) ||
+                     (visibleContent?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(visibleContent?.trim() || ''));
+  const isQuickLike = !isCallMessage && !isUnsent && isLikeText;
   const displayUrl = msg.local_media_path || mediaUrl || msg.attachment?.local_media_path || null;
   // Never render an empty placeholder bubble.
   // A valid bubble must carry visible content text, playable media (displayUrl), or a call payload.

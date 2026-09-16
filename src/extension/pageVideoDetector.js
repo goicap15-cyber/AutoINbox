@@ -154,6 +154,9 @@
     if (isExcludedCall(rawText)) {
       return { isVideo: false };
     }
+    if (rawText === '👍' || /^(?:thích|like|biểu tượng thích|biểu tượng cảm xúc thích|gửi biểu tượng thích|thumbs up)$/i.test(rawText)) {
+      return { isVideo: false };
+    }
 
     const finalCaption = cleanVideoCaption(captionText || rawText);
     const fbMessageId = messageNode.getAttribute?.('data-message-id') ||

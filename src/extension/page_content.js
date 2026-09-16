@@ -466,15 +466,35 @@ if (isBusiness) {
                         return { direction: false, source: 'like_color_customer', confidence: 'high' };
                     }
                 }
+
+                // 3.6. Kiểm tra cấu trúc row cha / wrapper của Nút Like
+                const rowOrParent = messageEl.closest?.('[role="row"], [role="article"], [data-surface*="message"]') || messageEl.parentElement;
+                if (rowOrParent) {
+                    const avatarInRow = rowOrParent.querySelector?.('img[alt*="đại diện" i], img[alt*="profile" i], [aria-label*="ảnh đại diện" i]');
+                    if (avatarInRow) {
+                        return { direction: false, source: 'like_avatar_match', confidence: 'high' };
+                    }
+                    try {
+                        const rowStyle = window.getComputedStyle(rowOrParent);
+                        if (rowStyle.justifyContent === 'flex-end' || rowStyle.alignItems === 'flex-end') {
+                            return { direction: true, source: 'like_row_end', confidence: 'high' };
+                        }
+                        if (rowStyle.justifyContent === 'flex-start' || rowStyle.alignItems === 'flex-start') {
+                            return { direction: false, source: 'like_row_start', confidence: 'high' };
+                        }
+                    } catch (_) {}
+                }
             }
 
             // 4. Đo mép container kết hợp đường phân chia trung tâm (Center-line)
             const cRect = messageListContainer.getBoundingClientRect();
             const bRect = targetMeasureEl.getBoundingClientRect();
+            const measureEl = (bRect.width > 0 && bRect.height > 0) ? targetMeasureEl : (messageEl.parentElement || targetMeasureEl);
+            const effectiveBRect = measureEl.getBoundingClientRect();
 
-            if (cRect.width > 0 && bRect.width > 0) {
+            if (cRect.width > 0 && effectiveBRect.width > 0) {
                 const containerCenter = cRect.left + cRect.width * 0.52;
-                const bubbleCenter = bRect.left + bRect.width / 2;
+                const bubbleCenter = effectiveBRect.left + effectiveBRect.width / 2;
                 if (bubbleCenter < containerCenter - 15) {
                     return { direction: false, source: 'container_centerline', confidence: 'high' };
                 }
@@ -619,7 +639,7 @@ if (isBusiness) {
         const currentThread = resolveCurrentThreadId();
 
         const messageEls = Array.from(container.querySelectorAll('[data-message-id]'));
-        const likeCandidates = Array.from(container.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i]'))
+        const likeCandidates = Array.from(container.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i], video'))
             .filter(cand => {
                 if (cand.closest('[aria-label*="tùy chọn" i], [aria-label*="bày tỏ" i], [aria-label*="chuyển tiếp" i], [aria-label*="trả lời" i], button[aria-label*="menu" i], [data-surface*="composer"], form, footer')) {
                     return false;
@@ -938,7 +958,7 @@ if (isBusiness) {
             let currentMountedSignature = '';
             if (messageListContainer) {
                 const mountedMsgEls = messageListContainer.querySelectorAll('[data-message-id]');
-                const mountedLikes = messageListContainer.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i]');
+                const mountedLikes = messageListContainer.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i], video');
                 const mountedVideos = messageListContainer.querySelectorAll('video');
                 let videoSrcSignature = '';
                 for (let vi = 0; vi < mountedVideos.length; vi++) {
@@ -1004,14 +1024,35 @@ if (isBusiness) {
             }
 
             // 2. Trích xuất Avatar URL (currentAvatarUrl) đa tầng:
-            // Tier 2: Cột chi tiết khách hàng bên phải (Right Details Pane) - chứa ảnh Anime thật
-            // Tier 1: Header cuộc trò chuyện hoặc danh sách hội thoại bên trái (thường là silhouette placeholder)
+            // Tier 2: Cột chi tiết khách hàng bên phải (Right Details Pane) - CHỈ lấy khi ĐÃ XÁC THỰC đúng khách hàng hiện tại
+            // Tier 1: Row của chính thread này trong Sidebar hoặc Header
             let candidateAvatarUrl = null;
             let candidateTier = 0;
+            const timeSinceSwitch = Date.now() - lastThreadSwitchAt;
 
             // Tier 2: Quét cột bên phải (Right Details / Customer Info Pane)
+            // ĐIỀU KIỆN TIÊN QUYẾT CHO TIER 2:
+            // 1. Phải qua grace period kể từ lúc chuyển thread (ít nhất 1500ms) để DOM Meta kịp re-render
+            // 2. Cột bên phải PHẢI chứa tên khách hàng (currentContactName) hoặc threadId để tránh lấy nhầm DOM của người trước
             const rightPane = document.querySelector('[role="complementary"], [data-surface*="details"], [data-surface*="contact"], [aria-label*="Chi tiết" i], [aria-label*="Details" i]');
-            if (rightPane) {
+            let isRightPaneValid = false;
+            if (rightPane && timeSinceSwitch >= 1500) {
+                const rightPaneText = (rightPane.textContent || '').toLowerCase();
+                const cleanCurrentName = (currentContactName || '').toLowerCase().trim();
+
+                if (cleanCurrentName && cleanCurrentName.length >= 2 && cleanCurrentName !== 'khách hàng') {
+                    if (rightPaneText.includes(cleanCurrentName)) {
+                        isRightPaneValid = true;
+                    }
+                } else if (currentThreadId) {
+                    const idLink = rightPane.querySelector(`a[href*="${currentThreadId}"]`);
+                    if (idLink) {
+                        isRightPaneValid = true;
+                    }
+                }
+            }
+
+            if (isRightPaneValid && rightPane) {
                 const rightImgs = Array.from(rightPane.querySelectorAll('img[src*="fbcdn.net"], img[src*="scontent"], img.img'));
                 for (const img of rightImgs) {
                     const src = img.getAttribute('src');
@@ -1024,37 +1065,39 @@ if (isBusiness) {
                 }
             }
 
-            // Hoặc vùng chứa liên kết trang cá nhân Facebook (nếu rightPane chưa có role riêng)
-            if (!candidateAvatarUrl) {
-                const profileLink = document.querySelector('a[href*="facebook.com/profile"], a[href*="facebook.com/"][role="link"], a:has(> [aria-label*="Trang cá nhân" i])');
-                if (profileLink) {
-                    const profileContainer = profileLink.closest('div, section');
-                    if (profileContainer) {
-                        const img = profileContainer.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
+            // Tier 1: Nếu chưa có Tier 2 hợp lệ, lấy từ chính dòng (row) của threadId này trong Sidebar hoặc Header
+            if (!candidateAvatarUrl && currentAvatarSourceTier < 2) {
+                let threadRowImg = null;
+                if (currentThreadId) {
+                    const rowForThread = document.querySelector(`[role="navigation"] a[href*="${currentThreadId}"], [data-surface*="thread_list"] a[href*="${currentThreadId}"], a[href*="selected_item_id=${currentThreadId}"]`)?.closest('[role="row"], [role="listitem"], [data-surface*="thread_row"]');
+                    if (rowForThread) {
+                        const img = rowForThread.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
                         if (img) {
                             const src = img.getAttribute('src');
                             if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
-                                candidateAvatarUrl = src;
-                                candidateTier = 2;
+                                threadRowImg = src;
                             }
                         }
                     }
                 }
-            }
 
-            // Tier 1: Nếu chưa có avatar hoặc đang ở Tier 1, quét Header và Sidebar bên trái
-            if (!candidateAvatarUrl && currentAvatarSourceTier < 2) {
-                const headerEl = document.querySelector('[role="main"] header');
-                const activeRow = document.querySelector('[role="navigation"] [aria-selected="true"], [role="gridcell"] [aria-selected="true"], [data-surface*="thread_list"] [aria-selected="true"], [aria-selected="true"], [aria-current="page"], [aria-current="true"]');
-                const fallbackScopes = [headerEl, activeRow].filter(Boolean);
-                for (const scope of fallbackScopes) {
-                    const img = scope.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
-                    if (img) {
-                        const src = img.getAttribute('src');
-                        if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
-                            candidateAvatarUrl = src;
-                            candidateTier = 1;
-                            break;
+                if (threadRowImg) {
+                    candidateAvatarUrl = threadRowImg;
+                    candidateTier = 1;
+                } else if (timeSinceSwitch >= 1500) {
+                    // Fallback Header hoặc active row (chỉ sau grace period 1500ms)
+                    const headerEl = document.querySelector('[role="main"] header');
+                    const activeRow = document.querySelector('[role="navigation"] [aria-selected="true"], [role="gridcell"] [aria-selected="true"], [data-surface*="thread_list"] [aria-selected="true"], [aria-selected="true"], [aria-current="page"], [aria-current="true"]');
+                    const fallbackScopes = [headerEl, activeRow].filter(Boolean);
+                    for (const scope of fallbackScopes) {
+                        const img = scope.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
+                        if (img) {
+                            const src = img.getAttribute('src');
+                            if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
+                                candidateAvatarUrl = src;
+                                candidateTier = 1;
+                                break;
+                            }
                         }
                     }
                 }
@@ -1158,10 +1201,28 @@ if (isBusiness) {
             }
 
             // Pass 2b (Direct Thumbs Up / Like Scanner):
-            // Lưu ý: Toàn bộ nút Like đã mount trong messageListContainer đều được xử lý và đồng bộ
-            // bảo toàn 100% thứ tự DOM qua hàm collectMountedBatchMessages (PAGE_THREAD_MESSAGES_SYNCED_V1).
-            // Không bắn lẻ qua forwardResolvedMessage (NEW_PAGE_MESSAGE_FROM_DOM) để tránh việc backend
-            // hiểu lầm là tin nhắn mới phát sinh và gán sequence_order = MAX + 1 đẩy xuống đáy.
+            // Quét các nút Like độc lập xuất hiện trong khung chat mà không có [data-message-id]
+            if (messageListContainer) {
+                const standaloneLikes = Array.from(messageListContainer.querySelectorAll('svg, [role="img"], img[alt="👍"], img[alt*="thích" i], img[alt*="like" i], video'))
+                    .filter(cand => {
+                        if (cand.closest('[aria-label*="tùy chọn" i], [aria-label*="bày tỏ" i], [aria-label*="chuyển tiếp" i], [aria-label*="trả lời" i], button[aria-label*="menu" i], [data-surface*="composer"], form, footer')) {
+                            return false;
+                        }
+                        return isLikeElementOrWrapper(cand);
+                    });
+
+                for (const likeNode of standaloneLikes) {
+                    const parentMsg = likeNode.closest('[data-message-id]');
+                    if (parentMsg && processedWrappersThisTick.has(parentMsg)) continue;
+                    if (processedWrappersThisTick.has(likeNode)) continue;
+                    processedWrappersThisTick.add(likeNode);
+                    if (parentMsg) processedWrappersThisTick.add(parentMsg);
+
+                    const fbMessageId = parentMsg?.getAttribute?.('data-message-id') || likeNode.getAttribute?.('data-message-id') || null;
+                    const { isInsideMessageBubble, inChatContainer } = walkBubbleAncestors(likeNode, messageListContainer);
+                    forwardResolvedMessage(likeNode, likeNode, fbMessageId, isInsideMessageBubble, inChatContainer, { kind: 'text', text: '👍' }, messageListContainer);
+                }
+            }
 
             // Pass 3 (Call Log): Quét span[dir="auto"] TRONG KHUNG CHAT (messageListContainer)
             var callSpans = messageListContainer ? messageListContainer.querySelectorAll('span[dir="auto"]') : [];
@@ -1360,6 +1421,23 @@ if (isBusiness) {
             }
         }
 
+        // 7. Kiểm tra video sticker hoạt họa của nút Like (Facebook animated thumbs up video/sticker)
+        const isVidNode = node.tagName && node.tagName.toLowerCase() === 'video';
+        const vids = isVidNode ? [node] : Array.from(node.querySelectorAll?.('video') || []);
+        for (const vid of vids) {
+            const vidAria = (vid.getAttribute('aria-label') || vid.getAttribute('title') || '').toLowerCase();
+            if (vidAria.includes('thích') || vidAria.includes('like') || vidAria.includes('thumbs up') || vidAria.includes('biểu tượng thích')) {
+                return true;
+            }
+            const vidWrapper = vid.closest?.('[aria-label*="thích" i], [aria-label*="like" i], [aria-label*="thumbs up" i], [aria-label*="biểu tượng thích" i]');
+            if (vidWrapper) {
+                return true;
+            }
+            if (trimmed === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(trimmed)) {
+                return true;
+            }
+        }
+
         return false;
     }
 
@@ -1531,10 +1609,16 @@ if (isBusiness) {
 
         let effectiveFbMessageId = fbMessageId;
         if (text === '👍' && messageListContainer) {
-            // Nút Like độc lập (cả Like của Page lẫn Like của Khách) đã nằm trong khung chat
-            // được quản lý đồng bộ chính xác theo thứ tự DOM bởi Batch Sync (PAGE_THREAD_MESSAGES_SYNCED_V1).
-            // Không bắn lẻ qua NEW_PAGE_MESSAGE_FROM_DOM để tránh gán sai sequence_order ở đuôi DB.
-            return;
+            const isLive = !crawlInProgress && !isLikelyBacklog(threadId);
+            if (!isLive) {
+                // Đang crawl backlog hoặc kéo tin cũ: để Batch Sync quản lý chính xác thứ tự DOM
+                return;
+            }
+            // Trong phiên live: cho phép phát sự kiện thời gian thực và ép tính lại signature
+            lastSyncedMountedSignature = '';
+            if (!effectiveFbMessageId) {
+                effectiveFbMessageId = 'page_like_' + threadId + '_' + (parsedTs || Date.now()) + '_' + (isOutgoing === true ? 'out' : 'in');
+            }
         }
 
         const dedupKey = effectiveFbMessageId || text + '_' + (isOutgoing === null ? 'unknown' : isOutgoing);

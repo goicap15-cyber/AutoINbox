@@ -1467,12 +1467,46 @@ wss.on('connection', (ws, req) => {
             try {
               localAvatarPath = await saveAvatarFromBase64OrUrl(avatar_url, tidStr);
               if (localAvatarPath) {
-                db.prepare(`
-                  INSERT INTO contacts (thread_id, name, avatar_url)
-                  VALUES (?, ?, ?)
-                  ON CONFLICT(thread_id) DO UPDATE SET
-                    avatar_url = excluded.avatar_url
-                `).run(tidStr, updatedName || 'Khách hàng', localAvatarPath);
+                // Chống tráo avatar: Kiểm tra nếu avatar vừa tải về có hash trùng khớp
+                // với avatar của một thread khác thuộc cùng account mà tên 2 thread khác nhau
+                const duplicateOther = db.prepare(`
+                  SELECT c.thread_id, c.name, c.avatar_url
+                  FROM contacts c
+                  JOIN threads t ON t.id = c.thread_id
+                  WHERE t.account_id = ? AND c.thread_id != ? AND c.avatar_url IS NOT NULL
+                `).all(targetAccountId, tidStr);
+
+                let isSuspiciousSwap = false;
+                const avatarDir = path.join(APP_DATA_ROOT, 'avatars');
+                const currentFilePath = path.join(avatarDir, localAvatarPath);
+
+                if (fs.existsSync(currentFilePath)) {
+                  const currentHash = crypto.createHash('md5').update(fs.readFileSync(currentFilePath)).digest('hex');
+                  for (const other of duplicateOther) {
+                    if (other.name && updatedName && other.name.trim().toLowerCase() !== updatedName.trim().toLowerCase() && other.avatar_url) {
+                      const otherFilePath = path.join(avatarDir, other.avatar_url);
+                      if (fs.existsSync(otherFilePath)) {
+                        const otherHash = crypto.createHash('md5').update(fs.readFileSync(otherFilePath)).digest('hex');
+                        if (currentHash === otherHash) {
+                          isSuspiciousSwap = true;
+                          console.warn(`[WS] ⚠️ Chặn ghi đè tráo avatar: thread ${tidStr} (${updatedName}) bị trùng file avatar với thread ${other.thread_id} (${other.name}).`);
+                          break;
+                        }
+                      }
+                    }
+                  }
+                }
+
+                if (!isSuspiciousSwap) {
+                  db.prepare(`
+                    INSERT INTO contacts (thread_id, name, avatar_url)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                      avatar_url = excluded.avatar_url
+                  `).run(tidStr, updatedName || 'Khách hàng', localAvatarPath);
+                } else {
+                  localAvatarPath = null;
+                }
               }
             } catch (e) {
               console.warn('[WS] Avatar save failed:', e.message);
@@ -3198,7 +3232,7 @@ wss.on('connection', (ws, req) => {
                 if (m.fb_message_id && resolvedPageVideos.has(m.fb_message_id)) {
                   const resolved = resolvedPageVideos.get(m.fb_message_id);
                   const vidUrl = resolved.video_url || resolved.media_url;
-                  if (vidUrl && (!m.media_url || !m.media_url.startsWith('http'))) {
+                  if (vidUrl && (!m.media_url || !m.media_url.startsWith('http')) && m.content !== '👍') {
                     m.media_url = vidUrl;
                     m.media_type = 'video';
                   }
