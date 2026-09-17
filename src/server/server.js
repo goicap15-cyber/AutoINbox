@@ -3420,14 +3420,6 @@ wss.on('connection', (ws, req) => {
             break;
           }
           const key = pageConnectionKey(accountId, pageId);
-          // If this Page profile registered before its Business Suite content
-          // script reported the Page context, it may have temporarily occupied
-          // the normal account slot. Release that temporary slot now so the
-          // personal Chrome connection remains authoritative.
-          if (extensionConnections.get(accountId) === ws) {
-            extensionConnections.delete(accountId);
-            InboxSyncScheduler.unregisterAccount(accountId);
-          }
           pageExtensionConnections.set(key, ws);
           ws.pageConnectionKeys = ws.pageConnectionKeys || new Set();
           ws.pageConnectionKeys.add(key);
@@ -4325,15 +4317,26 @@ app.put('/api/company/employees/:id/accounts', requireCompanyAdmin, (req, res) =
   } catch (error) { res.status(error.status || 500).json({ success: false, error: error.message }); }
 });
 
-// Accounts
 app.get('/api/accounts', (req, res) => {
   const accounts = enterpriseAccess.listAccounts(req.user);
-  const result = accounts.map(acc => ({
-    ...acc,
-    is_extension_connected: extensionConnections.has(acc.id) && extensionConnections.get(acc.id).readyState === WebSocket.OPEN,
-    is_chrome_running: processManager.getStatus(acc.id) === 'RUNNING',
-    chrome_display_mode: processManager.getDisplayMode(acc.id)
-  }));
+  const result = accounts.map(acc => {
+    const accIdStr = String(acc.id);
+    const personalWs = extensionConnections.get(accIdStr) || extensionConnections.get(acc.id);
+    const isPersonalConnected = Boolean(personalWs && personalWs.readyState === WebSocket.OPEN);
+    let isPageConnected = false;
+    for (const [key, pageWs] of pageExtensionConnections.entries()) {
+      if (key.startsWith(accIdStr + ':') && pageWs?.readyState === WebSocket.OPEN) {
+        isPageConnected = true;
+        break;
+      }
+    }
+    return {
+      ...acc,
+      is_extension_connected: isPersonalConnected || isPageConnected,
+      is_chrome_running: processManager.getStatus(acc.id) === 'RUNNING',
+      chrome_display_mode: processManager.getDisplayMode(acc.id)
+    };
+  });
   res.json(result);
 });
 app.post('/api/accounts/:id/start', async (req, res) => {
@@ -4880,11 +4883,10 @@ app.post('/api/inbox-sources/page', (req, res) => {
 
     if (!ownerAccountId) return res.status(403).json({ error: 'Tài khoản Facebook sở hữu Page không hợp lệ hoặc bạn không có quyền truy cập.' });
     const source = InboxSourceService.ensurePageSource({ pageId, accountId: ownerAccountId, pageName: null }, db);
-    // Launch asynchronously after the source is persisted. Personal Messenger
-    // keeps its existing Chrome process; Page receives a separate profile/window
-    // with the extension installed and opens Business Suite for this page.
-    processManager.startPageProcess(pageId, ownerAccountId).catch((launchError) => {
-      console.warn(`[InboxSource] Không thể mở Chrome riêng cho Page ${pageId}:`, launchError.message);
+    // Mở trực tiếp tab Hộp thư Meta Business Suite trên profile Chrome đã đăng nhập
+    // của tài khoản sở hữu Page để extension đồng bộ tin nhắn ngay lập tức.
+    processManager.openPageInboxInAccountChrome(ownerAccountId, pageId).catch((launchError) => {
+      console.warn(`[InboxSource] Không thể mở Business Suite cho Page ${pageId}:`, launchError.message);
     });
     io.emit('INBOX_SOURCE_ADDED', { id: source.id, source_type: 'page_messenger', display_name: source.display_name });
     res.json(source);

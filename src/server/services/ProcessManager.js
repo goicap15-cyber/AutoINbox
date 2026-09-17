@@ -446,6 +446,58 @@ class ProcessManager {
     }
     return true;
   }
+
+  // Mở tab Hộp thư Meta Business Suite trực tiếp trên cửa sổ Chrome đã đăng nhập của tài khoản sở hữu Page
+  async openPageInboxInAccountChrome(accountId, pageId) {
+    const safePageId = String(pageId || '').trim();
+    const safeAccountId = String(accountId || '').trim();
+    if (!safePageId || !safeAccountId) return false;
+    const targetUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(safePageId)}&mailbox_id=${encodeURIComponent(safePageId)}&thread_type=FB_MESSAGE`;
+
+    let entry = this.processes.get(safeAccountId);
+    let profileDir = entry?.profileDir;
+    if (!profileDir) {
+      for (const [key, proc] of this.processes.entries()) {
+        if (typeof key === 'string' && key.startsWith('pending_') && proc?.profileDir) {
+          entry = proc;
+          profileDir = proc.profileDir;
+          break;
+        }
+      }
+    }
+    if (!profileDir) {
+      try {
+        const row = db.prepare('SELECT profile_dir FROM accounts WHERE id = ?').get(safeAccountId);
+        if (row?.profile_dir) profileDir = row.profile_dir;
+      } catch (_) {}
+    }
+    if (!profileDir) {
+      profileDir = path.join(APP_DATA_ROOT, `profiles/${safeAccountId}`);
+    }
+
+    const absProfileDir = path.isAbsolute(profileDir) ? profileDir : path.resolve(APP_DATA_ROOT, profileDir);
+
+    try {
+      this.unhideWindow(safeAccountId);
+      if (entry?.browser?.connected) {
+        const page = await entry.browser.newPage();
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        console.log(`[ProcessManager] Đã mở tab Business Suite cho Page ${safePageId} qua Puppeteer.`);
+        return true;
+      }
+      const chromeExecutable = this.getInteractiveSetupChromeExecutable();
+      spawn(chromeExecutable, [
+        `--user-data-dir=${absProfileDir}`,
+        targetUrl
+      ], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+      console.log(`[ProcessManager] Đã gửi lệnh mở Business Suite cho Page ${safePageId} trên profile ${absProfileDir}.`);
+      return true;
+    } catch (error) {
+      console.warn(`[ProcessManager] Không thể mở Business Suite cho Page ${safePageId}:`, error.message);
+      return false;
+    }
+  }
+
   // Khởi chạy Chrome Portable cho phiên thêm tài khoản mới (pending session)
   async startNewAccountProcess(pendingKey) {
     const setupUrl = `https://www.facebook.com/messages/?crm_pending_key=${encodeURIComponent(pendingKey)}`;

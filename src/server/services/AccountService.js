@@ -43,12 +43,27 @@ class AccountService {
         WHERE account_id = ? AND status IN ('pending', 'processing')
       `).run(normalizedId).changes;
 
-      // Pages may still be useful through another owner. Detach them instead
+      // Pages may still be useful through another owner. Detach or reassign them instead
       // of deleting them together with the personal Facebook account.
-      const detachedPages = database.prepare(`
-        UPDATE inbox_sources SET owner_account_id = NULL
-        WHERE owner_account_id = ? AND source_type = 'page_messenger'
-      `).run(normalizedId).changes;
+      // Reassign page threads to another active account if one exists,
+      // so SQLite's ON DELETE CASCADE does not wipe page conversations.
+      const otherAccount = database.prepare('SELECT id FROM accounts WHERE id != ? LIMIT 1').get(normalizedId);
+      let detachedPages = 0;
+      if (otherAccount?.id) {
+        database.prepare(`
+          UPDATE threads SET account_id = ?
+          WHERE account_id = ? AND (source_id LIKE 'src_page_%' OR source_id IS NOT NULL)
+        `).run(otherAccount.id, normalizedId);
+        detachedPages = database.prepare(`
+          UPDATE inbox_sources SET owner_account_id = ?
+          WHERE owner_account_id = ? AND source_type = 'page_messenger'
+        `).run(otherAccount.id, normalizedId).changes;
+      } else {
+        detachedPages = database.prepare(`
+          UPDATE inbox_sources SET owner_account_id = NULL
+          WHERE owner_account_id = ? AND source_type = 'page_messenger'
+        `).run(normalizedId).changes;
+      }
 
       database.prepare(`
         DELETE FROM inbox_sources

@@ -9,7 +9,11 @@ function parsePageIdFromInput(rawInput) {
   const raw = String(rawInput || '').trim();
   if (!raw) return null;
   if (/^\d+$/.test(raw)) return raw;
-  const match = raw.match(/profile\.php\?id=(\d+)/) || raw.match(/[?&]id=(\d+)/);
+  const match = raw.match(/[?&]asset_id=(\d+)/i)
+    || raw.match(/[?&]mailbox_id=(\d+)/i)
+    || raw.match(/[?&]page_id=(\d+)/i)
+    || raw.match(/profile\.php\?id=(\d+)/i)
+    || raw.match(/[?&]id=(\d+)/i);
   return match ? match[1] : null;
 }
 
