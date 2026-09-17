@@ -2714,7 +2714,14 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'SYNC_THREADS_RESULT': {
-          const { account_id, threads, partial, sync_status, checkpoint } = msg.data;
+          let { account_id, threads, partial, sync_status, checkpoint } = msg.data;
+          if (!account_id && msg.data?.page_id) {
+            const pageSrc = db.prepare('SELECT owner_account_id FROM inbox_sources WHERE source_type = "page_messenger" AND external_id = ?').get(String(msg.data.page_id));
+            if (pageSrc?.owner_account_id) account_id = pageSrc.owner_account_id;
+          }
+          if (!account_id && ws.accountId) {
+            account_id = ws.accountId;
+          }
           const isRealtimeSidebarHint = sync_status === 'realtime_hint' || sync_status === 'realtime_requests';
           console.log(`[WS] Nhận ${threads?.length || 0} threads từ extension tài khoản: ${account_id}`);
           // Progressive UI batches are not the end of the combined Inbox +
@@ -2858,7 +2865,7 @@ wss.on('connection', (ws, req) => {
                 
                 const currentContact = db.prepare('SELECT avatar_url FROM contacts WHERE thread_id = ?').get(canonicalThreadId);
                 let initialAvatar = currentContact?.avatar_url || null;
-                if (t.avatar_url && !t.avatar_url.startsWith('http')) {
+                if (t.avatar_url && typeof t.avatar_url === 'string' && t.avatar_url.startsWith('http')) {
                   initialAvatar = t.avatar_url;
                 }
                 db.prepare(`
@@ -3454,16 +3461,34 @@ wss.on('connection', (ws, req) => {
               if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: ack }));
               break;
             }
+            let safePageContactName = cleanContactName(envelope.contact_name, null);
+            if (isInvalidContactName(safePageContactName)) safePageContactName = null;
+            const existingPageThread = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(pageThreadId);
+            if (existingPageThread?.contact_name && !isInvalidContactName(existingPageThread.contact_name) && existingPageThread.contact_name !== 'Khách hàng') {
+              safePageContactName = safePageContactName || existingPageThread.contact_name;
+            }
+
             ConversationRepository.upsertThread({
               id: pageThreadId,
               external_thread_id: pageThreadId,
               account_id: authenticatedAccountId,
               source_id: source.id,
-              contact_name: envelope.contact_name || 'Khách hàng',
+              contact_name: safePageContactName || 'Khách hàng',
               last_message: Array.isArray(envelope.messages) && envelope.messages.length ? (envelope.messages[envelope.messages.length - 1].content || 'Chưa có tin nhắn') : 'Chưa có tin nhắn',
               is_unread: 0,
               inbox_folder: 'INBOX'
             }, db);
+
+            let pageAvatar = (envelope.avatar_url && typeof envelope.avatar_url === 'string' && envelope.avatar_url.startsWith('http')) ? envelope.avatar_url : null;
+            if (safePageContactName || pageAvatar) {
+              db.prepare(`
+                INSERT INTO contacts (thread_id, name, avatar_url)
+                VALUES (?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                  name = COALESCE(excluded.name, contacts.name),
+                  avatar_url = COALESCE(excluded.avatar_url, contacts.avatar_url)
+              `).run(pageThreadId, safePageContactName, pageAvatar);
+            }
 
             // Bổ sung link video đã giải mã từ Web Worker / DOM vào message batch
             if (Array.isArray(envelope.messages)) {

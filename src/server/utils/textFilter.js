@@ -227,7 +227,16 @@ const INVALID_CONTACT_NAME_PATTERNS = [
   /^(?:Đang|Loading|Đang tải)[.…]*$/i,
   /^(?:Nhấn Enter để gửi|Press Enter to send)$/i,
   /^(?:Tin nhắn và cuộc gọi.*|bảo mật.*)$/i,
-  /^(?:Facebook|Messenger|Meta)$/i
+  /^(?:Facebook|Messenger|Meta)$/i,
+  // Chỉ chặn khi TOÀN BỘ chuỗi là chữ UI Business Suite (neo ^...$); nếu không
+  // sẽ nuốt luôn tên khách chứa từ trùng (VD: "Võ Thanh Nhãn", "Phạm Ghi Chú").
+  /^(?:Bài viết và thước phim\s*)+$/i,
+  /^(?:Posts and reels\s*)+$/i,
+  /^(?:Ghi chú\s*)+$/i,
+  /^(?:Nhãn\s*)+$/i,
+  /^(?:Hoạt động\s*)+$/i,
+  /^(?:Chi tiết\s*)+$/i,
+  /^(?:Bài viết và thước phim|Posts and reels|Ghi chú|Nhãn|Chi tiết)$/i
 ];
 
 function isInvalidContactName(name) {

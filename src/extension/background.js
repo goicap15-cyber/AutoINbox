@@ -4580,7 +4580,12 @@ function scrapeBusinessSuiteSidebar() {
   }
 
   // 2. Tìm container gốc của sidebar danh sách hội thoại bên trái
-  let sidebarContainer = document.querySelector('[data-surface*="thread_list"], [data-surface*="bizweb_inbox:thread_list"]');
+  // Business Suite 2026+: span dòng hội thoại cũng chứa "thread_list" trong
+  // data-surface (.../thread_list/thread_row/...) — phải chọn phần tử KHÔNG
+  // phải dòng và thực sự chứa các dòng bên trong, nếu không scope quét sẽ sai.
+  let sidebarContainer = Array.from(document.querySelectorAll('[data-surface*="thread_list"], [data-surface*="bizweb_inbox:thread_list"]'))
+    .find(el => !/thread_row/.test(el.getAttribute('data-surface') || '') && el.querySelector('[data-surface*="thread_row"], a[href*="selected_item_id="], [role="row"], [role="listitem"]'))
+    || document.querySelector('[data-surface*="thread_list"], [data-surface*="bizweb_inbox:thread_list"]');
   if (!sidebarContainer) {
     const searchInput = document.querySelector('input[placeholder*="Tìm kiếm" i], input[placeholder*="Search" i], input[type="search"]');
     if (searchInput) {
@@ -4629,7 +4634,10 @@ function scrapeBusinessSuiteSidebar() {
           if (!curr || typeof curr !== 'object' || visited.has(curr)) continue;
           visited.add(curr);
 
-          const directProps = ['threadKey', 'thread_key', 'thread_id', 'threadId', 'selected_item_id', 'selectedItemId', 'recipientId', 'recipient_id', 'contactId', 'contact_id', 'psid', 'participantId', 'participant_id', 'otherUserFbId', 'threadFbid', 'thread_fbid', 'userId', 'user_id', 'id'];
+          // "threadID" (D hoa) là tên prop thật trong Business Suite 2026+.
+          // Bỏ prop generic "id" — nó bắt nhầm ID trang/phantử khác khiến các
+          // dòng khác nhau resolve cùng một ID và bị lọc trùng còn 1 thread.
+          const directProps = ['threadID', 'threadKey', 'thread_key', 'thread_id', 'threadId', 'selected_item_id', 'selectedItemId', 'recipientId', 'recipient_id', 'contactId', 'contact_id', 'psid', 'participantId', 'participant_id', 'otherUserFbId', 'threadFbid', 'thread_fbid', 'userId', 'user_id'];
           for (const p of directProps) {
             const val = curr[p];
             if (val && (typeof val === 'string' || typeof val === 'number')) {
@@ -4672,7 +4680,19 @@ function scrapeBusinessSuiteSidebar() {
       const h = el.clientHeight || el.offsetHeight || 0;
       const w = el.clientWidth || el.offsetWidth || 0;
       if ((h >= 36 && h <= 180 && w >= 120) || el.getAttribute('data-surface')) {
-        candidateRows.push(el);
+        // Span thread_row của Business Suite 2026+ là inline 0x0 — dùng ancestor
+        // gần nhất có hộp hiển thị thật làm dòng để querySelector/innerText hoạt động.
+        let row = el;
+        if ((el.clientHeight || el.offsetHeight || 0) === 0) {
+          let node = el;
+          while (node && node !== document.body) {
+            const nh = node.clientHeight || node.offsetHeight || 0;
+            const nw = node.clientWidth || node.offsetWidth || 0;
+            if (nh >= 36 && nh <= 180 && nw >= 120) { row = node; break; }
+            node = node.parentElement;
+          }
+        }
+        if (!candidateRows.includes(row) && isInsideSidebar(row)) candidateRows.push(row);
       }
     }
   });

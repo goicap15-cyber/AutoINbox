@@ -106,7 +106,13 @@ if (isBusiness) {
     // Feature Realtime Sidebar: Lắng nghe biến động Sidebar phát hiện tin nhắn mới tức thì
     let sidebarDebounceTimer = null;
     function setupSidebarObserver() {
-        const sidebarContainer = document.querySelector('[data-surface*="thread_list"], [data-surface*="bizweb_inbox:thread_list"], [role="navigation"]');
+        // Chọn container list THẬT: span dòng hội thoại (0x0) cũng chứa
+        // "thread_list" trong data-surface (.../thread_list/thread_row/...),
+        // observer gắn nhầm vào nó sẽ không bao giờ thấy biến động các dòng khác.
+        const sidebarContainer = Array.from(document.querySelectorAll('[data-surface*="thread_list"], [data-surface*="bizweb_inbox:thread_list"]'))
+            .find(el => !/thread_row/.test(el.getAttribute('data-surface') || '') && el.querySelector('[data-surface*="thread_row"], a[href*="selected_item_id="], [role="row"], [role="listitem"]'))
+            || document.querySelector('input[placeholder*="Tìm kiếm" i], input[placeholder*="Search" i]')?.closest('[role="navigation"], div')
+            || document.body;
         if (!sidebarContainer) {
             setTimeout(setupSidebarObserver, 2000);
             return;
@@ -118,7 +124,7 @@ if (isBusiness) {
                     scanPageSidebarThreads();
                 }, 300);
             });
-            observer.observe(sidebarContainer, { childList: true, subtree: true, characterData: true });
+            observer.observe(sidebarContainer, { childList: true, subtree: true });
             console.log('[PageContent] ⚡ Đã kích hoạt MutationObserver theo dõi Sidebar real-time (< 1s)');
         } catch (e) {
             console.warn('[PageContent] Không thể gắn observer cho sidebar:', e.message);
@@ -173,12 +179,21 @@ if (isBusiness) {
     }
 
     // Lắng nghe URL video đã giải mã từ MAIN world (injected.js)
+    const reportedResolvedMedia = new Set();
     window.addEventListener('message', (event) => {
         if (event.data?.type === 'CRM_RESOLVE_PAGE_VIDEO_RESPONSE') {
             const { fb_message_id, videoUrl, posterUrl } = event.data || {};
             if (!fb_message_id || (!videoUrl && !posterUrl)) return;
 
             const effectiveUrl = videoUrl || posterUrl;
+            const dedupeKey = `${fb_message_id}:${effectiveUrl}`;
+            if (reportedResolvedMedia.has(dedupeKey)) return;
+            reportedResolvedMedia.add(dedupeKey);
+            if (reportedResolvedMedia.size > 2000) {
+                const first = reportedResolvedMedia.values().next().value;
+                reportedResolvedMedia.delete(first);
+            }
+
             const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(fb_message_id) : fb_message_id;
             const msgNode = document.querySelector(`[data-message-id="${escaped}"]`) ||
                 document.querySelector(`[data-id="${escaped}"]`);
@@ -342,6 +357,90 @@ if (isBusiness) {
             }
         } catch (e) {}
         return false;
+    }
+
+    // Trích xuất Avatar đa định dạng: hỗ trợ img, SVG image và CSS background-image
+    function extractAvatarFromElement(container) {
+        if (!container) return null;
+        try {
+            // 1. Regular <img>
+            const img = container.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
+            if (img) {
+                const src = img.getAttribute('src');
+                if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
+                    if (!((img.naturalWidth && img.naturalWidth <= 24) || (img.width > 0 && img.width <= 24))) {
+                        return src;
+                    }
+                }
+            }
+            // 2. SVG <image>
+            const svgImages = container.querySelectorAll('svg image');
+            for (const svgImg of svgImages) {
+                const href = svgImg.getAttribute('xlink:href') || svgImg.getAttribute('href');
+                if (href && href.startsWith('http') && !href.includes('rsrc.php') && !href.includes('static.xx.fbcdn')) {
+                    return href;
+                }
+            }
+            // 3. CSS background-image
+            const bgEls = container.querySelectorAll('[style*="background-image"]');
+            for (const bg of bgEls) {
+                const style = bg.getAttribute('style') || '';
+                const m = style.match(/background-image\s*:\s*url\((['"]?)(https?:\/\/[^'")]+)\1\)/i);
+                if (m && m[2] && !m[2].includes('rsrc.php') && !m[2].includes('static.xx.fbcdn')) {
+                    return m[2];
+                }
+            }
+        } catch (_) {}
+        return null;
+    }
+
+    // Business Suite (bản 2026+): mỗi dòng hội thoại trong danh sách là một
+    // <span data-surface=".../thread_list/thread_row/..."> inline KHÔNG có hộp
+    // hiển thị (getBoundingClientRect() = 0x0), nên mọi bộ lọc theo rect đều
+    // loại nhầm. Dòng "thật" là ancestor gần nhất có kích thước hợp lệ (~366x38).
+    function findVisibleBizRowContainer(el) {
+        let node = el;
+        while (node && node !== document.body) {
+            try {
+                const rect = node.getBoundingClientRect();
+                if (rect.width >= 150 && rect.height >= 30 && rect.height <= 180) return node;
+            } catch (_) {}
+            node = node.parentElement;
+        }
+        return null;
+    }
+
+    // ID hội thoại nằm trong React props với tên CHÍNH XÁC "threadID" (D hoa) -
+    // bản cũ tìm "threadId" nên không bao giờ khớp, rồi rơi xuống prop generic
+    // (id/userId) và bắt nhầm ID khác khiến mọi dòng bị gộp thành 1 thread.
+    // Chỉ đi NGANG lên chuỗi fiber.return (đã kiểm chứng qua console), không
+    // duyệt child/sibling để tránh nhảy sang subtree của dòng khác.
+    const BIZ_THREAD_ID_PROPS = ['threadID', 'threadId', 'thread_id', 'threadKey', 'thread_key', 'threadFbid', 'thread_fbid', 'conversationID', 'conversation_id', 'otherUserFbId', 'other_user_id', 'recipientId'];
+
+    function extractPageThreadIdFromFiber(rootEl, excludeId) {
+        if (!rootEl) return null;
+        const candidates = [rootEl, ...Array.from(rootEl.querySelectorAll('*')).slice(0, 8)];
+        for (const el of candidates) {
+            let reactKey = null;
+            try {
+                reactKey = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+            } catch (_) {}
+            if (!reactKey) continue;
+            let curr = el[reactKey];
+            let depth = 0;
+            while (curr && depth < 30) {
+                depth++;
+                const props = curr.memoizedProps || curr.props;
+                if (props) {
+                    for (const p of BIZ_THREAD_ID_PROPS) {
+                        const m = String(props[p] || '').match(/(\d{10,})/);
+                        if (m && m[1] !== excludeId) return m[1];
+                    }
+                }
+                curr = curr.return;
+            }
+        }
+        return null;
     }
 
     // Same role="region"/main/grid detection strategy already used by the
@@ -920,6 +1019,20 @@ if (isBusiness) {
             if (!currentContactName || isInvalidName(currentContactName)) {
                 // A. Ưu tiên tìm chính xác dòng của threadId này trong Sidebar
                 if (currentThreadId) {
+                    // Business Suite 2026+: dòng là span thread_row 0x0, không còn
+                    // <a> href — nhận diện dòng đúng qua React prop "threadID".
+                    for (const span of document.querySelectorAll('[data-surface*="thread_row"]')) {
+                        const visRow = findVisibleBizRowContainer(span);
+                        if (!visRow) continue;
+                        const rowThreadId = extractPageThreadIdFromFiber(visRow, assetId);
+                        if (!rowThreadId || String(rowThreadId) !== String(currentThreadId)) continue;
+                        const titleEl = visRow.querySelector('[data-surface*="thread_title"], h2, h3, h4, [role="heading"], [dir="auto"], strong, b');
+                        const rowTxt = (titleEl?.textContent || '').trim().split('\n')[0].trim();
+                        if (rowTxt && !isInvalidName(rowTxt) && rowTxt.length >= 2 && rowTxt.length <= 80 && !/^\d+$/.test(rowTxt)) {
+                            currentContactName = cleanName(rowTxt);
+                        }
+                        break;
+                    }
                     const rowForThread = document.querySelector(`[role="navigation"] a[href*="${currentThreadId}"], [data-surface*="thread_list"] a[href*="${currentThreadId}"], a[href*="selected_item_id=${currentThreadId}"]`)?.closest('[role="row"], [role="listitem"], [data-surface*="thread_row"]');
                     if (rowForThread) {
                         const titleEl = rowForThread.querySelector('[data-surface*="thread_title"], h2, h3, h4, [role="heading"], [dir="auto"], strong, b');
@@ -942,8 +1055,22 @@ if (isBusiness) {
                     }
 
                     if (!currentContactName || isInvalidName(currentContactName)) {
-                        const headerEls = document.querySelectorAll('[role="main"] header h1, [role="main"] header h2, [role="main"] header [role="heading"], [role="main"] header [dir="auto"], [role="main"] [data-surface*="contact_name"], [role="main"] [data-surface*="profile_header"], [role="main"] header a[href*="facebook.com"]');
+                        // Business Suite 2026+: khung chat không dùng <header>/role=main
+                        // (header: Array(0) khi debug 2026-09-17); tên khách nằm trong
+                        // vùng [data-surface*="detail_column"]. Ưu tiên phần tử trên-
+                        // trái nhất vì tên luôn nằm đầu góc trái của khung chat.
+                        const headerEls = [
+                            ...Array.from(document.querySelectorAll('[data-surface*="detail_column"]')),
+                            ...Array.from(document.querySelectorAll('[role="main"] header h1, [role="main"] header h2, [role="main"] header [role="heading"], [role="main"] header [dir="auto"], [role="main"] [data-surface*="contact_name"], [role="main"] [data-surface*="profile_header"], [role="main"] header a[href*="facebook.com"]'))
+                        ].sort((a, b) => {
+                            try {
+                                const ra = a.getBoundingClientRect();
+                                const rb = b.getBoundingClientRect();
+                                return (Math.round(ra.top) - Math.round(rb.top)) || (Math.round(ra.left) - Math.round(rb.left));
+                            } catch (_) { return 0; }
+                        });
                         for (const el of headerEls) {
+                            if (el.closest('[role="complementary"], [data-surface*="right_rail"], aside')) continue;
                             const txt = (el.textContent || '').trim().split('\n')[0].trim();
                             if (txt && !isInvalidName(txt) && txt.length >= 2 && txt.length <= 80 && !/^\d+$/.test(txt)) {
                                 currentContactName = cleanName(txt);
@@ -1053,15 +1180,10 @@ if (isBusiness) {
             }
 
             if (isRightPaneValid && rightPane) {
-                const rightImgs = Array.from(rightPane.querySelectorAll('img[src*="fbcdn.net"], img[src*="scontent"], img.img'));
-                for (const img of rightImgs) {
-                    const src = img.getAttribute('src');
-                    if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
-                        if ((img.naturalWidth && img.naturalWidth <= 24) || (img.width > 0 && img.width <= 24)) continue;
-                        candidateAvatarUrl = src;
-                        candidateTier = 2;
-                        break;
-                    }
+                const rightAvatar = extractAvatarFromElement(rightPane);
+                if (rightAvatar) {
+                    candidateAvatarUrl = rightAvatar;
+                    candidateTier = 2;
                 }
             }
 
@@ -1071,13 +1193,7 @@ if (isBusiness) {
                 if (currentThreadId) {
                     const rowForThread = document.querySelector(`[role="navigation"] a[href*="${currentThreadId}"], [data-surface*="thread_list"] a[href*="${currentThreadId}"], a[href*="selected_item_id=${currentThreadId}"]`)?.closest('[role="row"], [role="listitem"], [data-surface*="thread_row"]');
                     if (rowForThread) {
-                        const img = rowForThread.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
-                        if (img) {
-                            const src = img.getAttribute('src');
-                            if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
-                                threadRowImg = src;
-                            }
-                        }
+                        threadRowImg = extractAvatarFromElement(rowForThread);
                     }
                 }
 
@@ -1090,14 +1206,11 @@ if (isBusiness) {
                     const activeRow = document.querySelector('[role="navigation"] [aria-selected="true"], [role="gridcell"] [aria-selected="true"], [data-surface*="thread_list"] [aria-selected="true"], [aria-selected="true"], [aria-current="page"], [aria-current="true"]');
                     const fallbackScopes = [headerEl, activeRow].filter(Boolean);
                     for (const scope of fallbackScopes) {
-                        const img = scope.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
-                        if (img) {
-                            const src = img.getAttribute('src');
-                            if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
-                                candidateAvatarUrl = src;
-                                candidateTier = 1;
-                                break;
-                            }
+                        const avatar = extractAvatarFromElement(scope);
+                        if (avatar) {
+                            candidateAvatarUrl = avatar;
+                            candidateTier = 1;
+                            break;
                         }
                     }
                 }
@@ -2009,33 +2122,86 @@ if (isBusiness) {
             const currentSelectedId = resolveCurrentThreadId();
 
             const isInvalidText = (txt) => {
+                if (globalThis.FbCrmTextFilter?.isInvalidContactName) {
+                    return globalThis.FbCrmTextFilter.isInvalidContactName(txt);
+                }
                 if (!txt || typeof txt !== 'string') return true;
                 const s = txt.trim();
-                if (s.length < 2) return true;
-                const systemKeywordsRegex = /^(?:Tất cả tin nhắn|Tất cả|All messages|All|Tin nhắn trực tiếp|Direct messages|Tin nhắn|Messages|Hộp thư đến|Hộp thư|Inbox|Chưa đọc|Unread|Đã xong|Done|Gắn dấu sao|Đã gắn dấu sao|Starred|Spam|Thư rác|Bình luận.*|Comments.*|Thông báo|Notifications|Đang hoạt động.*|Hoạt động.*|Active now|Active recently|Online|Offline|Đang|Facebook|Messenger|Meta)$/i;
-                if (systemKeywordsRegex.test(s)) return true;
-                const singleKeywordsPattern = '(?:Tất cả tin nhắn|Tất cả|All messages|All|Tin nhắn trực tiếp|Direct messages|Tin nhắn|Messages|Hộp thư đến|Hộp thư|Inbox|Chưa đọc|Unread|Đã xong|Done|Gắn dấu sao|Đã gắn dấu sao|Starred|Spam|Thư rác|Thông báo|Notifications|Facebook|Messenger|Meta)';
-                const repeatedRegex = new RegExp(`^(?:${singleKeywordsPattern}[\\s\\n\\r]*)+$`, 'i');
-                if (repeatedRegex.test(s)) return true;
-                return false;
+                return s.length < 2 || /^(?:Tất cả tin nhắn|Tất cả|Hộp thư đến|Inbox|Spam|Tin nhắn|Facebook|Messenger|Meta)$/i.test(s);
             };
 
-            const sidebar = document.querySelector('[data-surface*="thread_list"], [data-surface*="bizweb_inbox:thread_list"], [role="navigation"]') || document;
-            
-            const rowCandidates = Array.from(sidebar.querySelectorAll(
-                '[data-surface*="thread_row"], [role="row"], [role="listitem"], a[href*="selected_item_id="], a[href*="thread_id="]'
-            ));
+            // ƯU TIÊN (Business Suite 2026+): dòng hội thoại là span
+            // [data-surface*="thread_row"] inline 0x0 — mọi bộ lọc theo tọa độ
+            // đều loại nhầm (đã reproduce 2026-09-17: chỉ cào được 1 hội thoại
+            // vì nhặt nhầm 2 link menu trái chứa selected_item_id). Phải đi lên
+            // ancestor gần nhất có kích thước thật (DIV ~366x38) làm dòng.
+            const rowCandidates = [];
+            const seenElements = new Set();
 
-            const leftAvatars = Array.from(sidebar.querySelectorAll('img[src*="fbcdn.net"], img[src*="scontent"]')).filter(img => {
-                try {
-                    const rect = img.getBoundingClientRect();
-                    return rect.width > 0 && rect.left < 500 && !img.closest('[data-message-id], [role="main"]');
-                } catch (_) { return false; }
-            });
-            for (const img of leftAvatars) {
-                const parentRow = img.closest('[role="row"], [role="listitem"], [data-surface*="thread_row"]') || img.parentElement?.parentElement;
-                if (parentRow && !rowCandidates.includes(parentRow)) {
-                    rowCandidates.push(parentRow);
+            const bizRowSpans = Array.from(document.querySelectorAll('[data-surface*="thread_row"]'));
+            for (const span of bizRowSpans) {
+                const visRow = findVisibleBizRowContainer(span);
+                if (visRow && !seenElements.has(visRow) && !visRow.closest('[data-message-id], [data-surface*="message_list"], form')) {
+                    seenElements.add(visRow);
+                    rowCandidates.push(visRow);
+                }
+            }
+
+            // Fallback cho DOM cũ (avatar/link/role=row) — chỉ chạy khi không có dòng kiểu mới
+            if (!rowCandidates.length) {
+
+                // 1. Tìm qua các avatar tròn ở Cột 2
+                const avatars = Array.from(document.querySelectorAll('img, svg image, [style*="background-image"]')).filter(el => {
+                    try {
+                        const rect = el.getBoundingClientRect();
+                        return rect.width >= 24 && rect.width <= 80 && rect.left >= 40 && rect.left <= 480 && rect.top >= 40 &&
+                            !el.closest('[data-message-id], [role="main"] header, [role="complementary"], form');
+                    } catch (_) { return false; }
+                });
+
+                for (const av of avatars) {
+                    const row = av.closest('[role="row"], [role="listitem"], [data-surface*="thread_row"], [tabindex="0"]') || av.parentElement?.parentElement;
+                    if (row && !seenElements.has(row) && !row.closest('[data-message-id], [role="main"] header, [role="complementary"], form')) {
+                        try {
+                            const rect = row.getBoundingClientRect();
+                            if (rect.left >= 40 && rect.left <= 500 && rect.height >= 30) {
+                                seenElements.add(row);
+                                rowCandidates.push(row);
+                            }
+                        } catch (_) {}
+                    }
+                }
+
+                // 2. Tìm qua các thẻ link có selected_item_id hoặc thread_id trong Cột 2
+                const links = Array.from(document.querySelectorAll('a[href*="selected_item_id="], a[href*="thread_id="], a[href*="/messages/t/"], a[href*="/messages/e2ee/t/"]')).filter(a => {
+                    try {
+                        const rect = a.getBoundingClientRect();
+                        return rect.left >= 40 && rect.left <= 500 && !a.closest('[data-message-id], [role="main"] header, [role="complementary"], form');
+                    } catch (_) { return false; }
+                });
+
+                for (const a of links) {
+                    const row = a.closest('[role="row"], [role="listitem"], [data-surface*="thread_row"], [tabindex="0"]') || a;
+                    if (row && !seenElements.has(row)) {
+                        seenElements.add(row);
+                        rowCandidates.push(row);
+                    }
+                }
+
+                // 3. Quét các phần tử có role="row" hoặc role="listitem" hoặc data-surface*="thread" trong Cột 2
+                const standardRows = Array.from(document.querySelectorAll('[data-surface*="thread_row"], [role="row"], [role="listitem"]')).filter(el => {
+                    try {
+                        const rect = el.getBoundingClientRect();
+                        return rect.left >= 40 && rect.left <= 500 && rect.height >= 35 && rect.width >= 150 &&
+                            !el.closest('[data-message-id], [role="main"] header, [role="complementary"], form');
+                    } catch (_) { return false; }
+                });
+
+                for (const r of standardRows) {
+                    if (!seenElements.has(r)) {
+                        seenElements.add(r);
+                        rowCandidates.push(r);
+                    }
                 }
             }
 
@@ -2044,48 +2210,39 @@ if (isBusiness) {
 
             for (const row of rowCandidates) {
                 try {
-                    if (row.closest('[data-message-id], [data-surface*="message_list"], [role="main"] header, form')) continue;
-
                     let threadId = null;
 
-                    const links = row.tagName === 'A' ? [row] : Array.from(row.querySelectorAll('a[href]'));
-                    for (const l of links) {
-                        const href = l.getAttribute('href') || l.href || '';
-                        const m = href.match(/(?:selected_item_id|thread_id)=(\d+)/) || href.match(/\/messages\/(?:e2ee\/)?t\/(\d+)/);
-                        if (m && m[1] && m[1] !== pageId) {
-                            threadId = m[1];
-                            break;
+                    // A. React Fiber với prop ĐẶC THÙ thread (Business Suite 2026+ đặt
+                    //    ID trong prop "threadID" - D hoa; bản cũ tìm "threadId" nên
+                    //    trượt và rơi xuống prop generic id/userId gây gộp thread)
+                    threadId = extractPageThreadIdFromFiber(row, pageId);
+
+                    // B. Trích xuất từ thẻ <a> (DOM cũ)
+                    if (!threadId) {
+                        const rowLinks = row.tagName === 'A' ? [row] : Array.from(row.querySelectorAll('a[href]'));
+                        for (const l of rowLinks) {
+                            const href = l.getAttribute('href') || l.href || '';
+                            const m = href.match(/(?:selected_item_id|thread_id|item_id)=(\d+)/) || href.match(/\/messages\/(?:e2ee\/)?t\/(\d+)/);
+                            if (m && m[1] && m[1] !== pageId) {
+                                threadId = m[1];
+                                break;
+                            }
                         }
                     }
 
+                    // C. Fallback Regex trên thuộc tính hoặc HTML của dòng
                     if (!threadId) {
-                        try {
-                            const keys = Object.keys(row);
-                            const reactKey = keys.find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactProps$'));
-                            if (reactKey) {
-                                let curr = row[reactKey];
-                                let depth = 0;
-                                while (curr && depth < 40) {
-                                    depth++;
-                                    const props = curr.memoizedProps || curr.props;
-                                    if (props) {
-                                        const candidateProps = ['threadKey', 'thread_key', 'thread_id', 'threadId', 'recipientId', 'otherUserFbId', 'selected_item_id', 'userId'];
-                                        for (const p of candidateProps) {
-                                            const val = String(props[p] || '');
-                                            const m = val.match(/(\d{12,})/);
-                                            if (m && m[1] !== pageId) {
-                                                threadId = m[1];
-                                                break;
-                                            }
-                                        }
-                                        if (threadId) break;
-                                    }
-                                    curr = curr.return || curr.child;
-                                }
-                            }
-                        } catch (_) {}
+                        const rowHtml = row.outerHTML || '';
+                        const htmlMatch = rowHtml.match(/(?:selected_item_id|thread_id|item_id)=(\d{10,})/) ||
+                            rowHtml.match(/\/messages\/(?:e2ee\/)?t\/(\d{10,})/) ||
+                            rowHtml.match(/"thread_fbid":"(\d{10,})"/) ||
+                            rowHtml.match(/"other_user_id":"(\d{10,})"/);
+                        if (htmlMatch && htmlMatch[1] && htmlMatch[1] !== pageId) {
+                            threadId = htmlMatch[1];
+                        }
                     }
 
+                    // D. Fallback nếu dòng đang active
                     if (!threadId && currentSelectedId && (Date.now() - lastThreadSwitchAt >= 1500) && (row.getAttribute('aria-selected') === 'true' || row.getAttribute('aria-current') === 'true')) {
                         threadId = currentSelectedId;
                     }
@@ -2093,12 +2250,18 @@ if (isBusiness) {
                     if (!threadId || threadId === pageId || seenIds.has(threadId)) continue;
                     seenIds.add(threadId);
 
+                    // Tên khách hàng
                     let name = '';
-                    const nameEl = row.querySelector('[data-surface*="thread_title"], h2, h3, [role="heading"], [dir="auto"], strong, b');
-                    if (nameEl) {
-                        const txt = (nameEl.textContent || '').trim().split('\n')[0].trim();
-                        if (txt && !isInvalidText(txt) && txt.length >= 2 && txt.length <= 80 && !/^\d+$/.test(txt)) {
-                            name = txt;
+                    if (threadId === currentSelectedId && currentContactName && !isInvalidText(currentContactName)) {
+                        name = currentContactName;
+                    }
+                    if (!name) {
+                        const nameEl = row.querySelector('[data-surface*="thread_title"], h2, h3, [role="heading"], [dir="auto"], strong, b');
+                        if (nameEl) {
+                            const txt = (nameEl.textContent || '').trim().split('\n')[0].trim();
+                            if (txt && !isInvalidText(txt) && txt.length >= 2 && txt.length <= 80 && !/^\d+$/.test(txt)) {
+                                name = txt;
+                            }
                         }
                     }
                     if (!name) {
@@ -2112,15 +2275,10 @@ if (isBusiness) {
                     }
                     if (!name) name = 'Khách hàng';
 
-                    let avatarUrl = null;
-                    const avatarImg = row.querySelector('img[src*="fbcdn.net"], img[src*="scontent"], img.img');
-                    if (avatarImg) {
-                        const src = avatarImg.getAttribute('src');
-                        if (src && src.startsWith('http') && !src.includes('rsrc.php') && !src.includes('static.xx.fbcdn')) {
-                            avatarUrl = src;
-                        }
-                    }
+                    // Avatar
+                    const avatarUrl = extractAvatarFromElement(row);
 
+                    // Last message
                     let lastMessage = '';
                     const textNodes = Array.from(row.querySelectorAll('span, div')).filter(el => el.children.length === 0);
                     for (let i = textNodes.length - 1; i >= 0; i--) {
@@ -2150,7 +2308,7 @@ if (isBusiness) {
             }
 
             if (discoveredThreads.length > 0) {
-                const currentHash = discoveredThreads.map(t => `${t.id}:${t.contact_name}:${t.last_message}`).join('|');
+                const currentHash = discoveredThreads.map(t => `${t.id}:${t.contact_name}:${t.last_message}:${t.avatar_url || ''}`).join('|');
                 if (currentHash !== lastSidebarSyncHash) {
                     lastSidebarSyncHash = currentHash;
                     lastSidebarSyncTime = now;
