@@ -235,7 +235,7 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
     const confirmed = window.confirm(
       `Xóa tài khoản "${accountName}" khỏi CRM?\n\n` +
       'Hội thoại, tin nhắn và cấu hình riêng của tài khoản này sẽ bị xóa. ' +
-      'Thư mục Chrome profile vẫn được giữ trên máy.'
+      'Thư mục Chrome profile của tài khoản cũng sẽ bị xóa khỏi máy.'
     );
     if (!confirmed) return;
 

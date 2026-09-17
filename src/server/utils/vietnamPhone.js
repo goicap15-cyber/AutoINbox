@@ -38,9 +38,10 @@ const PREFIX_REGISTRY = [
   ...rangePrefixes(81, 89).map((prefix) => ({ prefix, active: true, effectiveDate: null })),
   ...rangePrefixes(90, 94).map((prefix) => ({ prefix, active: true, effectiveDate: null })),
   ...rangePrefixes(96, 99).map((prefix) => ({ prefix, active: true, effectiveDate: null })),
-  // Awarded to Viettel July 2026 (research.md) - registered for audit/config
-  // visibility, but intentionally left inactive until explicitly enabled.
-  { prefix: '095', active: false, effectiveDate: '2026-07-01' }
+  // Awarded to Viettel July 2026 (research.md) - enabled 2026-09-17: real
+  // 095 numbers are in service, keeping this off silently dropped customer
+  // phones from the capture pipeline.
+  { prefix: '095', active: true, effectiveDate: '2026-07-01' }
 ];
 
 const PREFIX_INDEX = new Map(PREFIX_REGISTRY.map((entry) => [entry.prefix, entry]));

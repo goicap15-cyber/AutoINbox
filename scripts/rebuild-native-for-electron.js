@@ -60,6 +60,7 @@ function prepare() {
   // v11 stores the host-Node addon in build/Release. Preserve it while an
   // Electron-specific addon is compiled, then restore it after packaging.
   if (fs.existsSync(BUILD_DIR)) {
+    fs.mkdirSync(path.dirname(BUILD_BACKUP_DIR), { recursive: true });
     fs.renameSync(BUILD_DIR, BUILD_BACKUP_DIR);
     console.log(`[rebuild-native] Preserved host-Node build at ${BUILD_BACKUP_DIR}`);
   }

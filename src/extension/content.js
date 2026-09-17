@@ -31,7 +31,7 @@
   let capturedAccountName = '';
   let capturedAccountAvatarUrl = '';
 
-  // BÃ¡ÂºÂ¯t crm_pending_key tÃ¡Â»Â« URL nÃ¡ÂºÂ¿u cÃƒÂ³ vÃƒÂ  lÃ†Â°u vÃƒÂ o chrome.storage.local
+  // Bắt crm_pending_key từ URL nếu có và lưu vào chrome.storage.local
   const urlParams = new URLSearchParams(window.location.search);
   let pendingKeyFromUrl = urlParams.get('crm_pending_key');
   if (!pendingKeyFromUrl) {
@@ -174,14 +174,14 @@
     if (!ts) return null;
     let numericTs = Number(ts);
     if (isNaN(numericTs)) return null;
-    // NÃ¡ÂºÂ¿u timestamp < 10000000000 (10 digits), nÃƒÂ³ lÃƒÂ  giÃƒÂ¢y -> nhÃƒÂ¢n 1000 ra mili giÃƒÂ¢y
+    // Nếu timestamp < 10000000000 (10 digits), nó là giây -> nhân 1000 ra mili giây
     if (numericTs > 0 && numericTs < 10000000000) {
       numericTs *= 1000;
     }
     return numericTs;
   }
 
-  // LÃ¡ÂºÂ¯ng nghe tin nhÃ¡ÂºÂ¯n tÃ¡Â»Â« injected.js (MAIN World Interceptor)
+  // Lắng nghe tin nhắn từ injected.js (MAIN World Interceptor)
   window.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'FB_NETWORK_MESSAGE') {
       const netMsg = event.data.data;
@@ -330,8 +330,8 @@
     const accountAvatarSelectors = [
       '[aria-label*="profile" i] img, [aria-label*="profile" i] image',
       '[aria-label*="account" i] img, [aria-label*="account" i] image',
-      '[aria-label*="trang cÃƒÂ¡ nhÃƒÂ¢n" i] img, [aria-label*="trang cÃƒÂ¡ nhÃƒÂ¢n" i] image',
-      '[aria-label*="tÃƒÂ i khoÃ¡ÂºÂ£n" i] img, [aria-label*="tÃƒÂ i khoÃ¡ÂºÂ£n" i] image',
+      '[aria-label*="trang cá nhân" i] img, [aria-label*="trang cá nhân" i] image',
+      '[aria-label*="tài khoản" i] img, [aria-label*="tài khoản" i] image',
       '[role="banner"] img, [role="banner"] image',
       '[role="navigation"] img, [role="navigation"] image'
     ];
@@ -584,7 +584,7 @@
     } catch (e) { }
   }
 
-  // Ã¢â€â‚¬Ã¢â€â‚¬ DOM Observer with Avatar Extraction Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  // Ã¢â€â‚¬Ã¢â€â‚¬ DOM Observer with Avatar Extraction Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€€
   // Map<fbMessageId, lastForwardedIsOutgoing> rather than a plain Set: an id is
   // now stable across direction-unstable re-scans of the same message (spec
   // 045), so "already observed" alone can no longer gate resending - a re-scan
@@ -654,7 +654,7 @@
   // Personal Messenger renders many emoji as an image/SVG;
   // they are absent from textContent. Read only short pictographic labels so
   // avatar names and accessibility prose can never become chat content.
-  // NOTE: Quick-like (Ã°Å¸â€˜Â hover button / "ThÃƒÂ­ch") detection is intentionally
+  // NOTE: Quick-like (Ã°Å¸â€˜Â hover button / "Thích") detection is intentionally
   // removed Ã¢â‚¬â€œ the floating reaction button shares the same aria-label as a
   // real Like message, causing ghost Ã°Å¸â€˜Â entries in CRM every time a message
   // is sent. We no longer report quick-likes from the left side at all.
@@ -675,13 +675,13 @@
       ).trim();
       if (!value) continue;
       // Only match when the attribute value IS itself an emoji character
-      // (e.g. alt="Ã°Å¸â€˜Â", alt="Ã¢ÂÂ¤Ã¯Â¸Â"). Word-based labels like "ThÃƒÂ­ch"/"Like"/
+      // (e.g. alt="Ã°Å¸â€˜Â", alt="Ã¢ÂÂ¤Ã¯Â¸Â"). Word-based labels like "Thích"/"Like"/
       // "thumbs up" are deliberately excluded to prevent the hover Like
       // button from being mistaken for a real customer message.
       if (value.length <= 16 && /^\p{Extended_Pictographic}[\p{Extended_Pictographic}\uFE0F\u20D0-\u20FF]*$/u.test(value)) return value;
       // Match the exact SVG <title> used by Messenger's received Like.
       // The hover control remains excluded above because it is a button.
-      if (/(?:giÃ†Â¡ ngÃƒÂ³n tay cÃƒÂ¡i|thumbs?\s*up|\blike\b|thÃƒÂ­ch|Ã°Å¸â€˜Â)/i.test(value)
+      if (/(?:giơ ngón tay cái|thumbs?\s*up|\blike\b|thích|Ã°Å¸â€˜Â)/i.test(value)
         && (element.matches?.('img, svg, title, [role="img"]') || element.closest?.('svg'))) return 'Ã°Å¸â€˜Â';    }
     // Fallback: textContent of container itself is a single pictographic character
     const directText = (container.textContent || '').trim();
@@ -715,20 +715,20 @@
   function parseMessagesFromDOMNode(node, isRealtime = false) {
     if (!node || node.nodeType !== 1) return [];
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ Composer/UI exclusion tuyÃ¡Â»â€¡t Ã„â€˜Ã¡Â»â€˜i Ã¢â€â‚¬Ã¢â€â‚¬
-    const COMPOSER_EXCLUDE = 'form, [contenteditable="true"], [role="textbox"], [aria-label="Aa"], [aria-label="Tin nhÃ¡ÂºÂ¯n"], [aria-label*="composer"], [aria-label*="SoÃ¡ÂºÂ¡n"], [role="contentinfo"], header, nav, [role="complementary"], [aria-label*="ThÃƒÂ´ng tin vÃ¡Â»Â Ã„â€˜oÃ¡ÂºÂ¡n chat"], [aria-label*="Conversation information"], [aria-label*="Chi tiÃ¡ÂºÂ¿t cuÃ¡Â»â„¢c trÃƒÂ² chuyÃ¡Â»â€¡n"]';
+    // Ã¢â€â‚¬Ã¢â€€ Composer/UI exclusion tuyÃ¡Â»â€¡t Ã„â€˜Ã¡Â»â€˜i Ã¢â€â‚¬Ã¢â€€
+    const COMPOSER_EXCLUDE = 'form, [contenteditable="true"], [role="textbox"], [aria-label="Aa"], [aria-label="Tin nhắn"], [aria-label*="composer"], [aria-label*="Soạn"], [role="contentinfo"], header, nav, [role="complementary"], [aria-label*="ThÃƒÂ´ng tin vÃ¡Â»Â Ã„â€˜oÃ¡ÂºÂ¡n chat"], [aria-label*="Conversation information"], [aria-label*="Chi tiÃ¡ÂºÂ¿t cuÃ¡Â»â„¢c trÃƒÂ² chuyÃ¡Â»â€¡n"]';
 
-    // Ã„ÂÃ¡ÂºÂ£m bÃ¡ÂºÂ£o node nÃ¡ÂºÂ±m trong vÃƒÂ¹ng chat trung tÃƒÂ¢m main, khÃƒÂ´ng nÃ¡ÂºÂ±m trong composer/header/nav
+    // Ã„Âảm bảo node nằm trong vùng chat trung tâm main, không nằm trong composer/header/nav
     const inMain = node.closest?.('div[role="main"]');
     const inComposer = node.closest?.(COMPOSER_EXCLUDE);
     if (!inMain || inComposer) return [];
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ XÃƒÂ¡c minh node thuÃ¡Â»â„¢c hoÃ¡ÂºÂ·c chÃ¡Â»Â©a message row thÃ¡ÂºÂ­t Ã¢â€â‚¬Ã¢â€â‚¬
+    // Ã¢â€â‚¬Ã¢â€â‚¬ XÃƒÂ¡c minh node thuÃ¡Â»â„¢c hoÃ¡ÂºÂ·c chÃ¡Â»Â©a message row thÃ¡ÂºÂ­t Ã¢â€â‚¬Ã¢â€€
     // Facebook Ã„â€˜ÃƒÂ£ chuyÃ¡Â»Æ’n message container tÃ¡Â»Â« role="row" sang role="article"
-    // (xÃƒÂ¡c nhÃ¡ÂºÂ­n qua live DOM inspection 2026-08-13) - mÃ¡Â»â„¢t tin Ã¡ÂºÂ£nh cÃƒÂ³ caption
+    // (xác nhận qua live DOM inspection 2026-08-13) - một tin ảnh có caption
     // hiÃ¡Â»Æ’n thÃ¡Â»â€¹ caption vÃƒÂ  <img> dÃ†Â°Ã¡Â»â€ºi dÃ¡ÂºÂ¡ng 2 node con riÃƒÂªng biÃ¡Â»â€¡t cÃ¡Â»Â§a cÃƒÂ¹ng 1
-    // article; MutationObserver chÃ¡Â»â€° bÃƒÂ¡o node vÃ¡Â»Â«a thÃƒÂªm (thÃ†Â°Ã¡Â»Âng lÃƒÂ  node caption
-    // nhÃ¡Â»Â), nÃƒÂªn phÃ¡ÂºÂ£i leo lÃƒÂªn article mÃ¡Â»â€ºi thÃ¡ÂºÂ¥y Ã„â€˜Ã†Â°Ã¡Â»Â£c cÃ¡ÂºÂ£ <img> anh em cÃ¡Â»Â§a nÃƒÂ³.
+    // article; MutationObserver chÃ¡Â»â€° bÃƒÂ¡o node vÃ¡Â»Â«a thÃƒÂªm (thÃ†Â°Ã¡Â»Âng là node caption
+    // nhÃ¡Â»Â), nÃƒÂªn phÃ¡ÂºÂ£i leo lÃƒÂªn article mÃ¡Â»â€ºi thÃ¡ÂºÂ¥y Ã„â€˜Ã†Â°Ã¡Â»Â£c cÃ¡ÂºÂ£ <img> anh em của nó.
     const directRowMatch = node.closest?.('div[role="article"]') || node.closest?.('div[role="row"]');
     if (!directRowMatch) {
       // node isn't itself scoped to a single row - check whether it's a bulk
@@ -757,7 +757,7 @@
     const messageRow = directRowMatch || node;
     let rowEmojiContent = extractBubbleEmoji(messageRow);
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ STALE DOM GUARD (Self-Tagging Marker) Ã¢â€â‚¬Ã¢â€â‚¬
+    // Ã¢â€â‚¬Ã¢â€€ STALE DOM GUARD (Self-Tagging Marker) Ã¢â€â‚¬Ã¢â€€
     if (messageRow && messageRow.dataset) {
       const currentUrlThreadId = extractThreadIdFromUrl();
       const existingThreadId = messageRow.dataset.crmThreadId;
@@ -769,9 +769,9 @@
       }
     }
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ Media detection (Ã¡ÂºÂ£nh gÃ¡Â»Â­i/nhÃ¡ÂºÂ­n trÃƒÂªn Messenger cÃƒÂ¡ nhÃƒÂ¢n) Ã¢â€â‚¬Ã¢â€â‚¬
+    // Ã¢â€â‚¬Ã¢â€€ Media detection (ảnh gửi/nhận trên Messenger cá nhân) Ã¢â€â‚¬Ã¢â€€
     // Live DOM inspection (2026-08-13, real sent-photo message) found the
-    // photo <img>'s alt is always the fixed UI action label "MÃ¡Â»Å¸ Ã¡ÂºÂ£nh" ("Open
+    // photo <img>'s alt is always the fixed UI action label "Mở ảnh" ("Open
     // photo") - not empty, and not a description. An avatar/read-receipt
     // <img> next to a bubble always carries the contact's real name instead
     // (e.g. alt="Thu Oanh Nguyen" or "Thu Oanh Nguyen Ã„â€˜ÃƒÂ£ xem lÃƒÂºc..."), so
@@ -787,13 +787,13 @@
     //
     // Checked BEFORE the aria-label-based hasMessageLabel gate below and
     // used to bypass it entirely when a photo is found: live testing showed
-    // an image-only row's accessibility label (the "Tin nhÃ¡ÂºÂ¯n do ... gÃ¡Â»Â­i
-    // lÃƒÂºc" helper text) is not always present yet at the exact moment
+    // an image-only row's accessibility label (the "Tin nhắn do ... gửi
+    // lúc" helper text) is not always present yet at the exact moment
     // MutationObserver's callback fires - React appears to hydrate it a
     // beat after inserting the <img> itself - so gating on that label made
     // every real-time photo detection silently miss (return []) while the
     // *separate*, later-arriving caption-only row (which has its own label
-    // already attached) went through fine. The <img alt="MÃ¡Â»Å¸ Ã¡ÂºÂ£nh"> itself is
+    // already attached) went through fine. The <img alt="Mở ảnh"> itself is
     // static markup set at creation time, not hydrated later, so it doesn't
     // have this race and is sufficient proof on its own that this is a real
     // message row, not composer/avatar/unrelated UI.
@@ -878,10 +878,10 @@
     }
 
     const rowAriaLabel = messageRow.getAttribute?.('aria-label') || '';
-    const childMsgEl = !rowAriaLabel ? messageRow.querySelector?.('[aria-label*="Tin nhÃ¡ÂºÂ¯n do"], [aria-label*="Message sent"]') : null;
+    const childMsgEl = !rowAriaLabel ? messageRow.querySelector?.('[aria-label*="Tin nhắn do"], [aria-label*="Message sent"]') : null;
     const effectiveLabel = rowAriaLabel || (childMsgEl?.getAttribute?.('aria-label') || '');
 
-    const hasMessageLabel = /Tin nhÃ¡ÂºÂ¯n do .+ gÃ¡Â»Â­i lÃƒÂºc|Message sent by/i.test(effectiveLabel);
+    const hasMessageLabel = /Tin nhắn do .+ gửi lúc|Message sent by/i.test(effectiveLabel);
     // [data-message-id] checked first: live DOM inspection (spec 043) found it's
     // the reliable current-structure marker, set on the row at insertion time -
     // unlike the aria-label above, which React hydrates a beat later. Checking
@@ -895,7 +895,7 @@
     const hasNativeId = !!nativeIdEl || messageRow.hasAttribute?.('data-message-id') ||
       messageRow.hasAttribute?.('data-id') || String(messageRow.id || '').startsWith('mid.');
 
-    if (!hasMessageLabel && !hasNativeId && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return []; // KhÃƒÂ´ng phÃ¡ÂºÂ£i message row
+    if (!hasMessageLabel && !hasNativeId && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return []; // Không phải message row
 
     const rawText = (node.textContent || '').trim();
     if (!isPhotoMessage && !isVideoMessage) {
@@ -906,7 +906,7 @@
       }
     }
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ TÃƒÂ¬m tÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ leaf bubbles Ã¢â€â‚¬Ã¢â€â‚¬
+    // Ã¢â€â‚¬Ã¢â€â‚¬ TÃƒÂ¬m tÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ leaf bubbles Ã¢â€â‚¬Ã¢â€€
     const searchRoot = isRealtime ? node : messageRow;
     const allBubbles = searchRoot.querySelectorAll?.('div[dir="auto"], span[dir="auto"]');
     const leafBubbles = [];
@@ -964,9 +964,9 @@
       }
     }
 
-    // â€”â€” Media detection (áº£nh gá»­i/nháº­n trÃªn Messenger cÃ¡ÂºÂ¥ nhÃ¢n) â€”â€”
+    // â€”â€” Media detection (ảnh gửi/nhận trên Messenger cáº¥ nhân) â€”â€”
     // Live DOM inspection (2026-08-13, real sent-photo message) found the
-    // photo <img>'s alt is always the fixed UI action label "MÃ¡Â»Å¸ Ã¡ÂºÂ£nh" ("Open
+    // photo <img>'s alt is always the fixed UI action label "Mở ảnh" ("Open
     // photo") - not empty, and not a description. An avatar/read-receipt
     // <img> next to a bubble always carries the contact's real name instead
     // (e.g. alt="Thu Oanh Nguyen" or "Thu Oanh Nguyen Ã„â€˜ÃƒÂ£ xem lÃƒÂºc..."), so
@@ -982,13 +982,13 @@
     //
     // Checked BEFORE the aria-label-based hasMessageLabel gate below and
     // used to bypass it entirely when a photo is found: live testing showed
-    // an image-only row's accessibility label (the "Tin nhÃ¡ÂºÂ¯n do ... gÃ¡Â»Â­i
-    // lÃƒÂºc" helper text) is not always present yet at the exact moment
+    // an image-only row's accessibility label (the "Tin nhắn do ... gửi
+    // lúc" helper text) is not always present yet at the exact moment
     // MutationObserver's callback fires - React appears to hydrate it a
     // beat after inserting the <img> itself - so gating on that label made
     // every real-time photo detection silently miss (return []) while the
     // *separate*, later-arriving caption-only row (which has its own label
-    // already attached) went through fine. The <img alt="MÃ¡Â»Å¸ Ã¡ÂºÂ£nh"> itself is
+    // already attached) went through fine. The <img alt="Mở ảnh"> itself is
     // static markup set at creation time, not hydrated later, so it doesn't
     // have this race and is sufficient proof on its own that this is a real
     // message row, not composer/avatar/unrelated UI.
@@ -1073,10 +1073,10 @@
     }
 
     const rowAriaLabel = messageRow.getAttribute?.('aria-label') || '';
-    const childMsgEl = !rowAriaLabel ? messageRow.querySelector?.('[aria-label*="Tin nhÃ¡ÂºÂ¯n do"], [aria-label*="Message sent"]') : null;
+    const childMsgEl = !rowAriaLabel ? messageRow.querySelector?.('[aria-label*="Tin nhắn do"], [aria-label*="Message sent"]') : null;
     const effectiveLabel = rowAriaLabel || (childMsgEl?.getAttribute?.('aria-label') || '');
 
-    const hasMessageLabel = /Tin nhÃ¡ÂºÂ¯n do .+ gÃ¡Â»Â­i lÃƒÂºc|Message sent by/i.test(effectiveLabel);
+    const hasMessageLabel = /Tin nhắn do .+ gửi lúc|Message sent by/i.test(effectiveLabel);
     // [data-message-id] checked first: live DOM inspection (spec 043) found it's
     // the reliable current-structure marker, set on the row at insertion time -
     // unlike the aria-label above, which React hydrates a beat later. Checking
@@ -1090,7 +1090,7 @@
     const hasNativeId = !!nativeIdEl || messageRow.hasAttribute?.('data-message-id') ||
       messageRow.hasAttribute?.('data-id') || String(messageRow.id || '').startsWith('mid.');
 
-    if (!hasMessageLabel && !hasNativeId && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return []; // KhÃƒÂ´ng phÃ¡ÂºÂ£i message row
+    if (!hasMessageLabel && !hasNativeId && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return []; // Không phải message row
 
     const rawText = (node.textContent || '').trim();
     if (!isPhotoMessage && !isVideoMessage) {
@@ -1246,7 +1246,7 @@
     }
     const filter = globalThis.FbCrmTextFilter;
 
-    // A Like row can contain a visual minute fragment (for example 37sÃƒÂ¡ng)
+    // A Like row can contain a visual minute fragment (for example 37sáng)
     // beside its SVG. That fragment is timestamp chrome, not message text.
     const hasOnlyClockFragments = finalBubbles.length > 0 && finalBubbles.every((bubble) => {
       const bubbleText = cleanBubbleText(bubble.textContent);
@@ -1271,7 +1271,7 @@
         }];
     }
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ Ã¡ÂºÂ¢nh: trÃ¡ÂºÂ£ vÃ¡Â»Â Ã„â€˜ÃƒÂºng 1 kÃ¡ÂºÂ¿t quÃ¡ÂºÂ£ duy nhÃ¡ÂºÂ¥t cho cÃ¡ÂºÂ£ row Ã¢â€â‚¬Ã¢â€â‚¬
+    // Ã¢â€â‚¬Ã¢â€€ áº¢nh: trÃ¡ÂºÂ£ vÃ¡Â»Â Ã„â€˜ÃƒÂºng 1 kÃ¡ÂºÂ¿t quÃ¡ÂºÂ£ duy nhÃ¡ÂºÂ¥t cho cÃ¡ÂºÂ£ row Ã¢â€â‚¬Ã¢â€€
     // Live DOM inspection found Facebook renders a sent photo+caption pair
     // as two SEPARATE message articles (an image-only one with no text
     // bubble, immediately followed by a text-only one for the caption) -
@@ -1324,7 +1324,7 @@
         continue;
       }
 
-      const PRESENCE_EXACT = /^(?:Ã„Âang hoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng.*|HoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng(?:\s+\d+.*)?|Ã„ÂÃƒÂ£ hoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng.*|Active now|Active recently|Active \d+.*|Online|Offline|Ã„ÂÃƒÂ£ gÃ¡Â»Â­i|Ã„ÂÃƒÂ£ nhÃ¡ÂºÂ­n|Ã„ÂÃƒÂ£ xem|Sent|Delivered|Seen|Typing|Ã„ÂÃƒÂ£ gÃ¡Â»Â­i\s+\d+\s+(?:giÃƒÂ¢y|phÃƒÂºt|giÃ¡Â»Â|ngÃƒÂ y|tuÃ¡ÂºÂ§n|thÃƒÂ¡ng|nÃ„Æ’m)\s+trÃ†Â°Ã¡Â»â€ºc[.Ã¢â‚¬Â¦]*|Ã„Âang nhÃ¡ÂºÂ­p[.Ã¢â‚¬Â¦]*|Ã„Âang gÃ¡Â»Â­i[.Ã¢â‚¬Â¦]*|Ã„Âang tÃ¡ÂºÂ£i[.Ã¢â‚¬Â¦]*|Loading[.Ã¢â‚¬Â¦]*|Sending[.Ã¢â‚¬Â¦]*)$/i;
+      const PRESENCE_EXACT = /^(?:Ã„Âang hoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng.*|HoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng(?:\s+\d+.*)?|Ã„ÂÃƒÂ£ hoÃ¡ÂºÂ¡t Ã„â€˜Ã¡Â»â„¢ng.*|Active now|Active recently|Active \d+.*|Online|Offline|Ã„Âã gửi|Ã„Âã nhận|Ã„Âã xem|Sent|Delivered|Seen|Typing|Ã„Âã gửi\s+\d+\s+(?:giây|phút|giÃ¡Â»Â|ngày|tuần|tháng|năm)\s+trÃ†Â°Ã¡Â»â€ºc[.…]*|Ã„Âang nhập[.…]*|Ã„Âang gửi[.…]*|Ã„Âang tải[.…]*|Loading[.…]*|Sending[.…]*)$/i;
       if (PRESENCE_EXACT.test(cleanText)) {
         bubble_idx++;
         continue;
@@ -1547,7 +1547,7 @@
     const thread_id = extractThreadIdFromUrl();
     if (!thread_id || !/^\d+$/.test(thread_id)) return;
 
-    // KiÃ¡Â»Æ’m tra DOM stale (URL update nhÃ†Â°ng sidebar chÃ†Â°a update)
+    // Kiểm tra DOM stale (URL update nhưng sidebar chưa update)
     const activeSidebarItem = document.querySelector('a[aria-current="page"][href*="/messages/"], a[aria-current="true"][href*="/messages/"]');
     if (activeSidebarItem) {
       const activeUrl = activeSidebarItem.getAttribute('href') || '';
@@ -1582,7 +1582,7 @@
       if (node.nodeType !== 1) return;
 
       const inMain = node.closest?.('div[role="main"]');
-      const inComposerOrHeader = node.closest?.('form, [role="contentinfo"], [aria-label*="composer"], [aria-label*="SoÃ¡ÂºÂ¡n"], header, nav');
+      const inComposerOrHeader = node.closest?.('form, [role="contentinfo"], [aria-label*="composer"], [aria-label*="Soạn"], header, nav');
       if (!inMain || inComposerOrHeader) return;
 
       const parsedMessages = parseMessagesFromDOMNode(node, true);
@@ -1620,7 +1620,7 @@
         let tsMs = null;
         let tsSource = 'realtime_fallback';
         if (parsed.effective_label) {
-          // Parse: "Tin nhÃ¡ÂºÂ¯n do Bạn gÃ¡Â»Â­i lÃƒÂºc 15:20" hoÃ¡ÂºÂ·c "15:20"
+          // Parse: "Tin nhắn do Bạn gửi lúc 15:20" hoặc "15:20"
           const timeMatch = parsed.effective_label.match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
           if (timeMatch) {
             let hours = parseInt(timeMatch[1], 10);
@@ -1784,11 +1784,11 @@
   observerPaused = false;
   setInterval(reconcileLatestIncomingMessages, 250);
 
-  // Ã¢â€â‚¬Ã¢â€â‚¬ Call Log Scanner Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-  // QuÃƒÂ©t span[dir="auto"] chÃ¡Â»Â©a text cuÃ¡Â»â„¢c gÃ¡Â»Âi mÃ¡Â»â€”i 2 giÃƒÂ¢y.
-  // Facebook Messenger (www.facebook.com) dÃƒÂ¹ng cÃ¡ÂºÂ¥u trÃƒÂºc:
-  //   <span dir="auto">CuÃ¡Â»â„¢c gÃ¡Â»Âi thoÃ¡ÂºÂ¡i</span>
-  //   <span dir="auto">Ã„ÂÃƒÂ£ nhÃ¡Â»Â¡ cuÃ¡Â»â„¢c gÃ¡Â»Âi thoÃ¡ÂºÂ¡i</span>
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Call Log Scanner Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€€
+  // Quét span[dir="auto"] chÃ¡Â»Â©a text cuÃ¡Â»â„¢c gÃ¡Â»Âi mÃ¡Â»â€”i 2 giÃƒÂ¢y.
+  // Facebook Messenger (www.facebook.com) dùng cấu trúc:
+  //   <span dir="auto">CuÃ¡Â»â„¢c gÃ¡Â»Âi thoại</span>
+  //   <span dir="auto">Ã„ÂÃƒÂ£ nhÃ¡Â»Â¡ cuÃ¡Â»â„¢c gÃ¡Â»Âi thoại</span>
   //   <span dir="auto">CuÃ¡Â»â„¢c gÃ¡Â»Âi video</span>
   var _callSentIds = new Set();
   var _callSeenCounts = new Map();
@@ -1862,7 +1862,7 @@
         var txt = (spanEl.textContent || '').trim();
         var lower = txt.toLowerCase();
         if (!txt) continue;
-        if (!lower.includes('cuÃ¡Â»â„¢c gÃ¡Â»Âi') && !lower.includes('nhÃ¡Â»Â¡') && !lower.includes('bÃ¡Â»Â lÃ¡Â»Â¡') && !lower.includes('video')) continue;
+        if (!lower.includes('cuÃ¡Â»â„¢c gÃ¡Â»Âi') && !lower.includes('nhỡ') && !lower.includes('bÃ¡Â»Â lỡ') && !lower.includes('video')) continue;
 
         var parentEl = spanEl.closest('[role="button"]') || spanEl.closest('div.x78zum5') || spanEl.parentElement;
         if (!parentEl || !mainContainer.contains(parentEl)) continue;
@@ -1872,15 +1872,15 @@
         if (seenCallRows.has(canonicalCallRow)) continue;
         seenCallRows.add(canonicalCallRow);
         var parentText = parentEl ? (parentEl.textContent || '').trim() : '';
-        var timeMatch = parentText.match(/(\d{1,2}:\d{2}|\d+\s*(?:giÃƒÂ¢y|phÃƒÂºt|giÃ¡Â»Â|ngÃƒÂ y))/i);
+        var timeMatch = parentText.match(/(\d{1,2}:\d{2}|\d+\s*(?:giây|phút|giÃ¡Â»Â|ngày))/i);
         var timeStr = timeMatch ? timeMatch[1].replace(/[:\s]/g, '') : 'notime';
         // Missed is an outcome, not a sender direction. Avatar/position below
         // must decide which side owns the call row.
         lower = lower.replace(/\u0111\u00e3\s+nh\u1ee1|\u0111\u00e3\s+b\u1ecf\s+l\u1ee1|b\u1ecf\s+l\u1ee1/g, '');
         var isOutgoing = false;
-        if (lower.includes('cÃ¡Â»Â§a bÃ¡ÂºÂ¡n') || lower.includes('bÃ¡Â»Å¸i bÃ¡ÂºÂ¡n') || lower.includes('do bÃ¡ÂºÂ¡n')) {
+        if (lower.includes('của bạn') || lower.includes('bởi bạn') || lower.includes('do bạn')) {
           isOutgoing = true;
-        } else if (lower.includes('Ã„â€˜ÃƒÂ£ nhÃ¡Â»Â¡') || lower.includes('bÃ¡Â»Â lÃ¡Â»Â¡')) {
+        } else if (lower.includes('Ã„â€˜ÃƒÂ£ nhÃ¡Â»Â¡') || lower.includes('bÃ¡Â»Â lỡ')) {
           isOutgoing = false;
         } else {
           var rowContainer = spanEl.parentElement;
@@ -1900,7 +1900,7 @@
               }
               if (!expectedContactName) {
                 var altTxt = (imgs[ii].getAttribute('alt') || imgs[ii].getAttribute('aria-label') || '').trim();
-                if (altTxt && !/^(bÃ¡ÂºÂ¡n|you)$/i.test(altTxt)) {
+                if (altTxt && !/^(bạn|you)$/i.test(altTxt)) {
                   hasContactAvatar = true;
                   break;
                 }
@@ -1921,7 +1921,7 @@
           }
         }
 
-        var durationMatch = parentText.match(/(\d+\s*(?:giÃƒÂ¢y|phÃƒÂºt|giÃ¡Â»Â))/i);
+        var durationMatch = parentText.match(/(\d+\s*(?:giây|phút|giÃ¡Â»Â))/i);
         // The owner label can be on the article itself, a deep child, or a
         // wrapper above it (Facebook changes this during hydration). Inspect
         // all three instead of querySelector-only, which misses the row itself
@@ -1967,7 +1967,7 @@
         isOutgoing = !hasVisibleRowAvatar;
 
         var displayContent = txt;
-        if (durationMatch && !txt.includes(durationMatch[1])) displayContent = txt + ' Ã¢â‚¬Â¢ ' + durationMatch[1];
+        if (durationMatch && !txt.includes(durationMatch[1])) displayContent = txt + ' • ' + durationMatch[1];
 
         // Direction is deliberately NOT part of identity. Facebook hydrates
         // ownership labels after the call row first appears; including the
@@ -2251,7 +2251,7 @@
       var normalized = normalizeCallText(raw);
       var marker = normalized.indexOf(' dang goi cho ban');
       if (marker > 0) {
-        var directMatch = raw.match(/^(.+?)\s+Ã„â€˜ang gÃ¡Â»Âi cho bÃ¡ÂºÂ¡n(?:\s|$)/i);
+        var directMatch = raw.match(/^(.+?)\s+Ã„â€˜ang gÃ¡Â»Âi cho bạn(?:\s|$)/i);
         return (directMatch ? directMatch[1] : raw.slice(0, marker)).trim().substring(0, 60);
       }
     }
@@ -2277,7 +2277,7 @@
       '[role="banner"]',
       'div[aria-label*="gÃ¡Â»Âi"]',
       'div[aria-label*="call"]',
-      'div[aria-label*="GÃ¡Â»Å’I"]',
+      'div[aria-label*="GỌI"]',
       'div[class*="call"]',
       'div[class*="Call"]',
       'div[class*="ring"]',
@@ -2389,5 +2389,5 @@
   });
   incomingCallObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'aria-modal', 'role'] });
   setInterval(scanIncomingCallDialog, 300);
-  // Ã¢â€â‚¬Ã¢â€â‚¬ End Call Log Scanner Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  // Ã¢â€â‚¬Ã¢â€â‚¬ End Call Log Scanner Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€€
 })();

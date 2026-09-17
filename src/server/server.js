@@ -528,6 +528,104 @@ function dispatchPageSidebarSync(accountId, reason = 'manual') {
 }
 const messageRequestActionOwners = new Map();
 const pendingAccountOwners = new Map();
+// Pending-key setups that successfully promoted to a real account (this
+// process only). The /api/facebook-setup/:key/status poll additionally treats
+// an ACTIVE accounts row whose profile_dir contains the pending key as
+// completed, so a backend restart between register and poll cannot strand the
+// operator UI on "Đang chờ đăng nhập Facebook..." forever.
+const completedPendingSetups = new Map();
+// Single reader for the pending-profile owner marker. The marker is written
+// as { owner_user_id } (see POST /api/accounts/new-session); older builds
+// also wrote userId, so accept both spellings.
+function markerOwnerUserId(pendingKey) {
+  try {
+    const markerPath = path.join(APP_DATA_ROOT, 'profiles', String(pendingKey), '.crm-pending-owner.json');
+    const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+    return marker.owner_user_id || marker.userId || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// ─── Chrome profile cleanup ─────────────────────────────────────────────
+// 1) deleteChromeProfileDir(): xóa tài khoản FB = xóa luôn thư mục profile
+//    Chrome của nó (yêu cầu sản phẩm 2026-09-17; trước đây thư mục được giữ
+//    lại để tái sử dụng Facebook trust). Chỉ nhận tên thư mục cuối cùng và
+//    luôn giới hạn bên trong profiles/ để không bao giờ xóa ra ngoài.
+// 2) sweepAbandonedPendingProfiles(): profile pending_* mà operator không bao
+//    giờ đăng nhập (bấm nút rồi hủy/đóng Chrome) trước đây tồn tại vĩnh viễn
+//    - 93 thư mục ~20GB tích tụ từ 2026-08-21. Sweep xóa những cái: không
+//    được tham chiếu bởi accounts.profile_dir, không có process đang chạy,
+//    và "già" hơn 6 giờ (marker hoặc thư mục - phiên đang nhập liệu có
+//    mtime tươi nên không bao giờ bị xóa nhầm).
+const PENDING_SWEEP_MIN_AGE_MS = 6 * 60 * 60 * 1000;
+function deleteChromeProfileDir(dirName) {
+  const base = path.basename(String(dirName || '').trim());
+  if (!base || base === '.' || base === '..') return false;
+  const target = path.join(APP_DATA_ROOT, 'profiles', base);
+  if (!fs.existsSync(target)) return false;
+  try {
+    fs.rmSync(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+    console.log(`[ProfileCleanup] Đã xóa thư mục Chrome profile: ${base}`);
+    return true;
+  } catch (error) {
+    console.warn(`[ProfileCleanup] Chưa xóa được ${base} (Chrome có thể còn giữ file):`, error.message);
+    return false;
+  }
+}
+function sweepAbandonedPendingProfiles() {
+  const profilesRoot = path.join(APP_DATA_ROOT, 'profiles');
+  let referenced;
+  try {
+    referenced = new Set(db.prepare('SELECT profile_dir FROM accounts').all()
+      .map((row) => path.basename(String(row.profile_dir || '')).toLowerCase()));
+  } catch (_) { return; }
+  let removed = 0;
+  try {
+    for (const entry of fs.readdirSync(profilesRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('pending_')) continue;
+      if (referenced.has(entry.name.toLowerCase())) continue;
+      if (processManager.processes.has(entry.name)) continue;
+      const dirPath = path.join(profilesRoot, entry.name);
+      let ageMs = null;
+      try { ageMs = Date.now() - fs.statSync(path.join(dirPath, '.crm-pending-owner.json')).mtimeMs; } catch (_) {}
+      if (ageMs === null) {
+        try { ageMs = Date.now() - fs.statSync(dirPath).mtimeMs; } catch (_) { continue; }
+      }
+      if (ageMs < PENDING_SWEEP_MIN_AGE_MS) continue;
+      try {
+        fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+        removed++;
+        console.log(`[ProfileCleanup] Đã xóa profile pending bỏ hoang: ${entry.name}`);
+      } catch (_) { /* file đang bị khóa - sweep lần sau sẽ thử lại */ }
+    }
+  } catch (_) {}
+  if (removed) console.log(`[ProfileCleanup] Sweep hoàn tất: ${removed} profile pending rác.`);
+}
+setTimeout(sweepAbandonedPendingProfiles, 60 * 1000);
+setInterval(sweepAbandonedPendingProfiles, 60 * 60 * 1000);
+// Operator closed the setup Chrome without finishing registration: delete
+// that pending profile right away (their request 2026-09-17: "ấn thêm tk fb
+// mở chrome lên nhưng user k login cũng tự động xóa") and tell the waiting
+// AccountManagerModal to stop spinning. The 6h sweep stays as the backstop
+// for crashes/backend restarts this immediate path can't see.
+processManager.onPendingSessionAbandoned = (pendingKey) => {
+  const key = String(pendingKey || '');
+  if (!/^pending_[a-zA-Z0-9_]+$/.test(key)) return;
+  setTimeout(() => {
+    // Registration can land between Chrome exit and this timer - never
+    // delete a profile some account row still points at.
+    try {
+      if (db.prepare('SELECT 1 FROM accounts WHERE profile_dir LIKE ?').get(`%${key}%`)) return;
+    } catch (_) { return; }
+    pendingAccountOwners.delete(key);
+    deleteChromeProfileDir(key);
+    io.emit('ACCOUNT_LINK_FAILED', {
+      pending_key: key,
+      error: 'Đã đóng Chrome trước khi hoàn tất đăng nhập - phiên thêm tài khoản đã được dọn.'
+    });
+  }, 5000);
+};
 // Existing-account "Kết nối Facebook" launches should become background
 // processes only after that account's extension has registered successfully.
 // New-account pending sessions are intentionally excluded so the login window
@@ -1126,27 +1224,42 @@ wss.on('connection', (ws, req) => {
             console.warn(`[WS] Bỏ qua REGISTER_ACCOUNT với account_id không hợp lệ: ${JSON.stringify(account_id)}`);
             break;
           }
+          let ownerUserId = pending_key ? pendingAccountOwners.get(String(pending_key)) : null;
+          if (pending_key && !ownerUserId) ownerUserId = markerOwnerUserId(pending_key);
+          // Set when a removed account is re-added during an active add-account
+          // session: the Chrome hosting this extension actually lives in that
+          // pending profile, so registration must adopt it (see profileDir
+          // resolution and post-insert cleanup below).
+          let readdPendingKey = null;
           const removedAccount = db.prepare(
             'SELECT account_id FROM removed_accounts WHERE account_id = ?'
           ).get(String(account_id));
           if (removedAccount && !pending_key) {
-            console.warn(`[WS] Từ chối stale REGISTER_ACCOUNT của tài khoản đã xóa: ${account_id}`);
-            ws.close(1000, 'ACCOUNT_REMOVED');
-            break;
+            const activePendingKey = [...processManager.processes.entries()]
+              .find(([key, proc]) => key.startsWith('pending_') && proc?.status === 'RUNNING')?.[0];
+            if (activePendingKey) {
+              // The operator deleted this account and is adding it back right
+              // now. The fresh setup Chrome registers as soon as it sees the
+              // login cookie - its storage may not carry the pending-key
+              // capture (redirect timing), so this REGISTER arrives without
+              // one. Rejecting here closed the socket and looped forever
+              // while the UI waited on "Đang chờ đăng nhập Facebook..."
+              // (reproduced 2026-09-17). Adopt the session instead: re-add
+              // with the session owner and its pending profile dir.
+              db.prepare('DELETE FROM removed_accounts WHERE account_id = ?').run(String(account_id));
+              ownerUserId = pendingAccountOwners.get(activePendingKey) || markerOwnerUserId(activePendingKey) || ownerUserId;
+              readdPendingKey = activePendingKey;
+              console.log(`[WS] REGISTER_ACCOUNT: nhận lại tài khoản đã xóa ${account_id} trong phiên thêm mới ${activePendingKey}`);
+            } else {
+              console.warn(`[WS] Từ chối stale REGISTER_ACCOUNT của tài khoản đã xóa: ${account_id}`);
+              ws.close(1000, 'ACCOUNT_REMOVED');
+              break;
+            }
           }
           if (pending_key) {
             db.prepare('DELETE FROM removed_accounts WHERE account_id = ?').run(String(account_id));
           }
-          let ownerUserId = pending_key ? pendingAccountOwners.get(String(pending_key)) : null;
-          if (pending_key && !ownerUserId) {
-            try {
-              const ownerFile = path.join(APP_DATA_ROOT, 'profiles', String(pending_key), '.crm-pending-owner.json');
-              if (fs.existsSync(ownerFile)) {
-                const ownerData = JSON.parse(fs.readFileSync(ownerFile, 'utf8'));
-                ownerUserId = ownerData.userId || null;
-              }
-            } catch (_) {}
-          }          const previousExtension = extensionConnections.get(account_id);
+          const previousExtension = extensionConnections.get(account_id);
           // A Page Chrome has the same Facebook account id as Personal
           // Messenger. Preserve the personal socket instead of closing it;
           // Page identifies itself immediately afterwards with PAGE_CONTEXT_READY.
@@ -1180,6 +1293,15 @@ wss.on('connection', (ws, req) => {
               processManager.promotePendingProcess(pending_key, account_id);
               profileDir = procData.profileDir || profileDir;
             }
+          } else if (readdPendingKey) {
+            // Re-add during an active session: same pending-Chrome adoption,
+            // without the pending-key capture in the extension's storage.
+            profileDir = path.join(APP_DATA_ROOT, 'profiles', readdPendingKey);
+            if (processManager.processes.has(readdPendingKey)) {
+              const procData = processManager.processes.get(readdPendingKey);
+              processManager.promotePendingProcess(readdPendingKey, account_id);
+              profileDir = procData.profileDir || profileDir;
+            }
           } else {
             // Reconnect of an existing account - preserve whatever profile_dir is already in DB.
             // Only fall back to the default path if account is truly new (not in DB yet).
@@ -1211,10 +1333,12 @@ wss.on('connection', (ws, req) => {
           `).run(account_id, accName, profileDir, ownerUserId || null,
             ownerUserId ? db.prepare('SELECT company_id FROM users WHERE id=?').get(ownerUserId)?.company_id || ownerUserId : null,
             accountAvatarFilename);
-          if (pending_key) {
-            pendingAccountOwners.delete(String(pending_key));
+          if (pending_key || readdPendingKey) {
+            const setupKey = String(pending_key || readdPendingKey);
+            completedPendingSetups.set(setupKey, { account_id: String(account_id), completed_at: Date.now() });
+            pendingAccountOwners.delete(setupKey);
             try {
-              fs.unlinkSync(path.join(APP_DATA_ROOT, 'profiles', String(pending_key), '.crm-pending-owner.json'));
+              fs.unlinkSync(path.join(APP_DATA_ROOT, 'profiles', setupKey, '.crm-pending-owner.json'));
             } catch (_) {}
           }
 
@@ -1222,7 +1346,7 @@ wss.on('connection', (ws, req) => {
           try {
             InboxSourceService.createPersonalSource(account_id, accName, db);
           } catch (_) {}
-          io.emit('ACCOUNT_STATUS_CHANGED', { account_id, status: 'ACTIVE', avatar_url: accountAvatarFilename });
+          io.emit('ACCOUNT_STATUS_CHANGED', { account_id, status: 'ACTIVE', avatar_url: accountAvatarFilename, pending_key: pending_key || readdPendingKey || null, name: accName });
           io.emit('INBOX_SOURCE_ADDED', { id: 'src_personal_' + account_id, source_type: 'personal_messenger', display_name: accName });
           io.emit('EXTENSION_CONNECTION_CHANGED', { account_id, is_connected: true });
 
@@ -2762,6 +2886,22 @@ wss.on('connection', (ws, req) => {
                 // Stable per thread+content: repeated sidebar scans cannot
                 // manufacture duplicate provisional bubbles from old previews.
                 const previewId = 'sidebar_preview_' + previewHash;
+                // Sau mỗi lần CRM gửi tin (text/video), last_message của thread
+                // đổi sang tin outgoing nên preview cũ của khách (đã được bắt
+                // bằng fb_message_id thật) lại nhìn "thay đổi" với bộ dò sidebar
+                // và sinh bong bóng provisional trùng nội dung (reproduced
+                // 2026-09-17: gửi video xong, tin cũ của khách hiện lại lần
+                // nữa). Nếu thread đã có tin thật (không phải provisional) cùng
+                // nội dung trong 24h thì bỏ qua - history sync vẫn chạy phía
+                // dưới và sẽ confirm/promote row sẵn có thay vì tạo mới.
+                const alreadyRealIncoming = db.prepare(`
+                  SELECT 1 FROM messages
+                  WHERE thread_id = ? AND is_outgoing = 0 AND content = ?
+                    AND fb_message_id NOT LIKE 'sidebar_preview_%'
+                    AND timestamp_ms >= ?
+                  LIMIT 1
+                `).get(canonicalThreadId, previewContent, previewTimestamp - 24 * 60 * 60 * 1000);
+                if (!alreadyRealIncoming) {
                 const previewPersistence = ConversationRepository.saveMessagesTransaction(canonicalThreadId, [{
                   fb_message_id: previewId,
                   content: previewContent,
@@ -2812,16 +2952,17 @@ wss.on('connection', (ws, req) => {
                     });
                   }
                 }
-              }
+                }
 
-              InboxSyncScheduler.enqueueThreadSync({
-                ...changed,
-                thread_id: canonicalThreadId,
-                reason: 'sidebar_incoming',
+                InboxSyncScheduler.enqueueThreadSync({
+                  ...changed,
+                  thread_id: canonicalThreadId,
+                  reason: 'sidebar_incoming',
                 allow_navigation: true,
                 priority: 'high',
                 sync_mode: 'incremental'
               });
+            }
             }
 
             for (const t of threads) {
@@ -3520,6 +3661,25 @@ wss.on('connection', (ws, req) => {
                   error: null,
                   updated_at: new Date().toISOString()
                 });
+                // 'dispatched' chỉ được gửi sau khi waitForAttachmentDomConfirmation
+                // đã thấy tin hiện thật trong khung chat Messenger - nghĩa là tin
+                // ĐÃ tới người nhận. Đổi "sent" ngay thay vì chờ echo chính thức
+                // (video Facebook xử lý/xuất echo rất lâu, có lần pending cả vài
+                // phút trong khi khách đã nhận tin từ lâu). fb_message_id để null,
+                // echo tới sau vẫn điền như cũ và không bị trùng vì dedup đọc
+                // delivery_status='sent' như một merge point.
+                if (message.delivery_status === 'pending') {
+                  db.prepare(
+                    "UPDATE messages SET delivery_status = 'sent', delivery_error = NULL WHERE id = ? AND delivery_status = 'pending'"
+                  ).run(message.id);
+                  io.emit('MESSAGE_SENT', {
+                    thread_id: message.thread_id,
+                    client_message_id: message.client_message_id,
+                    success: true,
+                    fb_message_id: null,
+                    status: 'sent'
+                  });
+                }
               }
 
               // Auto-fail watchdog: if this attachment attempt is still stuck
@@ -4317,35 +4477,16 @@ app.post('/api/accounts/new-session', async (req, res) => {
     console.log(`[API] Reuse unfinished Facebook login session: ${existingPendingKey}`);
     return res.json({ success: true, pending_key: existingPendingKey, reused: true });
   }
-  // Recover an unfinished login owned by this operator after a backend
-  // restart. Without this durable marker every click created another cold
-  // Chrome profile, losing Facebook device trust/cache and making login slow.
-  const profilesRoot = path.join(APP_DATA_ROOT, 'profiles');
-  try {
-    const reusable = fs.readdirSync(profilesRoot, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && entry.name.startsWith('pending_'))
-      .map((entry) => {
-        const markerPath = path.join(profilesRoot, entry.name, '.crm-pending-owner.json');
-        try {
-          const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
-          const stat = fs.statSync(markerPath);
-          return String(marker.owner_user_id) === String(req.user.id)
-            ? { pendingKey: entry.name, modifiedMs: stat.mtimeMs }
-            : null;
-        } catch (_) { return null; }
-      })
-      .filter(Boolean)
-      .sort((a, b) => b.modifiedMs - a.modifiedMs)[0];
-    if (reusable) {
-      pendingAccountOwners.set(reusable.pendingKey, req.user.id);
-      const success = await processManager.startNewAccountProcess(reusable.pendingKey);
-      if (success) {
-        console.log(`[API] Recovered unfinished Facebook login profile: ${reusable.pendingKey}`);
-        return res.json({ success: true, pending_key: reusable.pendingKey, reused: true });
-      }
-      pendingAccountOwners.delete(reusable.pendingKey);
-    }
-  } catch (_) {}
+  // NOTE: the old on-disk recovery (scanning profiles/pending_* markers and
+  // reviving the newest one after a backend restart) is intentionally gone.
+  // A revived profile has no Puppeteer attachment, so the window it opens
+  // carries whatever extension state a previous run left behind - in practice
+  // an orphan Chrome with no working CRM extension, so nothing ever sent
+  // REGISTER_ACCOUNT and the operator UI waited on "Đang chờ đăng nhập
+  // Facebook..." forever (reproduced 2026-09-17). Every click now either
+  // reuses an in-memory session THIS process launched (extension guaranteed
+  // installed) or creates a fresh pending profile via startNewAccountProcess,
+  // whose puppeteer launch installs the extension before Facebook opens.
 
   const now = new Date();
   const dateStr = now.toISOString().replace(/[-T:.Z]/g, '').substring(0, 14);
@@ -4365,12 +4506,36 @@ app.post('/api/accounts/new-session', async (req, res) => {
   if (!success) pendingAccountOwners.delete(pendingKey);
   res.json({ success, pending_key: pendingKey });
 });
+// The AccountManagerModal polls this every 1.5s while a setup session is
+// open, as the fallback when the ACCOUNT_STATUS_CHANGED socket event is
+// missed. Completed = REGISTER_ACCOUNT promoted this pending key, or an
+// ACTIVE accounts row already points at the pending profile (covers a
+// backend restart between register and poll).
+app.get('/api/facebook-setup/:pendingKey/status', (req, res) => {
+  const pendingKey = String(req.params.pendingKey || '').trim();
+  if (!/^pending_[a-zA-Z0-9_]+$/.test(pendingKey)) {
+    return res.status(400).json({ success: false, error: 'pending_key không hợp lệ.' });
+  }
+  const ownerUserId = pendingAccountOwners.get(pendingKey) || markerOwnerUserId(pendingKey);
+  if (ownerUserId && String(ownerUserId) !== String(req.user.id)) {
+    return res.status(403).json({ success: false, error: 'Phiên thêm tài khoản này thuộc người dùng khác.' });
+  }
+  let completion = completedPendingSetups.get(pendingKey);
+  if (!completion) {
+    const row = db.prepare("SELECT id FROM accounts WHERE profile_dir LIKE ? AND status = 'ACTIVE'").get(`%${pendingKey}%`);
+    if (row) {
+      completion = { account_id: String(row.id), completed_at: Date.now() };
+      completedPendingSetups.set(pendingKey, completion);
+    }
+  }
+  res.json({ success: true, completed: Boolean(completion), account_id: completion?.account_id || null });
+});
 app.delete('/api/accounts/:id', (req, res) => {
   try {
     const accountId = String(req.params.id || '').trim();
     completeNewAccountBootstrapSync(accountId);
     const account = enterpriseAccess.canAccessAccount(req.user, accountId)
-      ? db.prepare('SELECT id FROM accounts WHERE id = ?').get(accountId) : null;
+      ? db.prepare('SELECT id, profile_dir FROM accounts WHERE id = ?').get(accountId) : null;
     if (!enterpriseAccess.isCompanyAdmin(req.user) && !(req.user.role === 'ADMIN' && req.user.username === 'admin')) {
       return res.status(403).json({ success: false, error: 'Chỉ Admin doanh nghiệp được xóa tài khoản Facebook.' });
     }
@@ -4391,6 +4556,15 @@ app.delete('/api/accounts/:id', (req, res) => {
     }
 
     const result = AccountService.removeAccount(accountId, db);
+    // Xóa luôn thư mục profile Chrome của tài khoản (yêu cầu sản phẩm
+    // 2026-09-17 - trước đây thư mục được cố tình giữ lại để tái sử dụng
+    // Facebook trust). Chạy trễ 1.5s sau response để Chrome tree từ
+    // stopAccountProcess kịp thoát và nhả file lock; rmSync có sẵn retry,
+    // nếu vẫn khóa thì sweep định kỳ sẽ dọn nốt.
+    const deletedAccountDir = String(account?.profile_dir || result?.profile_dir || '');
+    if (deletedAccountDir) {
+      setTimeout(() => { deleteChromeProfileDir(deletedAccountDir); }, 1500);
+    }
     // Close a popup that may already be visible before clients remove the
     // account from their local list.
     io.emit('INCOMING_CALL_ENDED', { account_id: accountId, reason: 'ACCOUNT_REMOVED' });

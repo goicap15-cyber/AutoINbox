@@ -2,6 +2,20 @@
 
 (function () {
   const RELATIVE_TIME_METADATA_RE = /^\d+\s*(?:gi\u00e2y|ph\u00fat|gi\u1edd|ng\u00e0y|tu\u1ea7n|th\u00e1ng|n\u0103m|seconds?|minutes?|hours?|days?|weeks?|months?|years?)(?:\s*(?:tr\u01b0\u1edbc|ago))?$/iu;
+  
+// Số điện thoại di động VN dạng số trơn (0/84/+84 + 9 số, đầu số đang hoạt
+// động). Khách hay gửi SĐT dưới dạng đúng các con số - pattern junk số dài
+// phía dưới KHÔNG được nuốt các giá trị này, nếu không tin nhắn biến mất khỏi
+// CRM ngay từ lúc sync và pipeline bắt SĐT (spec 035) không bao giờ thấy.
+// Đầu số tham chiếu registry trong src/server/utils/vietnamPhone.js
+// (032-039, 052/055/056/058/059, 070, 076-079, 081-089, 090-094, 096-099).
+const VN_MOBILE_RE = /^(?:\+?84|0)(?:3[2-9]|5[25689]|7[06-9]|8[1-9]|9[0-46-9]|95)\d{7}$/;
+function isBareVietnamMobileText(text) {
+  const trimmed = String(text || '').trim();
+  if (!/^[+\d][\d\s.\-()]{8,19}$/.test(trimmed)) return false;
+  return VN_MOBILE_RE.test(trimmed.replace(/[\s.\-()]/g, ''));
+}
+
   const SYSTEM_PATTERNS = [
     // E2EE & Security Notices
     /Tin nhắn và cuộc gọi (?:đang )?được bảo mật/i,
@@ -109,6 +123,8 @@
   ];
 
   function isSystemOrMetadataText(text) {
+    if (isBareVietnamMobileText(text)) return false; // SĐT VN: không phải junk
+    if (/^d{9,}$/.test(String(text || '').trim())) return true; // chuỗi số rác dài (đã loại SĐT VN)
     if (!text || typeof text !== 'string') return true;
     const trimmed = text.trim();
     if (!trimmed) return true;

@@ -96,36 +96,43 @@ class CampaignResponseStatsService {
           ORDER BY response.id ASC
           LIMIT 1
         ) AS reply_preview,
-        (
-          SELECT capture.normalized_phone
-          FROM contact_phone_captures capture
-          WHERE capture.thread_id = cr.thread_id
-            AND capture.selection_state <> 'ignored'
-            AND EXISTS (
-              SELECT 1 FROM campaign_response_events response
-              WHERE response.campaign_recipient_id = cr.id
-            )
-            AND COALESCE(NULLIF(capture.message_timestamp_ms, 0), unixepoch(capture.detected_at) * 1000)
-                >= (unixepoch(cr.sent_at) * 1000) - 60000
-          ORDER BY COALESCE(NULLIF(capture.message_timestamp_ms, 0), unixepoch(capture.detected_at) * 1000) ASC, capture.id ASC
-          LIMIT 1
+        COALESCE(
+          (
+            SELECT capture.normalized_phone
+            FROM contact_phone_captures capture
+            WHERE capture.thread_id = cr.thread_id
+              AND capture.selection_state <> 'ignored'
+              AND EXISTS (
+                SELECT 1 FROM campaign_response_events response
+                WHERE response.campaign_recipient_id = cr.id
+              )
+              AND COALESCE(NULLIF(capture.message_timestamp_ms, 0), unixepoch(capture.detected_at) * 1000)
+                  >= (unixepoch(cr.sent_at) * 1000) - 60000
+            ORDER BY COALESCE(NULLIF(capture.message_timestamp_ms, 0), unixepoch(capture.detected_at) * 1000) ASC, capture.id ASC
+            LIMIT 1
+          ),
+          NULLIF(c.phone, '')
         ) AS phone,
-        (
-          SELECT capture.detected_at
-          FROM contact_phone_captures capture
-          WHERE capture.thread_id = cr.thread_id
-            AND capture.selection_state <> 'ignored'
-            AND EXISTS (
-              SELECT 1 FROM campaign_response_events response
-              WHERE response.campaign_recipient_id = cr.id
-            )
-            AND COALESCE(NULLIF(capture.message_timestamp_ms, 0), unixepoch(capture.detected_at) * 1000)
-                >= (unixepoch(cr.sent_at) * 1000) - 60000
-          ORDER BY COALESCE(NULLIF(capture.message_timestamp_ms, 0), unixepoch(capture.detected_at) * 1000) ASC, capture.id ASC
-          LIMIT 1
+        COALESCE(
+          (
+            SELECT capture.detected_at
+            FROM contact_phone_captures capture
+            WHERE capture.thread_id = cr.thread_id
+              AND capture.selection_state <> 'ignored'
+              AND EXISTS (
+                SELECT 1 FROM campaign_response_events response
+                WHERE response.campaign_recipient_id = cr.id
+              )
+              AND COALESCE(NULLIF(capture.message_timestamp_ms, 0), unixepoch(capture.detected_at) * 1000)
+                  >= (unixepoch(cr.sent_at) * 1000) - 60000
+            ORDER BY COALESCE(NULLIF(capture.message_timestamp_ms, 0), unixepoch(capture.detected_at) * 1000) ASC, capture.id ASC
+            LIMIT 1
+          ),
+          c.phone_captured_at
         ) AS phone_captured_at
       FROM campaign_recipients cr
       LEFT JOIN threads t ON t.id = cr.thread_id
+      LEFT JOIN contacts c ON c.thread_id = cr.thread_id
       WHERE cr.campaign_id = ? AND cr.status = 'sent' AND cr.sent_at IS NOT NULL
       ORDER BY datetime(cr.sent_at) DESC, cr.selection_order ASC
     `).all(campaignId);

@@ -537,9 +537,15 @@ class ProcessManager {
 
       browser.on('disconnected', () => {
         const entry = this.processes.get(pendingKey);
+        // Entry still sitting under pendingKey with this PID = the Chrome was
+        // closed BEFORE promotePendingProcess() moved it to a real account id,
+        // i.e. the operator abandoned the setup without completing login.
         if (entry && entry.pid === child.pid) {
           console.log(`[ProcessManager] Chrome setup [PID ${child.pid}] cho ${pendingKey} đã đóng.`);
           this.processes.delete(pendingKey);
+          if (typeof this.onPendingSessionAbandoned === 'function') {
+            try { this.onPendingSessionAbandoned(pendingKey); } catch (_) {}
+          }
         }
       });
 
