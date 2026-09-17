@@ -180,8 +180,12 @@ class InboxSourceService {
       console.log(`[PAGE_SOURCE] 🏷️ Tự động cập nhật display_name cho source ${sourceId}: "${pageName.trim()}"`);
     }
 
-    // 2. Bind thread → source if not already correct
-    if (targetThreadId) {
+    // 2. Bind thread → source if not already correct.
+    // Tách kênh Page/cá nhân (2026-09-17): chỉ được gắn các thread đã
+    // namespaced (page_<pageId>:<psid>) - một thread cá nhân (id thường)
+    // không bao giờ bị chuyển sang nguồn Page nữa, tránh sidebar/metadata
+    // của Page "chiếm" hội thoại cá nhân cùng psid.
+    if (targetThreadId && String(targetThreadId).startsWith(`page_${pageId}:`)) {
       const thread = database.prepare('SELECT source_id FROM threads WHERE id = ?').get(String(targetThreadId));
       if (thread && thread.source_id !== sourceId) {
         database.prepare('UPDATE threads SET source_id = ? WHERE id = ?').run(sourceId, String(targetThreadId));
