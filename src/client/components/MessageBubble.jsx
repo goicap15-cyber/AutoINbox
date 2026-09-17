@@ -87,7 +87,7 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   const visibleContent = (hasMedia && (isOutgoing || isMediaPlaceholderText)) ? '' : content;
   const isLikeText = (content?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(content?.trim() || '')) ||
                      (visibleContent?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(visibleContent?.trim() || ''));
-  const isQuickLike = !isCallMessage && !isUnsent && isLikeText;
+  const isQuickLike = !isCallMessage && !isUnsent && !hasMedia && isLikeText;
   const displayUrl = msg.local_media_path || mediaUrl || msg.attachment?.local_media_path || null;
   // Never render an empty placeholder bubble.
   // A valid bubble must carry visible content text, playable media (displayUrl), or a call payload.

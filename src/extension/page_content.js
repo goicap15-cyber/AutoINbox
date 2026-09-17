@@ -1501,8 +1501,8 @@ if (isBusiness) {
         const isSvgNode = node.tagName && node.tagName.toLowerCase() === 'svg';
         const svgs = isSvgNode ? [node] : Array.from(node.querySelectorAll?.('svg') || []);
         for (const svg of svgs) {
-            // Chỉ loại trừ các nút bấm hành động phụ (bày tỏ, tùy chọn, chuyển tiếp) hoặc composer, không loại trừ role="button" của tin nhắn
-            if (svg.closest('[aria-label*="tùy chọn" i], [aria-label*="bày tỏ" i], [aria-label*="chuyển tiếp" i], [aria-label*="trả lời" i], button[aria-label*="menu" i], [data-surface*="composer"], form, footer')) {
+            // Loại trừ các nút bấm điều khiển video, hành động phụ (bày tỏ, tùy chọn, chuyển tiếp) hoặc composer
+            if (svg.closest('video, [data-surface*="video"], .video-player, [data-testid*="video"], [aria-label*="tùy chọn" i], [aria-label*="bày tỏ" i], [aria-label*="chuyển tiếp" i], [aria-label*="trả lời" i], button[aria-label*="menu" i], [data-surface*="composer"], form, footer')) {
                 continue;
             }
             const vb = (svg.getAttribute('viewBox') || '').trim();
@@ -1518,8 +1518,8 @@ if (isBusiness) {
 
             const isStandardLikeVb = vb.includes('16') || vb.includes('20') || vb.includes('24') || vb.includes('28') || vb.includes('32') || vb.includes('36') || vb.includes('40') || vb.includes('48') || vb.includes('64');
             const fill = (svg.getAttribute('fill') || svg.innerHTML || '').toLowerCase();
-            const isBlueLikeSvg = fill.includes('0084ff') || fill.includes('0a7cff') || fill.includes('0099ff') || fill.includes('rgb(0, 132, 255)') || fill.includes('rgb(10, 124, 255)') || fill.includes('rgb(0,132,255)') || fill.includes('currentcolor');
-            if ((isStandardLikeVb || isBlueLikeSvg) && !svg.closest('[data-testid*="status"]') && !svg.closest('[aria-label*="Đã gửi" i]') && !svg.closest('[aria-label*="Đã chuyển" i]')) {
+            const isBlueLikeSvg = fill.includes('0084ff') || fill.includes('0a7cff') || fill.includes('0099ff') || fill.includes('rgb(0, 132, 255)') || fill.includes('rgb(10, 124, 255)') || fill.includes('rgb(0,132,255)');
+            if (isStandardLikeVb && isBlueLikeSvg && !svg.closest('[data-testid*="status"]') && !svg.closest('[aria-label*="Đã gửi" i]') && !svg.closest('[aria-label*="Đã chuyển" i]')) {
                 return true;
             }
         }
@@ -1581,18 +1581,13 @@ if (isBusiness) {
             ? textFilter.cleanMessageText(rawText)
             : rawText;
 
-        // Ưu tiên kiểm tra Nút Thích / Like (Thumbs Up 👍) đầu tiên
-        if (isLikeElementOrWrapper(messageIdNode, cleanedText || rawText)) {
-            return { kind: 'text', text: '👍' };
-        }
-
         // Call Log Guard: Never treat a call notification wrapper (which may contain avatar/icon <img>) as an image attachment!
         const lowerRawText = rawText.toLowerCase();
         if (rawText && (lowerRawText.includes('cuộc gọi') || lowerRawText.includes('bỏ lỡ') || lowerRawText.includes('đã nhỡ') || lowerRawText.includes('nhỡ'))) {
             return { kind: 'text', text: rawText };
         }
 
-        // Kiểm tra Video bằng pageVideoDetector chuyên biệt cho Page
+        // Ưu tiên kiểm tra Video bằng pageVideoDetector chuyên biệt cho Page trước
         const videoDetector = globalThis.FbPageVideoDetector || (typeof window !== 'undefined' && window.FbPageVideoDetector);
         if (videoDetector && typeof videoDetector.detectPageVideo === 'function') {
             const videoResult = videoDetector.detectPageVideo(messageIdNode, cleanedText || rawText);
@@ -1606,6 +1601,11 @@ if (isBusiness) {
                     caption: videoResult.caption || null
                 };
             }
+        }
+
+        // Kiểm tra Nút Thích / Like (Thumbs Up 👍) sau khi đã loại trừ video
+        if (isLikeElementOrWrapper(messageIdNode, cleanedText || rawText)) {
+            return { kind: 'text', text: '👍' };
         }
 
         const imgs = messageIdNode.querySelectorAll('img[src]');
