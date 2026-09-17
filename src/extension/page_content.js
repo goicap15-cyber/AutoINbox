@@ -178,6 +178,9 @@ if (isBusiness) {
         return null;
     }
 
+    // Bộ đệm thông tin hội thoại nhận từ MAIN world (injected.js)
+    const cachedBizThreadsFromMain = new Map();
+
     // Lắng nghe URL video đã giải mã từ MAIN world (injected.js)
     const reportedResolvedMedia = new Set();
     window.addEventListener('message', (event) => {
@@ -216,6 +219,15 @@ if (isBusiness) {
                         poster_url: posterUrl || null
                     }
                 }).catch(() => {});
+            }
+        }
+
+        if (event.data?.type === 'CRM_EXTRACT_BIZ_SIDEBAR_RESPONSE') {
+            const threads = event.data?.threads || [];
+            for (const t of threads) {
+                if (t && t.threadId) {
+                    cachedBizThreadsFromMain.set(String(t.threadId), t);
+                }
             }
         }
     });
@@ -419,6 +431,14 @@ if (isBusiness) {
 
     function extractPageThreadIdFromFiber(rootEl, excludeId) {
         if (!rootEl) return null;
+
+        // 1. Kiểm tra thuộc tính data-crm-thread-id do injected.js (MAIN world) đã bóc tách từ Fiber và đóng dấu lên DOM
+        const stampedId = rootEl.getAttribute?.('data-crm-thread-id') ||
+            rootEl.querySelector?.('[data-crm-thread-id]')?.getAttribute?.('data-crm-thread-id') ||
+            rootEl.closest?.('[data-crm-thread-id]')?.getAttribute?.('data-crm-thread-id');
+        if (stampedId && stampedId !== excludeId) return stampedId;
+
+        // 2. Thử trực tiếp nếu chạy cùng world (fallback)
         const candidates = [rootEl, ...Array.from(rootEl.querySelectorAll('*')).slice(0, 8)];
         for (const el of candidates) {
             let reactKey = null;
@@ -2117,6 +2137,9 @@ if (isBusiness) {
             const now = Date.now();
             if (now - lastSidebarSyncTime < 1000) return;
 
+            // Yêu cầu MAIN world (injected.js) quét và đóng dấu fiber
+            try { window.postMessage({ type: 'CRM_EXTRACT_BIZ_SIDEBAR_REQUEST' }, '*'); } catch (_) {}
+
             const urlParams = new URLSearchParams(window.location.search);
             const pageId = urlParams.get('asset_id') || urlParams.get('mailbox_id') || null;
             const currentSelectedId = resolveCurrentThreadId();
@@ -2138,6 +2161,21 @@ if (isBusiness) {
             const rowCandidates = [];
             const seenElements = new Set();
 
+            // 0. ƯU TIÊN SỐ 1: Các phần tử đã được injected.js (MAIN world) bóc tách và đóng dấu sẵn data-crm-thread-id
+            const stampedNodes = Array.from(document.querySelectorAll('[data-crm-thread-id]'));
+            for (const sn of stampedNodes) {
+                const visRow = findVisibleBizRowContainer(sn) || sn;
+                if (visRow && !seenElements.has(visRow) && !visRow.closest('[data-message-id], [data-surface*="message_list"], form')) {
+                    seenElements.add(visRow);
+                    rowCandidates.push(visRow);
+                }
+            }
+
+            // 1. ƯU TIÊN SỐ 2 (Business Suite 2026+): dòng hội thoại là span
+            // [data-surface*="thread_row"] inline 0x0 — mọi bộ lọc theo tọa độ
+            // đều loại nhầm (đã reproduce 2026-09-17: chỉ cào được 1 hội thoại
+            // vì nhặt nhầm 2 link menu trái chứa selected_item_id). Phải đi lên
+            // ancestor gần nhất có kích thước thật (DIV ~366x38) làm dòng.
             const bizRowSpans = Array.from(document.querySelectorAll('[data-surface*="thread_row"]'));
             for (const span of bizRowSpans) {
                 const visRow = findVisibleBizRowContainer(span);
@@ -2250,9 +2288,14 @@ if (isBusiness) {
                     if (!threadId || threadId === pageId || seenIds.has(threadId)) continue;
                     seenIds.add(threadId);
 
-                    // Tên khách hàng
-                    let name = '';
-                    if (threadId === currentSelectedId && currentContactName && !isInvalidText(currentContactName)) {
+                    // Tên khách hàng: ưu tiên data-crm-contact-name từ injected.js hoặc cachedBizThreadsFromMain
+                    let name = row.getAttribute?.('data-crm-contact-name') ||
+                        row.querySelector?.('[data-crm-contact-name]')?.getAttribute?.('data-crm-contact-name') ||
+                        row.closest?.('[data-crm-contact-name]')?.getAttribute?.('data-crm-contact-name') ||
+                        cachedBizThreadsFromMain.get(String(threadId))?.contactName || '';
+                    if (isInvalidText(name)) name = '';
+
+                    if (!name && threadId === currentSelectedId && currentContactName && !isInvalidText(currentContactName)) {
                         name = currentContactName;
                     }
                     if (!name) {

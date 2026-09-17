@@ -145,9 +145,10 @@ class InboxSourceService {
    * Ensure a page_messenger source exists for pageId, then bind threadId to it.
    * Called automatically when page_dom_observer reports a message with a page_id.
    */
-  static ensurePageSource({ pageId, accountId, threadId, pageName }, database = getDb()) {
+  static ensurePageSource({ pageId, accountId, threadId, canonicalThreadId, pageName }, database = getDb()) {
     if (!pageId) return null;
     const sourceId = 'src_page_' + pageId;
+    const targetThreadId = threadId || canonicalThreadId;
 
     // 1. Upsert inbox_source row (idempotent)
     const existing = database.prepare('SELECT id FROM inbox_sources WHERE id = ?').get(sourceId);
@@ -161,11 +162,11 @@ class InboxSourceService {
     }
 
     // 2. Bind thread → source if not already correct
-    if (threadId) {
-      const thread = database.prepare('SELECT source_id FROM threads WHERE id = ?').get(String(threadId));
+    if (targetThreadId) {
+      const thread = database.prepare('SELECT source_id FROM threads WHERE id = ?').get(String(targetThreadId));
       if (thread && thread.source_id !== sourceId) {
-        database.prepare('UPDATE threads SET source_id = ? WHERE id = ?').run(sourceId, String(threadId));
-        console.log(`[PAGE_SOURCE] 🔗 Thread ${threadId} gán sang source ${sourceId} (Page ${pageId})`);
+        database.prepare('UPDATE threads SET source_id = ? WHERE id = ?').run(sourceId, String(targetThreadId));
+        console.log(`[PAGE_SOURCE] 🔗 Thread ${targetThreadId} gán sang source ${sourceId} (Page ${pageId})`);
       }
     }
 

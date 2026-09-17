@@ -475,7 +475,220 @@
         posterUrl: posterUrl || null
       }, '*');
     }
+
+    if (event.data?.type === 'CRM_EXTRACT_BIZ_SIDEBAR_REQUEST') {
+      scanAndStampBizSidebarRows();
+    }
   });
 
+  // ── MAIN World React Fiber Extractor for Meta Business Suite Sidebar ──
+  const BIZ_THREAD_ID_PROPS = [
+    'threadID', 'threadId', 'thread_id', 'threadKey', 'thread_key',
+    'threadFbid', 'thread_fbid', 'conversationID', 'conversation_id',
+    'otherUserFbId', 'other_user_id', 'recipientId', 'selected_item_id', 'itemId'
+  ];
+
+  function findIdInValue(val, excludeId) {
+    if (!val) return null;
+    if (typeof val === 'string' || typeof val === 'number') {
+      const s = String(val).trim();
+      const m = s.match(/(\d{10,})/);
+      if (m && m[1] && m[1] !== excludeId) return m[1];
+      return null;
+    }
+    if (typeof val === 'object') {
+      const subKeys = [
+        'threadFbId', 'thread_fbid', 'threadFbid', 'otherUserFbId', 'other_user_id',
+        'threadID', 'threadId', 'thread_id', 'id', 'itemId', 'item_id', 'key'
+      ];
+      for (const sk of subKeys) {
+        try {
+          const sv = val[sk];
+          if (sv && (typeof sv === 'string' || typeof sv === 'number')) {
+            const sm = String(sv).match(/(\d{10,})/);
+            if (sm && sm[1] && sm[1] !== excludeId) return sm[1];
+          }
+        } catch (_) {}
+      }
+    }
+    return null;
+  }
+
+  function findNameInValue(val) {
+    if (!val) return null;
+    if (typeof val === 'string') {
+      const s = val.trim();
+      if (s.length >= 2 && s.length <= 80 && !/^\d+$/.test(s) && !/^(?:Tất cả|Inbox|Hộp thư|Tin nhắn|Spam|Meta|Facebook|Bạn|You)$/i.test(s)) {
+        return s;
+      }
+      return null;
+    }
+    if (typeof val === 'object') {
+      const nameSubKeys = ['name', 'text', 'title', 'threadTitle', 'contactName', 'nameWithDefault', 'displayName'];
+      for (const nsk of nameSubKeys) {
+        try {
+          const nv = val[nsk];
+          if (typeof nv === 'string') {
+            const s = nv.trim();
+            if (s.length >= 2 && s.length <= 80 && !/^\d+$/.test(s) && !/^(?:Tất cả|Inbox|Hộp thư|Tin nhắn|Spam|Meta|Facebook|Bạn|You)$/i.test(s)) {
+              return s;
+            }
+          }
+        } catch (_) {}
+      }
+    }
+    return null;
+  }
+
+  function extractBizThreadFromFiber(rootEl, excludeId) {
+    if (!rootEl) return null;
+    const candidates = [rootEl, ...Array.from(rootEl.querySelectorAll('*')).slice(0, 15)];
+    for (const el of candidates) {
+      let reactKey = null;
+      try {
+        reactKey = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+      } catch (_) {}
+      if (!reactKey) continue;
+      let curr = el[reactKey];
+      let depth = 0;
+      let threadId = null;
+      let contactName = null;
+
+      while (curr && depth < 45) {
+        depth++;
+        const props = curr.memoizedProps || curr.props;
+        if (props) {
+          if (!threadId) {
+            for (const p of BIZ_THREAD_ID_PROPS) {
+              const tid = findIdInValue(props[p], excludeId);
+              if (tid) {
+                threadId = tid;
+                break;
+              }
+            }
+            if (!threadId) {
+              const objProps = ['thread', 'item', 'conversation', 'node', 'threadKey', 'row', 'data'];
+              for (const op of objProps) {
+                const tid = findIdInValue(props[op], excludeId);
+                if (tid) {
+                  threadId = tid;
+                  break;
+                }
+              }
+            }
+          }
+          if (!contactName) {
+            const nameProps = ['contactName', 'name', 'threadTitle', 'title', 'thread', 'item', 'conversation', 'node'];
+            for (const np of nameProps) {
+              const cname = findNameInValue(props[np]);
+              if (cname) {
+                contactName = cname;
+                break;
+              }
+            }
+          }
+          if (threadId && contactName) break;
+        }
+        curr = curr.return;
+      }
+      if (threadId) return { threadId, contactName };
+    }
+    return null;
+  }
+
+  function findVisibleBizRowAncestor(marker) {
+    let node = marker;
+    while (node && node !== document.body) {
+      const h = node.clientHeight || node.offsetHeight || 0;
+      const w = node.clientWidth || node.offsetWidth || 0;
+      if (h >= 30 && h <= 200 && w >= 120) return node;
+      node = node.parentElement;
+    }
+    return marker;
+  }
+
+  function scanAndStampBizSidebarRows() {
+    try {
+      const isBizPage = window.location.hostname.includes('business.facebook.com')
+        || window.location.href.includes('asset_id=')
+        || window.location.href.includes('mailbox_id=')
+        || window.location.href.includes('/biz/')
+        || (window.location.hostname.includes('facebook.com') && (window.location.search.includes('asset_id=') || window.location.search.includes('mailbox_id=')));
+      if (!isBizPage) return;
+
+      const urlParams = new URLSearchParams(window.location.search);
+      const pageId = urlParams.get('asset_id') || urlParams.get('mailbox_id') || null;
+
+      const markers = Array.from(document.querySelectorAll('[data-surface*="thread_row"]'));
+      const candidateElements = [];
+
+      if (markers.length > 0) {
+        for (const m of markers) {
+          const rowContainer = findVisibleBizRowAncestor(m);
+          candidateElements.push({ marker: m, container: rowContainer });
+        }
+      } else {
+        const fallbackRows = Array.from(document.querySelectorAll('[role="row"], [role="listitem"], [data-surface*="thread"], div[tabindex="0"], div[tabindex="-1"]')).filter(el => {
+          try {
+            const rect = el.getBoundingClientRect();
+            return rect.left >= 30 && rect.left <= 520 && rect.top >= 40 && rect.height >= 32 && rect.height <= 200 && rect.width >= 120 &&
+              !el.closest('[data-message-id], [role="main"] header, form');
+          } catch (_) { return false; }
+        });
+        for (const r of fallbackRows) {
+          candidateElements.push({ marker: r, container: r });
+        }
+      }
+
+      const stampedThreads = [];
+      for (let i = 0; i < candidateElements.length; i++) {
+        const { marker, container } = candidateElements[i];
+        const res = extractBizThreadFromFiber(marker, pageId) || extractBizThreadFromFiber(container, pageId);
+        if (res && res.threadId) {
+          marker.setAttribute('data-crm-thread-id', res.threadId);
+          if (container && container !== marker) {
+            container.setAttribute('data-crm-thread-id', res.threadId);
+          }
+          if (res.contactName) {
+            marker.setAttribute('data-crm-contact-name', res.contactName);
+            if (container && container !== marker) {
+              container.setAttribute('data-crm-contact-name', res.contactName);
+            }
+          }
+          stampedThreads.push({
+            index: i,
+            threadId: res.threadId,
+            contactName: res.contactName || null
+          });
+        }
+      }
+
+      if (stampedThreads.length > 0) {
+        window.postMessage({
+          type: 'CRM_EXTRACT_BIZ_SIDEBAR_RESPONSE',
+          pageId,
+          threads: stampedThreads
+        }, '*');
+      }
+    } catch (_) {}
+  }
+
+  let bizStampDebounceTimer = null;
+  function setupBizSidebarObserver() {
+    try {
+      const observer = new MutationObserver(() => {
+        if (bizStampDebounceTimer) clearTimeout(bizStampDebounceTimer);
+        bizStampDebounceTimer = setTimeout(scanAndStampBizSidebarRows, 300);
+      });
+      observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    } catch (_) {}
+  }
+  if (document.body) {
+    setupBizSidebarObserver();
+  } else {
+    document.addEventListener('DOMContentLoaded', setupBizSidebarObserver);
+  }
+
   setInterval(scanAndStampMountedVideos, 1000);
+  setInterval(scanAndStampBizSidebarRows, 1500);
 })();

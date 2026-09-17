@@ -2824,11 +2824,14 @@ wss.on('connection', (ws, req) => {
                   isActivitySummary,
                   hasRecentMatchingOutbound
                 });
+                const threadPageId = t.page_id || msg.data?.page_id || null;
+                const pageSourceId = (threadPageId || t.source_type === 'page_messenger') ? ('src_page_' + (threadPageId || '')) : null;
                 const storedThread = ConversationRepository.upsertThread({
                   id: threadId,
                   external_thread_id: t.external_thread_id || threadId,
                   account_id: account_id,
-                              thread_url: t.thread_url || null,
+                  source_id: pageSourceId,
+                  thread_url: t.thread_url || null,
                   contact_name: name,
                   last_message: cleanLastMsg,
                   is_unread: t.is_unread,
@@ -2850,11 +2853,12 @@ wss.on('connection', (ws, req) => {
                 }
 
                 // Auto-bind Page source nếu thread đến từ Business Suite
-                if (t.page_id || t.source_type === 'page_messenger') {
+                if (threadPageId || t.source_type === 'page_messenger') {
                   try {
                     InboxSourceService.ensurePageSource({
-                      pageId: String(t.page_id || ''),
+                      pageId: String(threadPageId || ''),
                       accountId: account_id,
+                      threadId: canonicalThreadId,
                       canonicalThreadId,
                       pageName: t.page_name || null
                     }, db);
