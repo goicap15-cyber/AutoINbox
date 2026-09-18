@@ -222,3 +222,57 @@ test('T001: 8. findPageHistoryScroller chấm điểm và chọn chính xác khu
   const chosen = findPageHistoryScroller(rootContainer);
   assert.equal(chosen, chatScroller, 'Phải chọn trúng khung chat có bong bóng tin nhắn và overflow');
 });
+
+test('T001: 9. waitForDomSettle mode older không thoát sớm trước minWaitMs khi chưa có growth hoặc spinner', async () => {
+  const { waitForDomSettle } = PageActiveScroller;
+
+  const staticScroller = {
+    querySelector: () => null,
+    scrollHeight: 1000
+  };
+
+  const start = Date.now();
+  const res = await waitForDomSettle(staticScroller, {
+    mode: 'older',
+    minWaitMs: 120,
+    maxWaitMs: 300,
+    pollIntervalMs: 15,
+    getFirstMessageId: () => 'mid_static'
+  });
+
+  const duration = Date.now() - start;
+  assert.ok(duration >= 100, `Phải đợi ít nhất qua mốc minWaitMs, thực tế: ${duration}ms`);
+  assert.equal(res.hasGrowth, false);
+});
+
+test('T001: 10. waitForDomSettle mode older nhận diện spinner xuất hiện rồi biến mất là đã tải xong', async () => {
+  const { waitForDomSettle } = PageActiveScroller;
+
+  let ticks = 0;
+  const dynamicScroller = {
+    querySelector: (sel) => {
+      ticks++;
+      // Vòng 1-3: chưa có spinner. Vòng 4-6: spinner xuất hiện. Sau đó biến mất.
+      if (ticks >= 4 && ticks <= 6 && sel.includes('Loading')) return {};
+      return null;
+    },
+    scrollHeight: 1000
+  };
+
+  let currentId = 'mid_initial';
+  const res = await waitForDomSettle(dynamicScroller, {
+    mode: 'older',
+    minWaitMs: 50,
+    maxWaitMs: 400,
+    pollIntervalMs: 15,
+    getFirstMessageId: () => {
+      if (ticks > 6) currentId = 'mid_prepended_older';
+      return currentId;
+    }
+  });
+
+  assert.equal(res.settled, true);
+  assert.equal(res.hasGrowth, true);
+  assert.equal(res.timedOut, false);
+});
+

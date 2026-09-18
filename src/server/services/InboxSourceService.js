@@ -141,6 +141,21 @@ class InboxSourceService {
     if (!thread || !thread.source_id) return null;
     return this.getSourceById(thread.source_id, database);
   }
+
+  static isValidPageDisplayName(name) {
+    if (!name || typeof name !== 'string') return false;
+    const trimmed = name.trim();
+    if (trimmed.length < 2 || trimmed.length > 100) return false;
+    // Chặn URL / Domain
+    if (/(?:https?:\/\/|business\.facebook|facebook\.com|messenger\.com|\/latest\/|[?&](?:asset_id|mailbox_id)=)/i.test(trimmed)) return false;
+    // Chặn chuỗi tĩnh Meta
+    if (/^(?:hộp thư|inbox|messages|tin nhắn|tất cả tin nhắn|all messages|meta business suite|business suite|facebook|trang|page|\d+|đang tải(?:\.\.\.)?|loading(?:\.\.\.)?|chuyển tài khoản|chuyển đổi tài khoản|trang quản lý tài sản doanh nghiệp)$/i.test(trimmed)) return false;
+    if (/^page\s+\d+$/i.test(trimmed)) return false;
+    if (/^\d+$/.test(trimmed)) return false;
+    if (/^(?:undefined|null|none)$/i.test(trimmed)) return false;
+    return true;
+  }
+
   /**
    * Ensure a page_messenger source exists for pageId, then bind threadId to it.
    * Called automatically when page_dom_observer reports a message with a page_id.
@@ -151,14 +166,18 @@ class InboxSourceService {
     const targetThreadId = threadId || canonicalThreadId;
 
     // 1. Upsert inbox_source row (idempotent)
-    const existing = database.prepare('SELECT id FROM inbox_sources WHERE id = ?').get(sourceId);
+    const existing = database.prepare('SELECT id, display_name FROM inbox_sources WHERE id = ?').get(sourceId);
     if (!existing) {
+      const initialDisplayName = this.isValidPageDisplayName(pageName) ? pageName.trim() : ('Page ' + pageId);
       database.prepare(`
         INSERT OR IGNORE INTO inbox_sources
           (id, source_type, owner_account_id, external_id, display_name, status)
         VALUES (?, 'page_messenger', ?, ?, ?, 'ACTIVE')
-      `).run(sourceId, accountId || null, String(pageId), pageName || ('Page ' + pageId));
-      console.log(`[PAGE_SOURCE] ✅ Tự động tạo page source: ${sourceId} (Page ${pageId})`);
+      `).run(sourceId, accountId || null, String(pageId), initialDisplayName);
+      console.log(`[PAGE_SOURCE] ✅ Tự động tạo page source: ${sourceId} (${initialDisplayName})`);
+    } else if (pageName && this.isValidPageDisplayName(pageName) && (!existing.display_name || existing.display_name === 'Page ' + pageId || existing.display_name.startsWith('Page ') || !this.isValidPageDisplayName(existing.display_name))) {
+      database.prepare('UPDATE inbox_sources SET display_name = ? WHERE id = ?').run(pageName.trim(), sourceId);
+      console.log(`[PAGE_SOURCE] 🏷️ Tự động cập nhật display_name cho source ${sourceId}: "${pageName.trim()}"`);
     }
 
     // 2. Bind thread → source if not already correct
@@ -171,6 +190,28 @@ class InboxSourceService {
     }
 
     return this.getSourceById(sourceId, database);
+  }
+
+  /**
+   * Cập nhật tên hiển thị thật (display_name) của Fanpage khi bóc tách được từ DOM/Title
+   */
+  static updatePageDisplayName({ pageId, pageName }, database = getDb()) {
+    if (!pageId || !pageName) return null;
+    const cleanName = String(pageName).trim().slice(0, 100);
+    if (!this.isValidPageDisplayName(cleanName)) return null;
+
+    const sourceId = 'src_page_' + pageId;
+    const existing = database.prepare('SELECT id, display_name FROM inbox_sources WHERE external_id = ? AND source_type = ?').get(String(pageId), 'page_messenger');
+
+    if (existing) {
+      if (existing.display_name !== cleanName) {
+        database.prepare('UPDATE inbox_sources SET display_name = ? WHERE id = ?').run(cleanName, existing.id);
+        console.log(`[PAGE_SOURCE] 🏷️ Cập nhật display_name cho page ${pageId}: "${existing.display_name}" -> "${cleanName}"`);
+      }
+      return this.getSourceById(existing.id, database);
+    } else {
+      return this.ensurePageSource({ pageId, pageName: cleanName }, database);
+    }
   }
 }
 

@@ -774,6 +774,15 @@ export default function App() {
   useEffect(() => {
     if (!socket) return;
     socket.on('NEW_MESSAGE', (newMsg) => {
+      const t_ui = Date.now();
+      if (newMsg?.telemetry?.t_dom) {
+        const { t_dom, t_sw, t_server } = newMsg.telemetry;
+        const domToSw = t_sw ? (t_sw - t_dom) : null;
+        const swToSrv = (t_sw && t_server) ? (t_server - t_sw) : null;
+        const srvToUi = t_server ? (t_ui - t_server) : null;
+        const total = t_ui - t_dom;
+        console.log(`%c[TELEMETRY] ⚡ E2E Latency: ${total}ms (dom->sw: ${domToSw}ms, sw->srv: ${swToSrv}ms, srv->ui: ${srvToUi}ms)`, 'color: #10b981; font-weight: bold;');
+      }
       if (newMsg.account_id && accountsRef.current.length > 0) {
         const matchesAccount = accountsRef.current.some((account) =>
           String(account.id) === String(newMsg.account_id) ||
@@ -1331,6 +1340,7 @@ export default function App() {
     socket.on('INBOX_SOURCE_ADDED', () => { loadInboxSources(); loadThreadsRef.current(); });
     socket.on('INBOX_SOURCE_REMOVED', () => { loadInboxSources(); loadThreadsRef.current(); });
     socket.on('INBOX_SOURCE_STATUS_CHANGED', () => { loadInboxSources(); loadThreadsRef.current(); });
+    socket.on('INBOX_SOURCE_UPDATED', () => { loadInboxSources(); loadThreadsRef.current(); });
 
     const handleCampaignEvent = (event) => {
       if (activeCampaignId && String(event?.campaign_id) === String(activeCampaignId)) setCampaignRefreshVersion((version) => version + 1);
@@ -1415,6 +1425,7 @@ export default function App() {
       socket.off('INBOX_SOURCE_ADDED');
       socket.off('INBOX_SOURCE_REMOVED');
       socket.off('INBOX_SOURCE_STATUS_CHANGED');
+      socket.off('INBOX_SOURCE_UPDATED');
       socket.off('CAMPAIGN_UPDATED', handleCampaignEvent);
       socket.off('CAMPAIGN_RECIPIENT_UPDATED', handleCampaignEvent);
       socket.off('CAMPAIGN_AUDIT_EVENT', handleCampaignEvent);

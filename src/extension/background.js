@@ -1,5 +1,5 @@
 // AutoChatbot FB Engine - Service Worker Background Script
-importScripts('tabCreationCoordinator.js', 'queueEnvelopeValidation.js', 'callTabDeduplicator.js', 'messengerTabDeduplicator.js', 'messengerTabRoles.js', 'pageVideoUploader.js');
+importScripts('tabCreationCoordinator.js', 'queueEnvelopeValidation.js', 'callTabDeduplicator.js', 'messengerTabDeduplicator.js', 'messengerTabRoles.js', 'pageVideoUploader.js', 'pageNameExtractor.js');
 const tabCreationCoordinator = self.FbCrmTabCreationCoordinator.createTabCreationCoordinator();
 
 async function blockFacebookNativeNotifications() {
@@ -22,7 +22,7 @@ async function blockFacebookNativeNotifications() {
 blockFacebookNativeNotifications();
 let ws = null;
 const BACKEND_OUTBOX_STORAGE_KEY = 'fb_engine_realtime_outbox_v1';
-const QUEUED_BACKEND_TYPES = new Set(['NEW_MESSAGE_RECEIVED']);
+const QUEUED_BACKEND_TYPES = new Set(['NEW_MESSAGE_RECEIVED', 'PAGE_NAME_DETECTED', 'PAGE_EXTENSION_READY']);
 let backendOutbox = [];
 let backendOutboxLoaded = null;
 let backendOutboxFlushInFlight = false;
@@ -817,6 +817,90 @@ async function ensureRealtimeObserver(tabId) {
   }
 }
 
+async function detectAndReportOpenPageTabs() {
+  try {
+    const tabs = await chrome.tabs.query({ url: ['*://business.facebook.com/*', '*://*.facebook.com/*'] });
+    for (const tab of tabs || []) {
+      const url = String(tab.url || '');
+      const isBiz = url.includes('business.facebook.com') || url.includes('asset_id=') || url.includes('mailbox_id=');
+      if (!isBiz) continue;
+
+      const pId = url.match(/[?&](?:asset_id|mailbox_id)=(\d+)/)?.[1];
+      if (!pId) continue;
+
+      let detectedName = null;
+      if (tab.id) {
+        try {
+          const results = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: (pageId) => {
+              const ext = window.FbPageNameExtractor;
+              if (ext && typeof ext.detectPageName === 'function') {
+                return ext.detectPageName({ document, pageId, title: document.title });
+              }
+              return null;
+            },
+            args: [pId]
+          });
+          detectedName = results?.[0]?.result || null;
+        } catch (_) {}
+      }
+
+      if (!detectedName && self.FbPageNameExtractor && tab.title) {
+        detectedName = self.FbPageNameExtractor.detectPageName({ title: tab.title, pageId: pId });
+      }
+
+      console.log(`[FB Engine] 🏷️ Quét tab Page ${pId}: name="${detectedName || 'null'}" (tab=${tab.id})`);
+      sendToBackend('PAGE_EXTENSION_READY', {
+        account_id: user_id,
+        page_id: pId,
+        page_name: detectedName || null
+      });
+      if (detectedName) {
+        sendToBackend('PAGE_NAME_DETECTED', {
+          account_id: user_id,
+          page_id: pId,
+          page_name: detectedName
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('[FB Engine] detectAndReportOpenPageTabs error:', err?.message || err);
+  }
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' || changeInfo.title) {
+    const url = String(tab?.url || '');
+    if (url.includes('business.facebook.com') || url.includes('asset_id=')) {
+      const pId = url.match(/[?&](?:asset_id|mailbox_id)=(\d+)/)?.[1];
+      if (pId && tabId) {
+        chrome.scripting.executeScript({
+          target: { tabId },
+          func: (pageId) => {
+            const ext = window.FbPageNameExtractor;
+            if (ext && typeof ext.detectPageName === 'function') {
+              return ext.detectPageName({ document, pageId, title: document.title });
+            }
+            return null;
+          },
+          args: [pId]
+        }).then((results) => {
+          const name = results?.[0]?.result;
+          if (name) {
+            console.log(`[FB Engine] 🏷️ Tab ${tabId} cập nhật -> Page ${pId}: "${name}"`);
+            sendToBackend('PAGE_NAME_DETECTED', {
+              account_id: user_id,
+              page_id: pId,
+              page_name: name
+            });
+          }
+        }).catch(() => {});
+      }
+    }
+  }
+});
+
 let wsConnectingTimer = null;
 
 function connectWebSocket() {
@@ -867,6 +951,7 @@ function connectWebSocket() {
     } else {
       await checkFacebookCookiesAndRegister();
     }
+    detectAndReportOpenPageTabs().catch(() => {});
   };
 
   socket.onmessage = async (event) => {
@@ -1213,6 +1298,72 @@ function scheduleSidebarActivitySync(tab, fingerprint, observedThreads = []) {
   return true;
 }
 
+// ── Phục hồi tab Business Suite bị trắng ────────────────────────────────────
+// Tab inbox trắng (không render) thì không thao tác/đồng bộ được gì. page_content
+// phát PAGE_TAB_BLANK_DETECTED; ở đây mở tab mới cùng page (hoặc dùng tab healthy
+// sẵn có) và đóng tab trắng khi tab mới báo PAGE_CONTEXT_READY — hoặc sau 25s
+// dự phòng. Giới hạn 3 lần/15 phút + tối thiểu cách nhau 60s để không rơi vào
+// vòng lặp tạo tab khi mạng/cookie có vấn đề.
+const blankTabRecoveryState = { lastAt: 0, attempts: [], pending: new Map() };
+
+async function handleBlankBizTabPage(data, oldTabId) {
+  try {
+    const pageId = String(
+      data?.page_id
+      || String(data?.url || '').match(/[?&](?:asset_id|mailbox_id)=(\d+)/)?.[1]
+      || ''
+    );
+    if (!pageId) {
+      console.warn('[FB Engine] Bỏ qua phục hồi tab trắng: không xác định được page_id.');
+      return;
+    }
+    const now = Date.now();
+    blankTabRecoveryState.attempts = blankTabRecoveryState.attempts.filter((t) => now - t < 15 * 60 * 1000);
+    if (blankTabRecoveryState.attempts.length >= 3) {
+      console.warn('[FB Engine] 🏳️ Bỏ qua phục hồi tab trắng: đã thử 3 lần trong 15 phút.');
+      return;
+    }
+    if (now - blankTabRecoveryState.lastAt < 60 * 1000) {
+      console.log('[FB Engine] 🏳️ Bỏ qua phục hồi tab trắng: vừa phục hồi cách đây chưa đầy 1 phút.');
+      return;
+    }
+    blankTabRecoveryState.lastAt = now;
+    blankTabRecoveryState.attempts.push(now);
+
+    // Đã có tab business khác cho cùng page -> đánh thức nó, bỏ tab trắng
+    const bizTabs = await new Promise((resolve) => chrome.tabs.query({ url: '*://business.facebook.com/*' }, (tabs) => resolve(tabs || [])));
+    const healthyOther = bizTabs.find((t) => String(t.id) !== String(oldTabId)
+      && String(t.url || '').match(/[?&](?:asset_id|mailbox_id)=(\d+)/)?.[1] === pageId);
+
+    let replacementTab = null;
+    if (healthyOther?.id) {
+      console.log(`[FB Engine] 🏳️ Tab trắng #${oldTabId} (page ${pageId}): đã có tab business #${healthyOther.id} — đánh thức thay vì tạo mới.`);
+      replacementTab = healthyOther;
+      try { await chrome.tabs.update(healthyOther.id, { active: true }); } catch (_) {}
+    } else {
+      const inboxUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(pageId)}&mailbox_id=${encodeURIComponent(pageId)}&thread_type=FB_MESSAGE`;
+      replacementTab = await chrome.tabs.create({ url: inboxUrl, active: true }).catch(() => null);
+      console.log(`[FB Engine] 🏳️ Tab Business Suite trắng (tab #${oldTabId}, page ${pageId}) -> đã mở tab mới #${replacementTab?.id}.`);
+    }
+    if (!replacementTab?.id || !oldTabId || String(replacementTab.id) === String(oldTabId)) return;
+
+    const closeOldTab = async (reason) => {
+      blankTabRecoveryState.pending.delete(String(oldTabId));
+      try {
+        const t = await chrome.tabs.get(Number(oldTabId)).catch(() => null);
+        if (t) {
+          await chrome.tabs.remove(Number(oldTabId));
+          console.log(`[FB Engine] Đã đóng tab trắng cũ #${oldTabId} (${reason}).`);
+        }
+      } catch (_) {}
+    };
+    const timer = setTimeout(() => closeOldTab('fallback 25s'), 25000);
+    blankTabRecoveryState.pending.set(String(oldTabId), { newTabId: replacementTab.id, pageId, closeOldTab, timer });
+  } catch (err) {
+    console.warn('[FB Engine] Lỗi phục hồi tab trắng:', err?.message || err);
+  }
+}
+
 // Bắt events từ content script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[FB Engine] 📥 onMessage received from content:', message.type, JSON.stringify(message).substring(0, 300));
@@ -1348,7 +1499,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ...msgData,
       account_id: user_id || msgData.account_id,
       source_type: 'page_messenger',
+      telemetry: {
+        ...(msgData?.telemetry || {}),
+        t_sw: Date.now()
+      }
     });
+  }
+
+  if (message.type === 'PAGE_TAB_BLANK_DETECTED') {
+    handleBlankBizTabPage(message.data, sender?.tab?.id || null);
   }
 
   if (message.type === 'PAGE_CONTEXT_READY') {
@@ -1356,7 +1515,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (msgData.page_id) {
       sendToBackend('PAGE_EXTENSION_READY', {
         account_id: user_id || msgData.account_id,
-        page_id: String(msgData.page_id)
+        page_id: String(msgData.page_id),
+        page_name: msgData.page_name ? String(msgData.page_name) : null
+      });
+    }
+    // Phục hồi tab trắng: tab thay thế vừa báo sẵn sàng -> đóng tab trắng cũ sớm
+    for (const entry of blankTabRecoveryState.pending.values()) {
+      if (String(entry.newTabId) === String(sender?.tab?.id || '') && String(entry.pageId) === String(msgData.page_id || '')) {
+        try { clearTimeout(entry.timer); } catch (_) {}
+        entry.closeOldTab?.('new tab ready');
+      }
+    }
+  }
+
+  if (message.type === 'PAGE_NAME_DETECTED') {
+    const msgData = message.data || {};
+    if (msgData.page_id && msgData.page_name) {
+      console.log(`[FB Engine] 🏷️ PAGE_NAME_DETECTED: page=${msgData.page_id}, name="${msgData.page_name}"`);
+      sendToBackend('PAGE_NAME_DETECTED', {
+        account_id: user_id || msgData.account_id,
+        page_id: String(msgData.page_id),
+        page_name: String(msgData.page_name)
       });
     }
   }
@@ -5538,7 +5717,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         try {
           await chrome.scripting.executeScript({
             target: { tabId: tab.id },
-            files: ['textFilter.js', 'pageTimestampParser.js', 'threadScanStateMachine.js', 'pageDirection.js', 'pageActiveScroller.js', 'pageVideoDetector.js', 'page_content.js']
+            files: ['textFilter.js', 'pageTimestampParser.js', 'threadScanStateMachine.js', 'pageDirection.js', 'pageActiveScroller.js', 'pageVideoDetector.js', 'pageNameExtractor.js', 'page_content.js']
           });
           await new Promise(r => setTimeout(r, 600));
           return chrome.tabs.sendMessage(tab.id, {

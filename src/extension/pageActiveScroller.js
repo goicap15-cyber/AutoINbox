@@ -239,6 +239,18 @@
 
     // 5. Chạm đỉnh tuyệt đối (forceToTop) để kích hoạt API tải tin cũ của Facebook
     if (forceToTop && typeof scroller.scrollTop === 'number') {
+      // Phát nhiều nhịp wheel ngược chiều hướng lên đỉnh để kích thích scroll listener của Facebook
+      try {
+        if (typeof scroller.dispatchEvent === 'function') {
+          for (let step = 0; step < 3; step++) {
+            const wheelEvt = typeof WheelEvent === 'function'
+              ? new WheelEvent('wheel', { deltaY: -600, deltaMode: 0, bubbles: true, cancelable: true })
+              : { type: 'wheel', deltaY: -600 };
+            scroller.dispatchEvent(wheelEvt);
+          }
+        }
+      } catch (e) {}
+
       scroller.scrollTop = 0;
       if (typeof scroller.dispatchEvent === 'function') {
         try {
@@ -252,9 +264,12 @@
   /**
    * Quan sát DOM chờ trạng thái ổn định sau một bước cuộn
    * Bắt spinner loading, kiểm tra tăng trưởng scrollHeight và ID tin nhắn đầu tiên.
+   * Hỗ trợ mode 'older' với minWaitMs để tránh kết luận ổn định vội khi Facebook chưa kịp fetch.
    */
   async function waitForDomSettle(scroller, options = {}) {
-    const maxWaitMs = options.maxWaitMs || 2500;
+    const isOlderMode = options.mode === 'older';
+    const maxWaitMs = options.maxWaitMs || (isOlderMode ? 7000 : 2500);
+    const minWaitMs = options.minWaitMs !== undefined ? options.minWaitMs : (isOlderMode ? 1200 : 0);
     const pollIntervalMs = options.pollIntervalMs || 50;
     const getFirstMessageId = typeof options.getFirstMessageId === 'function' ? options.getFirstMessageId : () => null;
 
@@ -266,13 +281,18 @@
     let lastFirstId = initialFirstId;
     let stableRounds = 0;
     let hasGrowth = false;
+    let sawSpinner = false;
 
     while (Date.now() - startTime < maxWaitMs) {
       await new Promise(r => setTimeout(r, pollIntervalMs));
 
       const isSpinnerVisible = scroller && typeof scroller.querySelector === 'function'
-        ? !!scroller.querySelector('svg[aria-label="Loading"], div[role="progressbar"], [aria-busy="true"]')
+        ? !!scroller.querySelector('svg[aria-label*="Loading" i], svg[aria-label*="Đang tải" i], div[role="progressbar"], [aria-busy="true"]')
         : false;
+
+      if (isSpinnerVisible) {
+        sawSpinner = true;
+      }
 
       const currentHeight = scroller ? scroller.scrollHeight : 0;
       const currentFirstId = getFirstMessageId();
@@ -290,11 +310,46 @@
       lastHeight = currentHeight;
       lastFirstId = currentFirstId;
 
-      // 2 vòng liên tiếp ổn định không có spinner -> DOM đã sẵn sàng
-      if (!isSpinnerVisible && stableRounds >= 2) {
+      const elapsed = Date.now() - startTime;
+
+      // Trong chế độ older:
+      // Không được settle sớm nếu chưa qua minWaitMs VÀ chưa có dấu hiệu thay đổi hoặc spinner
+      if (isOlderMode && elapsed < minWaitMs && !hasGrowth && !sawSpinner) {
+        continue;
+      }
+
+      // Nếu đã có spinner xuất hiện và giờ đã biến mất -> DOM đã tải xong
+      if (sawSpinner && !isSpinnerVisible && stableRounds >= 2) {
         return {
           settled: true,
           hasGrowth,
+          timedOut: false
+        };
+      }
+
+      // Nếu có tăng trưởng thực sự (scrollHeight tăng hoặc firstId đổi) và DOM đã ổn định
+      if (hasGrowth && !isSpinnerVisible && stableRounds >= (isOlderMode ? 3 : 2)) {
+        return {
+          settled: true,
+          hasGrowth: true,
+          timedOut: false
+        };
+      }
+
+      // Chế độ thông thường
+      if (!isOlderMode && !isSpinnerVisible && stableRounds >= 2) {
+        return {
+          settled: true,
+          hasGrowth,
+          timedOut: false
+        };
+      }
+
+      // Ở chế độ older, nếu đã qua minWaitMs mà vẫn không thấy spinner và không có growth sau nhiều vòng ổn định
+      if (isOlderMode && elapsed >= minWaitMs && !sawSpinner && !hasGrowth && stableRounds >= 5) {
+        return {
+          settled: true,
+          hasGrowth: false,
           timedOut: false
         };
       }

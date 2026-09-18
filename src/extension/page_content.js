@@ -12,10 +12,115 @@ const isBusiness = window.location.hostname.includes('business.facebook.com')
 
 if (isBusiness) {
     console.log(`[PageContent] Business Suite Inbox DOM observer started in ${window.top === window.self ? 'TOP FRAME' : 'IFRAME'}: ${window.location.href}`);
-    const initialPageContext = new URLSearchParams(window.location.search).get('asset_id') || new URLSearchParams(window.location.search).get('mailbox_id') || null;
-    if (initialPageContext) {
-        chrome.runtime.sendMessage({ type: 'PAGE_CONTEXT_READY', data: { page_id: initialPageContext } }).catch(() => {});
+    
+    function resolveCurrentPageId() {
+        let pId = new URLSearchParams(window.location.search).get('asset_id')
+            || new URLSearchParams(window.location.search).get('mailbox_id');
+        if (!pId && document.referrer) {
+            try {
+                const refUrl = new URL(document.referrer);
+                pId = refUrl.searchParams.get('asset_id') || refUrl.searchParams.get('mailbox_id');
+            } catch (_) {}
+        }
+        return pId || null;
     }
+
+    const initialPageContext = resolveCurrentPageId();
+    const initialExtractor = typeof FbPageNameExtractor !== 'undefined' ? FbPageNameExtractor : null;
+    const initialPageName = initialExtractor ? initialExtractor.detectPageName({ document, pageId: initialPageContext, title: document.title }) : null;
+    if (initialPageContext) {
+        chrome.runtime.sendMessage({
+            type: 'PAGE_CONTEXT_READY',
+            data: { page_id: initialPageContext, page_name: initialPageName }
+        }).catch(() => {});
+    }
+
+    // ── Page Name Detection ───────────────────────────────────────────────
+    let lastReportedPageName = initialPageName;
+    let lastReportedPageId = initialPageContext;
+
+    function checkAndReportPageIdentity(force = false) {
+        const pageId = resolveCurrentPageId() || lastReportedPageId;
+        if (!pageId) return;
+
+        const extractor = (typeof FbPageNameExtractor !== 'undefined' ? FbPageNameExtractor : null)
+            || (typeof window !== 'undefined' && window.FbPageNameExtractor ? window.FbPageNameExtractor : null);
+        if (!extractor || typeof extractor.detectPageName !== 'function') return;
+
+        const detectedName = extractor.detectPageName({ document, pageId, title: document.title });
+        if (detectedName && (force || detectedName !== lastReportedPageName || pageId !== lastReportedPageId)) {
+            lastReportedPageName = detectedName;
+            lastReportedPageId = pageId;
+            console.log(`[PageContent] 🏷️ Phát hiện tên Page: "${detectedName}" (ID: ${pageId})`);
+            chrome.runtime.sendMessage({
+                type: 'PAGE_NAME_DETECTED',
+                data: {
+                    page_id: pageId,
+                    page_name: detectedName
+                }
+            }).catch(() => {});
+        }
+    }
+
+    // Quan sát thay đổi document.title (Facebook thường cập nhật title sau khi data nạp xong)
+    try {
+        const titleEl = document.querySelector('title');
+        if (titleEl && typeof MutationObserver === 'function') {
+            const titleObserver = new MutationObserver(() => {
+                checkAndReportPageIdentity(false);
+            });
+            titleObserver.observe(titleEl, { childList: true, subtree: true, characterData: true });
+        }
+    } catch (_) {}
+
+    // Kiểm tra định kỳ (1.5s, 3.5s, 7s) để đón đầu lúc SPA render xong title hoặc switcher
+    setTimeout(() => checkAndReportPageIdentity(false), 1500);
+    setTimeout(() => checkAndReportPageIdentity(false), 3500);
+    setTimeout(() => checkAndReportPageIdentity(false), 7000);
+
+    // ── Watchdog trang trắng ────────────────────────────────────────────────
+    // Tab inbox Business Suite đôi khi chỉ render shell rỗng (màn trắng) — khi
+    // đó không quét/đồng bộ được gì cả. Báo background mở tab mới thay thế
+    // (reproduce 2026-09-18: tab trắng treo spinner vô hạn).
+    let bizInboxRenderedHealthy = false;
+    let blankPageReported = false;
+
+    function markBizInboxHealthy() { bizInboxRenderedHealthy = true; }
+
+    function bizInboxSpinnerVisible() {
+        try {
+            return !!document.querySelector('svg[aria-label="Loading"], div[role="progressbar"], [aria-busy="true"]');
+        } catch (_) { return false; }
+    }
+
+    function bizInboxLooksBlank(ignoreSpinner) {
+        try {
+            if (window.top !== window.self) return false; // chỉ frame top được báo
+            if (!/\/latest\/inbox/i.test(window.location.pathname)) return false;
+            if (bizInboxRenderedHealthy) return false;
+            if (!ignoreSpinner && bizInboxSpinnerVisible()) return false; // đang loading bình thường
+            const hasInboxUi = !!document.querySelector('[data-surface*="thread_list"], [data-surface*="thread_row"], [data-surface*="detail_column"]');
+            if (hasInboxUi) return false;
+            const textLen = (document.body?.innerText || '').trim().length;
+            return textLen < 120;
+        } catch (_) { return false; }
+    }
+
+    function reportBlankInboxIfStillBlank(ignoreSpinner) {
+        if (blankPageReported || !bizInboxLooksBlank(ignoreSpinner)) return;
+        blankPageReported = true;
+        console.warn(`[PageContent] 🏳️ Tab inbox trắng (không render sau timeout, ignoreSpinner=${!!ignoreSpinner}). Yêu cầu background mở tab mới thay thế.`);
+        chrome.runtime.sendMessage({
+            type: 'PAGE_TAB_BLANK_DETECTED',
+            data: { page_id: initialPageContext, url: window.location.href, ignore_spinner: !!ignoreSpinner }
+        }).catch(() => {});
+    }
+
+    setTimeout(() => reportBlankInboxIfStillBlank(false), 30000);
+    setTimeout(() => reportBlankInboxIfStillBlank(false), 60000);
+    // Mốc cuối: kể cả khi còn spinner (load treo vĩnh viễn cũng tính là trắng)
+    setTimeout(() => reportBlankInboxIfStillBlank(true), 90000);
+
     class BoundedSet {
         constructor(maxSize) {
             this.maxSize = maxSize;
@@ -1015,6 +1120,7 @@ if (isBusiness) {
             // (and into processPotentialMessage/walkBubbleAncestors), so every
             // containment check this tick uses the exact same container node.
             const messageListContainer = findMessageListContainer();
+            if (messageListContainer) markBizInboxHealthy();
 
             const isInvalidName = (n) => {
                 if (globalThis.FbCrmTextFilter?.isInvalidContactName) {
@@ -1682,8 +1788,7 @@ if (isBusiness) {
         const threadId = resolveCurrentThreadId();
         if (!threadId) return;
 
-        const urlParams = new URLSearchParams(window.location.search);
-        const assetId = urlParams.get('asset_id') || urlParams.get('mailbox_id');
+        const assetId = resolveCurrentPageId();
 
         let parsedTs = 0;
         let tsSource = 'unknown';
@@ -1809,9 +1914,13 @@ if (isBusiness) {
             direction_source: directionEvidence.source,
             direction_confidence: isOutgoing === null ? 'unknown' : directionEvidence.confidence,
             page_id: assetId,
+            page_name: lastReportedPageName || null,
             source: 'page_dom_observer',
             timestamp_ms: parsedTs,
-            timestamp_source: tsSource
+            timestamp_source: tsSource,
+            telemetry: {
+                t_dom: Date.now()
+            }
         };
         if (isMedia) {
             payloadData.media_type = resolvedContent.mediaType || 'image';
@@ -1953,7 +2062,7 @@ if (isBusiness) {
                     const initialBatch = collectMountedBatchMessages(container);
                     accumulator.accumulate(initialBatch);
 
-                    const isOlderMode = req.mode === 'page_scroll_older' || req.mode === 'ondemand_older';
+                    const isOlderMode = req.mode === 'page_scroll_older' || req.mode === 'ondemand_older' || String(req.mode || '').includes('older') || Boolean(req.cursor?.oldest_message_id);
                     const targetOldestId = (req.cursor && req.cursor.oldest_message_id) ? req.cursor.oldest_message_id : null;
 
                     if (isOlderMode && scrollerHelper) {
@@ -1977,7 +2086,7 @@ if (isBusiness) {
                                 });
                             } catch (e) {}
 
-                            const maxRounds = 3;
+                            const maxRounds = 4;
                             for (let round = 0; round < maxRounds; round++) {
                                 // Kiểm tra khẩn cấp: nếu người dùng đã đổi thread hoặc iframe reload -> hủy crawler ngay
                                 if (!crawlMutex.isTokenValid(crawlToken, resolveCurrentThreadId())) {
@@ -2003,8 +2112,10 @@ if (isBusiness) {
                                 } catch (e) {}
 
                                 const settleRes = await scrollerHelper.waitForDomSettle(scroller, {
-                                    maxWaitMs: 3500,
-                                    pollIntervalMs: 60,
+                                    mode: 'older',
+                                    maxWaitMs: 6500,
+                                    minWaitMs: 1200,
+                                    pollIntervalMs: 50,
                                     getFirstMessageId: () => {
                                         const firstEl = container ? container.querySelector('[data-message-id]') : null;
                                         return firstEl ? firstEl.getAttribute('data-message-id') : null;
@@ -2041,9 +2152,9 @@ if (isBusiness) {
                                     break;
                                 }
 
-                                // 2. Nếu đã qua vòng 2 và không phát hiện tăng trưởng -> dừng
-                                if (round >= 1 && !settleRes.hasGrowth && newlyAdded === 0) {
-                                    console.log(`[PageContent] Không phát hiện tăng trưởng DOM tại vòng ${round + 1}. Dừng crawler.`);
+                                // 2. Nếu đã qua ít nhất 2 vòng và không phát hiện tăng trưởng DOM (đã chờ đủ timeout) -> dừng
+                                if (round >= 2 && !settleRes.hasGrowth && newlyAdded === 0) {
+                                    console.log(`[PageContent] Không phát hiện tăng trưởng DOM sau ${round + 1} vòng. Dừng crawler.`);
                                     break;
                                 }
                             }
@@ -2099,8 +2210,7 @@ if (isBusiness) {
                         lastSyncedOldestMessageId = batchMessages[0].fb_message_id;
                     }
 
-                    const urlParams = new URLSearchParams(window.location.search);
-                    const assetId = req.page_id || urlParams.get('asset_id') || urlParams.get('mailbox_id') || null;
+                    const assetId = req.page_id || resolveCurrentPageId() || null;
 
                     chrome.runtime.sendMessage({
                         type: 'PAGE_THREAD_MESSAGES_SYNCED_V1',
@@ -2108,6 +2218,7 @@ if (isBusiness) {
                             thread_id: threadId,
                             account_id: req.account_id || null,
                             page_id: assetId,
+                            page_name: lastReportedPageName || null,
                             session_epoch: meta.session_epoch,
                             generation: meta.generation,
                             scan_id: meta.scan_id,
@@ -2177,6 +2288,7 @@ if (isBusiness) {
             // vì nhặt nhầm 2 link menu trái chứa selected_item_id). Phải đi lên
             // ancestor gần nhất có kích thước thật (DIV ~366x38) làm dòng.
             const bizRowSpans = Array.from(document.querySelectorAll('[data-surface*="thread_row"]'));
+            if (bizRowSpans.length > 0) markBizInboxHealthy();
             for (const span of bizRowSpans) {
                 const visRow = findVisibleBizRowContainer(span);
                 if (visRow && !seenElements.has(visRow) && !visRow.closest('[data-message-id], [data-surface*="message_list"], form')) {

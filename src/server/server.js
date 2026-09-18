@@ -1688,6 +1688,15 @@ wss.on('connection', (ws, req) => {
           const m = msg.data;
           const threadId = String(m.thread_id || '');
           let realtimeMessageEmittedEarly = false;
+
+          const t_server = Date.now();
+          if (m?.telemetry?.t_dom) {
+            m.telemetry.t_server = t_server;
+            const dDomToSw = m.telemetry.t_sw ? (m.telemetry.t_sw - m.telemetry.t_dom) : 0;
+            const dSwToSrv = m.telemetry.t_sw ? (t_server - m.telemetry.t_sw) : (t_server - m.telemetry.t_dom);
+            console.log(`[TELEMETRY] ⚡ Latency for ${m.fb_message_id || 'msg'}: dom->sw=${dDomToSw}ms, sw->server=${dSwToSrv}ms, total=${t_server - m.telemetry.t_dom}ms`);
+          }
+
           console.log(`[WS] 📩 Nhận NEW_MESSAGE_RECEIVED | Source: ${m.source || 'unknown'} | Thread: ${threadId} | FB Message ID: ${m.fb_message_id} | Content: "${sanitizeLog(m.content, 80)}"`);
           const { isBlacklistedThreadId } = require('./utils/threadGuard');
           if (!threadId || threadId === 'unknown_dom' || threadId.trim() === '' || isBlacklistedThreadId(threadId)) {
@@ -2037,12 +2046,16 @@ wss.on('connection', (ws, req) => {
           // Auto-register Page source & rebind thread khi đến từ Business Suite
           if (m.source === 'page_dom_observer' && m.page_id) {
             try {
-              InboxSourceService.ensurePageSource({
+              const updatedSource = InboxSourceService.ensurePageSource({
                 pageId: String(m.page_id),
                 accountId: targetAccountId,
                 threadId: m.thread_id,
                 pageName: m.page_name || null
               }, db);
+              if (updatedSource && m.page_name && updatedSource.display_name === m.page_name) {
+                io.emit('INBOX_SOURCE_UPDATED', updatedSource);
+                io.emit('THREAD_LIST_UPDATED');
+              }
             } catch (pageSourceErr) {
               console.warn('[PAGE_SOURCE] Lỗi auto-register page source:', pageSourceErr.message);
             }
@@ -3418,9 +3431,26 @@ wss.on('connection', (ws, req) => {
           }
           break;
         }
+        case 'PAGE_NAME_DETECTED': {
+          const pageId = String(msg.data?.page_id || '');
+          const pageName = String(msg.data?.page_name || '').trim();
+          if (pageId && pageName) {
+            console.log(`[WS] 🏷️ Nhận PAGE_NAME_DETECTED: page=${pageId}, name="${pageName}"`);
+            const updatedSource = InboxSourceService.updatePageDisplayName({ pageId, pageName }, db);
+            if (updatedSource) {
+              io.emit('INBOX_SOURCE_UPDATED', updatedSource);
+              io.emit('THREAD_LIST_UPDATED');
+            }
+          }
+          break;
+        }
         case 'PAGE_EXTENSION_READY': {
           const pageId = String(msg.data?.page_id || '');
           const accountId = String(ws.accountId || msg.data?.account_id || '');
+          const pageName = msg.data?.page_name ? String(msg.data.page_name).trim() : null;
+          if (pageId && pageName) {
+            InboxSourceService.updatePageDisplayName({ pageId, pageName }, db);
+          }
           const source = pageId && accountId ? db.prepare(`
             SELECT id FROM inbox_sources
             WHERE source_type = 'page_messenger' AND status = 'ACTIVE'
@@ -3464,6 +3494,13 @@ wss.on('connection', (ws, req) => {
               const ack = { ...ackBase, status: 'rejected', reason: 'page_source_not_registered' };
               if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: ack }));
               break;
+            }
+            if (envelope.page_name) {
+              const updated = InboxSourceService.updatePageDisplayName({ pageId, pageName: envelope.page_name }, db);
+              if (updated) {
+                io.emit('INBOX_SOURCE_UPDATED', updated);
+                io.emit('THREAD_LIST_UPDATED');
+              }
             }
             let safePageContactName = cleanContactName(envelope.contact_name, null);
             if (isInvalidContactName(safePageContactName)) safePageContactName = null;
