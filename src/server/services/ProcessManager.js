@@ -178,6 +178,43 @@ if ($match) { Write-Output $match }
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
+// Chrome cache bản unpacked extension trong profile (Extensions/ + Preferences)
+// và khôi phục bản cached khi khởi động lại - kể cả khi file trên đĩa đã là bản
+// mới. Hệ quả: sau khi update app, Chrome của tài khoản vẫn chạy extension cũ
+// (reproduced 2026-09-18: SW thiếu hàm mới sau 2 lần build). Dọn sạch cache
+// trước mỗi lần launch để installExtension luôn cài bản mới từ resources.
+function cleanStaleInstalledExtension(profileDir) {
+  try {
+    const extRoot = path.join(profileDir, 'Extensions');
+    if (fs.existsSync(extRoot)) {
+      fs.rmSync(extRoot, { recursive: true, force: true, maxRetries: 2, retryDelay: 300 });
+      console.log('[ProcessManager] Đã dọn Extensions cache cũ trong', profileDir);
+    }
+    const prefsPath = path.join(profileDir, 'Preferences');
+    if (fs.existsSync(prefsPath)) {
+      try {
+        const prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8'));
+        const settings = prefs && prefs.extensions && prefs.extensions.settings;
+        if (settings && typeof settings === 'object') {
+          let removed = 0;
+          for (const key of Object.keys(settings)) {
+            const entry = settings[key];
+            const p = String((entry && entry.path) || '');
+            if (p.includes('resources/extension') || p.includes('resources\extension')) {
+              delete settings[key];
+              removed += 1;
+            }
+          }
+          if (removed) {
+            fs.writeFileSync(prefsPath, JSON.stringify(prefs));
+            console.log(`[ProcessManager] Đã gỡ ${removed} entry extension cũ khỏi Preferences`);
+          }
+        }
+      } catch (_) { /* Preferences hỏng - bỏ qua, Chrome sẽ tự dựng lại */ }
+    }
+  } catch (_) {}
+}
+
 function ensureProfilePermissions(profileDir) {
   try {
     const defaultDir = path.join(profileDir, 'Default');
@@ -331,6 +368,7 @@ class ProcessManager {
       fs.mkdirSync(profileDir, { recursive: true });
     }
     ensureProfilePermissions(profileDir);
+    cleanStaleInstalledExtension(profileDir);
 
     const chromeExecutable = this.getInteractiveSetupChromeExecutable();
     const absExtPath = path.resolve(this.extensionPath).replace(/\\/g, '/');
@@ -531,6 +569,7 @@ class ProcessManager {
       fs.mkdirSync(profileDir, { recursive: true });
     }
     ensureProfilePermissions(profileDir);
+    cleanStaleInstalledExtension(profileDir);
 
     const chromeExecutable = this.getInteractiveSetupChromeExecutable();
     const absExtPath = path.resolve(this.extensionPath).replace(/\\/g, '/');

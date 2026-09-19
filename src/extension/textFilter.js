@@ -90,6 +90,14 @@ function isBareVietnamMobileText(text) {
     /^\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}$/i,
     /^0:\d{2}$/i,
 
+
+    // Nhãn hệ thống của attachment unfurl (link share -> Messenger render
+    // 'Bạn đã gửi một file đính kèm.') - không bao giờ là tin nhắn thật.
+    /^Bạn đã gửi (?:một )?(?:file|tệp|tập tin|ảnh|video) đính kèm\.?$/i,
+    /^You sent (?:an )?attachment\.?$/i,
+
+    /^Bạn đã phản hồi ghi chú của (?:họ|họ\.|họ\.?)$/i,
+    /^Bạn đã trả lời tin của .+\.$/i,
     // Debug trace and junk text patterns (TRACE_ONE_1509, dsdsdsds, numeric debug strings)
     /^TRACE_[A-Z0-9_]+$/i,
     /^(?:ds){2,}$/i,

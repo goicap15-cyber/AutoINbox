@@ -4,6 +4,7 @@ import { X, ExternalLink, ShieldAlert, RefreshCw, PlusCircle, Trash2, Monitor } 
 export default function AccountManagerModal({ onClose, onSourcesChanged, onFacebookSyncStart, socket, sessionUser }) {
   const isCompanyAdmin = sessionUser?.company_role === 'ADMIN';
   const [accounts, setAccounts] = useState([]);
+  const genericPageName = /^Page \d+$/i;
   const [loading, setLoading] = useState(true);
   const [startingId, setStartingId] = useState(null);
   const [displayActionId, setDisplayActionId] = useState(null);
@@ -386,9 +387,15 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
             <div className="space-y-2">
               {inboxSources.filter((source) => source.source_type === 'page_messenger').map((source) => (
                 <div key={source.id} className="p-3 rounded-lg border border-violet-500/20 bg-violet-500/5 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-xs font-semibold text-slate-100 truncate">Page · {source.display_name || source.external_id}</div>
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className="relative w-9 h-9 shrink-0 overflow-hidden rounded-full bg-violet-500/20 text-violet-200 font-bold text-xs flex items-center justify-center border border-violet-500/30">
+                      {(source.display_name || 'P').replace(/^Page\s*/i, '').charAt(0).toUpperCase()}
+                      {source.avatar_url && <img src={source.avatar_url} alt="" className="absolute inset-0 h-full w-full object-cover" onError={(event) => { event.currentTarget.style.display = 'none'; }} />}
+                    </span>
+                    <div className="min-w-0">
+                    <div className="text-xs font-semibold text-slate-100 truncate">{source.display_name && !genericPageName.test(source.display_name) ? source.display_name : 'Page · ' + (source.display_name || source.external_id)}</div>
                     <div className="text-[10px] text-slate-500 font-mono truncate">{source.external_id} · {source.status}</div>
+                    </div>
                   </div>
                   <button type="button" onClick={() => handleDisconnectSource(source.id)} className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 border border-slate-700/60">Ngắt</button>
                 </div>

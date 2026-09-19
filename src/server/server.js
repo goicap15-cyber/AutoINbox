@@ -54,6 +54,22 @@ const broadcastEngine = require('./services/BroadcastEngine');
 const aiMediator = require('./services/AIMediator');
 const { extractLeadInfo } = require('./utils/leadExtractor');
 const { downloadAvatar, saveAvatarFromBase64OrUrl, serveAvatar } = require('./utils/avatarManager');
+const LinkPreviewService = require('./services/LinkPreviewService');
+// Link facebook share/p thiếu og:image (Facebook khóa sau login): đẩy nhiệm
+// vụ sang extension - mở tab đọc og:image trong Chrome đã đăng nhập rồi trả về.
+const linkImageSentAt = new Map();
+LinkPreviewService.onImageNeeded = (urlHash, url) => {
+  // Throttle: moi hash chi moi extension moi 10 phut mot lan
+  const last = linkImageSentAt.get(urlHash) || 0;
+  if (Date.now() - last < 10 * 60 * 1000) return;
+  for (const extWs of extensionConnections.values()) {
+    if (extWs.readyState === WebSocket.OPEN) {
+      linkImageSentAt.set(urlHash, Date.now());
+      extWs.send(JSON.stringify({ type: 'FETCH_LINK_IMAGE', data: { url_hash: urlHash, url } }));
+      break;
+    }
+  }
+};
 const { isSystemOrMetadataText, cleanMessageText, isSidebarActivitySummary, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
 const { isKnownPageSystemNotice } = require('./utils/pageSystemNotice');
 const { parsePageIdFromInput } = require('./utils/pageIdParser');
@@ -802,7 +818,7 @@ function isRenderableStoredMessage(message = {}) {
 }
 
 function prepareMessagesForClient(rows = []) {
-  return rows
+  const prepared = rows
     .map((row) => {
       const cleaned = cleanMessageText(row.content ?? row.cleaned ?? '');
       // System/DOM labels are never useful as a caption. Keep text only when
@@ -814,6 +830,8 @@ function prepareMessagesForClient(rows = []) {
     // installed. Hide an incoming echo of the operator's just-sent text here
     // too, not only at the WebSocket write boundary.
     .filter((row) => !isRecentOutgoingTextEcho(row.thread_id, row));
+  LinkPreviewService.attachPreviews(prepared);
+  return prepared;
 }
 
 function isRecentOutgoingTextEcho(threadId, message = {}, database = db) {
@@ -1360,6 +1378,11 @@ wss.on('connection', (ws, req) => {
           try {
             InboxSourceService.createPersonalSource(account_id, accName, db);
           } catch (_) {}
+          // Nguon personal hien ten + avatar that cua tai khoan (thay "FB Account (<id>)").
+          try {
+            db.prepare("UPDATE inbox_sources SET display_name = COALESCE(NULLIF(?, ''), display_name), avatar_url = COALESCE(?, avatar_url) WHERE id = ?")
+              .run(accName, accountAvatarFilename, 'src_personal_' + account_id);
+          } catch (_) {}
           io.emit('ACCOUNT_STATUS_CHANGED', { account_id, status: 'ACTIVE', avatar_url: accountAvatarFilename, pending_key: pending_key || readdPendingKey || null, name: accName });
           io.emit('INBOX_SOURCE_ADDED', { id: 'src_personal_' + account_id, source_type: 'personal_messenger', display_name: accName });
           io.emit('EXTENSION_CONNECTION_CHANGED', { account_id, is_connected: true });
@@ -1405,6 +1428,23 @@ wss.on('connection', (ws, req) => {
               scheduleNewAccountBootstrapSync(account_id);
             }
           }
+
+          // Giao viec lay profile cho cac Page con ten generic / chua co
+          // avatar - extension se mo tab profile Page va tra ket qua qua
+          // UPDATE_PAGE_PROFILE. Chay lai moi lan extension reconnect nen
+          // neu lan truoc that bai se du thu lai.
+          try {
+            const pagesNeedProfile = db.prepare(`
+              SELECT external_id FROM inbox_sources
+              WHERE source_type = 'page_messenger' AND owner_account_id = ?
+                AND (avatar_url IS NULL OR display_name = 'Page ' || external_id)
+            `).all(String(account_id));
+            const pageIds = pagesNeedProfile.map((r) => String(r.external_id)).filter((id) => /^\d+$/.test(id));
+            if (pageIds.length && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'FETCH_PAGE_PROFILES', data: { page_ids: pageIds } }));
+              console.log(`[PAGE_SOURCE] Giao lay profile cho ${pageIds.length} Page:`, pageIds.join(','));
+            }
+          } catch (_) {}
 
           // InboxSyncScheduler.registerAccount() already starts the lightweight
           // background inbox loop. Do not dispatch a second full SYNC_THREADS
@@ -2423,6 +2463,37 @@ wss.on('connection', (ws, req) => {
 
           if (wasNewMessage || directionWasUpdated || mediaWasUpdated) {
             const earlyPersistedMessage = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+            // Link share bi Messenger unfurl thanh tin media rieng (video/image
+            // khong co noi dung) -> xoa tin link-text vua gui truoc do (cung
+            // thread, <=3 phut, noi dung chi la URL) de khong hien 2 bong bong
+            // cho cung mot noi dung (reproduced 2026-09-18).
+            try {
+              const newMt = String(earlyPersistedMessage.media_type || '').toLowerCase();
+              const newContent = String(earlyPersistedMessage.content || '').trim();
+              const newOutgoing = Number(earlyPersistedMessage.is_outgoing) === 1;
+              if (newOutgoing && newMt === 'video' && !newContent) {
+                // Tin unfurl gồm CẢ video row (rỗng content) LẪN image rows
+                // mang content = link (media_type='image') - xóa TẤT CẢ tin
+                // trước đó ≤3 phút có content là link, mọi media_type.
+                const linkRows = db.prepare(`
+                  SELECT id FROM messages
+                  WHERE thread_id = ? AND is_outgoing = 1 AND content LIKE 'http%'
+                    AND id != ?
+                    AND datetime(created_at) >= datetime('now', '-3 minutes')
+                  ORDER BY id DESC LIMIT 6
+                `).all(earlyPersistedMessage.thread_id, earlyPersistedMessage.id);
+                if (linkRows.length) {
+                  // Chuyển URL của tin link vào tin media (bubble = ảnh/video +
+                  // dòng link bấm được bên dưới), rồi xóa tin link trùng.
+                  const keepUrl = String(linkRows[0].content || '').trim();
+                  db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(keepUrl, earlyPersistedMessage.id);
+                  const delStmt = db.prepare('DELETE FROM messages WHERE id = ?');
+                  for (const lr of linkRows) delStmt.run(lr.id);
+                  io.emit('THREAD_MESSAGES_UPDATED', { thread_id: earlyPersistedMessage.thread_id, account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null });
+                  console.log(`[LINK_MERGE] Unfurl: đã gộp ${linkRows.length} tin link, chuyển URL vào media #${earlyPersistedMessage.id}`);
+                }
+              }
+            } catch (_) {}
             const earlyThread = db.prepare(`
               SELECT t.id, t.external_thread_id, t.account_id, t.contact_name, c.avatar_url,
                      t.last_message, t.last_activity, t.is_unread, t.inbox_folder, t.source_id
@@ -3486,6 +3557,53 @@ wss.on('connection', (ws, req) => {
           }
           break;
         }
+        case 'UPDATE_LINK_PREVIEW_IMAGE': {
+          try {
+            const { url_hash, image_url } = msg.data || {};
+            const hash = String(url_hash || '');
+            if (!/^[0-9a-f]{40}$/.test(hash)) break;
+            if (!image_url || !/^https?:\/\//i.test(String(image_url))) break;
+            // Tai anh ve local - URL lookaside/scontent cua FB la tam thoi
+            let stored = String(image_url);
+            try {
+              const localFile = await saveAvatarFromBase64OrUrl(stored, 'link_' + hash);
+              if (localFile) stored = '/api/avatars/' + localFile;
+            } catch (_) {}
+            db.prepare('UPDATE link_previews SET image_url = ? WHERE url_hash = ?')
+              .run(stored, hash);
+            console.log('[LINK_PREVIEW] Ảnh bổ sung từ extension cho hash ' + hash.slice(0, 10) + '…');
+          } catch (_) {}
+          break;
+        }
+
+        case 'UPDATE_PAGE_PROFILE': {
+          // Extension mo tab profile Page va doc ten + avatar that ( cung co
+          // che voi operator profile). Cap nhat inbox_sources: display_name
+          // chi thay the ten generic "Page <id>"; avatar luu qua avatarManager.
+          try {
+            const { page_id, name, avatar_url } = msg.data || {};
+            const pid = String(page_id || '').trim();
+            if (!/^\d+$/.test(pid)) break;
+            const safeName = (typeof name === 'string' ? name.trim() : '').slice(0, 120);
+            const safeAvatar = (typeof avatar_url === 'string' && avatar_url.startsWith('https://')) ? avatar_url : null;
+            let avatarFile = null;
+            if (safeAvatar) {
+              avatarFile = await saveAvatarFromBase64OrUrl(safeAvatar, 'page_' + pid);
+            }
+            const src = db.prepare("SELECT id, display_name FROM inbox_sources WHERE source_type = 'page_messenger' AND external_id = ?").get(pid);
+            if (!src) break;
+            const genericName = new RegExp('^Page ' + pid + '$', 'i');
+            const nextName = safeName && (!src.display_name || genericName.test(src.display_name)) ? safeName : (safeName || src.display_name);
+            db.prepare('UPDATE inbox_sources SET display_name = ?, avatar_url = COALESCE(?, avatar_url) WHERE id = ?')
+              .run(nextName || src.display_name, avatarFile ? '/api/avatars/' + avatarFile : null, src.id);
+            io.emit('INBOX_SOURCES_UPDATED', { source_id: src.id, page_id: pid, display_name: nextName || src.display_name, avatar_url: avatarFile ? '/api/avatars/' + avatarFile : null });
+            console.log(`[PAGE_SOURCE] Da cap nhat profile Page ${pid}: name="${nextName}", avatar=${avatarFile ? 'yes' : 'no'}`);
+          } catch (e) {
+            console.warn('[PAGE_SOURCE] UPDATE_PAGE_PROFILE loi:', e.message);
+          }
+          break;
+        }
+
         case 'PAGE_THREAD_MESSAGES_SYNCED_V1': {
           const envelope = msg.data || {};
           const { verifyPageOwnership } = require('./utils/pageContextResolver');
@@ -4979,6 +5097,38 @@ app.put('/api/contacts/:thread_id', (req, res) => {
 });
 
 // Inbox Sources — Personal and Page connected sources
+// Bộ lọc chi tiết ngày (2026-09-18): trả về các hội thoại có tin nhắn trong
+// ngày được chọn (theo timestamp_ms của messages - nguồn ngày chuẩn khớp
+// Messenger; last_activity bị trộn múi giờ nên không dùng).
+app.get('/api/threads/active-on', (req, res) => {
+  try {
+    const dateStr = String(req.query.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      return res.status(400).json({ success: false, error: 'Thiếu/sai định dạng ngày (YYYY-MM-DD).' });
+    }
+    const start = new Date(dateStr + 'T00:00:00');
+    if (isNaN(start.getTime())) return res.status(400).json({ success: false, error: 'Ngày không hợp lệ.' });
+    const startMs = start.getTime();
+    const endMs = startMs + 24 * 60 * 60 * 1000;
+    // Scope bằng CÙNG logic với danh sách hội thoại đang hiển thị
+    // (assignmentManager.getThreadsByFilter) - không dùng listAccounts vì
+    // company_id của account có thể khác company của user (reproduced
+    // 2026-09-19: filter ngày trả rỗng dù hội thoại hiển thị bình thường).
+    const visible = assignmentManager.getThreadsByFilter(
+      req.user.id, req.user.role, 'ALL', 'all', req.user.company_id, req.user.company_role, req.user.username
+    );
+    const visibleIds = new Set(visible.map((t) => String(t.id)));
+    const rows = db.prepare(
+      'SELECT DISTINCT thread_id AS id FROM messages WHERE timestamp_ms >= ? AND timestamp_ms < ?'
+    ).all(startMs, endMs);
+    const threadIds = rows.map((r) => String(r.id)).filter((id) => visibleIds.has(id));
+    res.json({ success: true, date: dateStr, thread_ids: threadIds });
+  } catch (error) {
+    console.error('[API] active-on lỗi:', error.message);
+    res.status(500).json({ success: false, error: 'Không thể lọc theo ngày.' });
+  }
+});
+
 app.get('/api/inbox-sources', (req, res) => {
   try {
     const accountIds = enterpriseAccess.listAccounts(req.user).map(account => String(account.id));

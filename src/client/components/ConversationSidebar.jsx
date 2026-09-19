@@ -25,7 +25,8 @@ export default function ConversationSidebar({
   selectedCampaignThreadIds = [],
   onToggleCampaignThread,
   onStartCampaignSelection, onCancelCampaignSelection, onCreateCampaign,
-  onBulkHistorySync, onContinueFacebookSync, onCancelFacebookSync, bulkHistoryProgress
+  onBulkHistorySync, onContinueFacebookSync, onCancelFacebookSync, bulkHistoryProgress,
+  dateFilter = '', dateFilterIds = null, onDateFilterChange
 }) {
   const [appliedFilters, setAppliedFilters] = useState(() => normalizeFilters(createDefaultFilters()));
   const [isFilterPopoverOpen, setIsFilterPopoverOpen] = useState(false);
@@ -39,6 +40,7 @@ export default function ConversationSidebar({
     : 'Bộ lọc';
 
   const visibleThreads = threads.filter((thread) => {
+    if (dateFilter && dateFilterIds && !dateFilterIds.has(String(thread.id))) return false;
     if (!matchesConversationFilters(thread, appliedFilters)) return false;
     const isMessageRequest = ['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(String(thread.inbox_folder || 'INBOX'));
     if (activeTab === 'WAITING' && !isMessageRequest) return false;
@@ -174,7 +176,7 @@ export default function ConversationSidebar({
           <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] pointer-events-none" strokeWidth={1.75} />
         </div>
 
-        <ConversationFilters activeTab={activeTab} onTabChange={onTabChange} waitingCount={waitingCount} />
+        <ConversationFilters activeTab={activeTab} onTabChange={onTabChange} waitingCount={waitingCount} dateFilter={dateFilter} onDateFilterChange={onDateFilterChange} />
         {bulkHistoryProgress && (
           <div className="flex items-center justify-between rounded-lg bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-muted)]">
             <span>

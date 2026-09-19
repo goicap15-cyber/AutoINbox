@@ -84,7 +84,11 @@ async function createWindow() {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.includes('google-auth-external') || url.includes('accounts.google.com') || url.includes('google.com')) {
+    // Mọi liên kết http/https (link Facebook share, Spotify...) mở bằng
+    // trình duyệt hệ thống của người dùng - nơi họ đã đăng nhập Facebook,
+    // cần cho các link share/v/... Yêu cầu 2026-09-18: link trong chat phải
+    // bấm được. Chặn popup nội bộ trong cửa sổ CRM.
+    if (/^https?:\/\//i.test(url)) {
       require('electron').shell.openExternal(url);
       return { action: 'deny' };
     }

@@ -1,6 +1,7 @@
 import React from 'react';
+import { CalendarDays, X } from 'lucide-react';
 
-export default function ConversationFilters({ activeTab, onTabChange, waitingCount = 0 }) {
+export default function ConversationFilters({ activeTab, onTabChange, waitingCount = 0, dateFilter = '', onDateFilterChange }) {
   const tabs = [
     { id: 'ALL', label: 'Hội thoại' },
     { id: 'WAITING', label: 'Tin nhắn chờ', count: Math.max(0, Number(waitingCount) || 0) }
@@ -32,6 +33,34 @@ export default function ConversationFilters({ activeTab, onTabChange, waitingCou
           </button>
         );
       })}
+      <div className="flex items-center gap-1.5 shrink-0">
+        <label
+          className={`h-8.5 inline-flex items-center gap-1.5 rounded-lg px-2 text-xs font-medium cursor-pointer transition-colors border ${
+            dateFilter
+              ? 'bg-[var(--color-accent-subtle)] text-[var(--color-accent)] border-[var(--color-accent)]/40'
+              : 'text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] border-transparent'
+          }`}
+          title="Lọc hội thoại có tin nhắn trong ngày đã chọn"
+        >
+          <CalendarDays size={13} strokeWidth={1.75} />
+          <input
+            type="date"
+            value={dateFilter}
+            onChange={(event) => onDateFilterChange?.(event.target.value)}
+            className="bg-transparent text-xs outline-none w-[105px] cursor-pointer [color-scheme:dark]"
+          />
+        </label>
+        {dateFilter && (
+          <button
+            type="button"
+            onClick={() => onDateFilterChange?.('')}
+            className="h-8.5 inline-flex items-center gap-1 rounded-lg px-2 text-xs font-medium text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors"
+            title="Xóa bộ lọc ngày"
+          >
+            <X size={13} strokeWidth={1.75} />
+          </button>
+        )}
+      </div>
     </div>
   );
 }

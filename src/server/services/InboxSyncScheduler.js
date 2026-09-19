@@ -145,7 +145,11 @@ class InboxSyncScheduler {
     state.syncWindowTimer = setTimeout(() => this.stopSyncWindow(accId, 'window_expired'), boundedDuration);
     if (typeof state.syncWindowTimer.unref === 'function') state.syncWindowTimer.unref();
 
-    const inboxDispatched = this.requestSidebarSync(accId, 'manual_window_inbox', { force: true, scanMode: 'realtime' });
+    // Operator bam nut sync = muon dong bo NGAY va sau: dung che do 'full'
+    // (cuon sau sidebar + quet ca Tin nhan cho/Spam) thay vi 'realtime'
+    // (5s, chi doc sidebar hien tai - reproduced 2026-09-18: an sync xong
+    // khong thay gi, phai doi cuoi cua so 120s moi thay dong bo).
+    const inboxDispatched = this.requestSidebarSync(accId, 'manual_window_inbox', { force: true, scanMode: 'full' });
     // The refresh button can be pressed while the extension is reconnecting.
     // Do not lose that explicit request: retry the Inbox scan after the socket
     // becomes ready and trigger Message Requests independently of Inbox.

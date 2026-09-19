@@ -6,12 +6,21 @@ import { getMessageDateKey, formatDateSeparatorLabel } from '../utils/messageTim
 
 const AVATAR_COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#ec4899', '#f97316', '#14b8a6', '#6366f1', '#ef4444'];
 
-export default function MessageList({ messages = [], activeThread, onSyncThread, onRetryMessage, onViewportScroll, historySyncing = false }) {
+export default function MessageList({ messages = [], activeThread, onSyncThread, onRetryMessage, onViewportScroll, historySyncing = false, jumpToDate = null }) {
   const containerRef = useRef(null);
   const previousThreadIdRef = useRef(null);
   const previousHeightRef = useRef(0);
   const previousFirstMessageRef = useRef('');
   const lastScrollTopRef = useRef(0);
+  const lastScrollHeightRef = useRef(0);
+  // Neo giữ vị trí: bong bóng đầu tiên đang xem + offset của nó lúc cuộn cuối.
+  // Dùng thay cho phép bù "scrollTop += chênh lệch chiều cao" - phép bù đó trượt
+  // vị trí khi sync về vừa prepend tin cũ vừa append tin mới (reproduced
+  // 2026-09-17: operator đang đọc lịch sử bị đẩy xuống dưới).
+  const scrollAnchorRef = useRef(null);
+  // Nhảy tới ngày đang lọc: mở hội thoại khi bộ lọc ngày bật → chat tự cuộn
+  // tới tin nhắn đầu tiên của ngày đó (nếu đã có trong DB).
+  const jumpStateRef = useRef({ done: false, attempts: 0 });
   const nearBottomRef = useRef(true);
   const suppressScrollRef = useRef(false);
   const pendingDeltaRef = useRef(0);
@@ -50,6 +59,7 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     if (!container || !threadId || previousThreadIdRef.current === threadId) return;
 
     previousThreadIdRef.current = threadId;
+    jumpStateRef.current = { done: false, attempts: 0 };
     pendingDeltaRef.current = 0;
     pendingOlderSyncRef.current = false;
     historyRequestInFlightRef.current = false;
@@ -75,18 +85,49 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     const firstChanged = Boolean(previousFirstMessageRef.current && nextFirst && previousFirstMessageRef.current !== nextFirst);
     suppressScrollRef.current = true;
 
-    if (pendingOlderSyncRef.current && firstChanged && oldHeight > 0 && newHeight > oldHeight) {
-      // Older rows were prepended while Messenger moved to the preceding
-      // viewport. Show that newly synchronized CRM page as well. Keep the
-      // flag active across consecutive history batches; it is cleared only
-      // when the operator deliberately scrolls down again.
-      container.scrollTop += newHeight - oldHeight;
-    } else if (nearBottomRef.current) {
-      container.scrollTop = newHeight;
-    } else if (firstChanged && oldHeight > 0 && newHeight > oldHeight) {
-      // Compensate only for genuinely prepended history. A realtime message
-      // appended at the bottom must not drag the operator down from history.
-      container.scrollTop += newHeight - oldHeight;
+    const anchor = scrollAnchorRef.current;
+    let anchored = false;
+    if (!nearBottomRef.current && anchor && anchor.scrollTop > 0) {
+      try {
+        const el = container.querySelector(`[data-anchor-key="${String(anchor.key).replace(/"/g, '\\"')}"]`);
+        if (el) {
+          container.scrollTop = el.offsetTop - (anchor.offsetTop - anchor.scrollTop);
+          scrollAnchorRef.current = { key: anchor.key, offsetTop: el.offsetTop, scrollTop: container.scrollTop };
+          anchored = true;
+        }
+      } catch (_) {}
+    }
+    if (!anchored) {
+      if (pendingOlderSyncRef.current && firstChanged && oldHeight > 0 && newHeight > oldHeight) {
+        // Older rows were prepended while Messenger moved to the preceding
+        // viewport. Show that newly synchronized CRM page as well. Keep the
+        // flag active across consecutive history batches; it is cleared only
+        // when the operator deliberately scrolls down again.
+        container.scrollTop += newHeight - oldHeight;
+      } else if (nearBottomRef.current) {
+        container.scrollTop = newHeight;
+      } else if (firstChanged && oldHeight > 0 && newHeight > oldHeight) {
+        // Compensate only for genuinely prepended history. A realtime message
+        // appended at the bottom must not drag the operator down from history.
+        container.scrollTop += newHeight - oldHeight;
+      }
+    }
+
+    // Jump-to-date: nếu bộ lọc ngày đang bật mà ngày đó chưa nhảy thì cuộn tới
+    // tin đầu tiên của ngày (element phải đã mount trong DOM).
+    if (jumpToDate && !jumpStateRef.current.done) {
+      const el = container.querySelector(`[data-msg-date="${String(jumpToDate).replace(/"/g, '')}"]`);
+      if (el) {
+        container.scrollTop = el.offsetTop - 8;
+        lastScrollTopRef.current = container.scrollTop;
+        scrollAnchorRef.current = { key: el.getAttribute('data-anchor-key'), offsetTop: el.offsetTop, scrollTop: container.scrollTop };
+        nearBottomRef.current = false;
+        jumpStateRef.current.done = true;
+      } else if (jumpStateRef.current.attempts >= 10) {
+        jumpStateRef.current.done = true;
+      } else {
+        jumpStateRef.current.attempts += 1;
+      }
     }
 
     lastScrollTopRef.current = container.scrollTop;
@@ -94,7 +135,7 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     previousFirstMessageRef.current = nextFirst;
     const release = requestAnimationFrame(() => { suppressScrollRef.current = false; });
     return () => cancelAnimationFrame(release);
-  }, [messages]);
+  }, [messages, jumpToDate]);
 
   // Keep the viewport pinned to the newest message when media/layout
   // finishes loading. Do not disturb an operator who is reading history.
@@ -104,6 +145,13 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     if (!container || !content || typeof ResizeObserver === 'undefined') return;
     const keepAtBottom = () => {
       if (suppressScrollRef.current || !nearBottomRef.current) return;
+      // Chốt an toàn thứ hai: nếu khoảng cách thực tới đáy đã xa (operator
+      // đang đọc lịch sử) thì cờ nearBottom là stale - tắt nó thay vì kéo
+      // view xuống đáy.
+      if (container.scrollHeight - container.scrollTop - container.clientHeight > 120) {
+        nearBottomRef.current = false;
+        return;
+      }
       container.scrollTop = container.scrollHeight;
       lastScrollTopRef.current = container.scrollTop;
       previousHeightRef.current = container.scrollHeight;
@@ -112,6 +160,10 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     observer.observe(content);
     return () => observer.disconnect();
   }, [activeThread?.id]);
+
+  useEffect(() => {
+    jumpStateRef.current = { done: false, attempts: 0 };
+  }, [jumpToDate]);
 
   useEffect(() => {
     if (historySyncing) syncWasActiveRef.current = true;
@@ -172,7 +224,34 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     const currentTop = container.scrollTop;
     const delta = currentTop - lastScrollTopRef.current;
     lastScrollTopRef.current = currentTop;
-    nearBottomRef.current = container.scrollHeight - currentTop - container.clientHeight < 80;
+    const currentHeight = container.scrollHeight;
+    const contentShrank = currentHeight < lastScrollHeightRef.current;
+    lastScrollHeightRef.current = currentHeight;
+    // nearBottom chỉ cập nhật từ lượt cuộn THẬT của người dùng. Hai trường hợp
+    // không được phép bật cờ này: (1) scroll do chương trình (suppress), (2)
+    // scroll do trình duyệt clamp scrollTop khi nội dung CO LẠI tạm thời
+    // (bubble remount/ảnh đang tải giữa chừng sync) - lúc đó viewport rơi gần
+    // đáy là ảo, nếu bật cờ thì cơ chế bám đáy sẽ kéo operator xuống đáy khi
+    // họ đang đọc lịch sử (reproduced 2026-09-17, hai lần).
+    if (!suppressScrollRef.current && delta !== 0) {
+      const distanceToBottom = currentHeight - currentTop - container.clientHeight;
+      if (distanceToBottom < 80) {
+        if (!contentShrank) nearBottomRef.current = true;
+      } else {
+        nearBottomRef.current = false;
+      }
+    }
+    if (!suppressScrollRef.current && delta !== 0) {
+      try {
+        const containerRect = container.getBoundingClientRect();
+        for (const el of container.querySelectorAll('[data-anchor-key]')) {
+          if (el.getBoundingClientRect().bottom > containerRect.top + 24) {
+            scrollAnchorRef.current = { key: el.getAttribute('data-anchor-key'), offsetTop: el.offsetTop, scrollTop: currentTop };
+            break;
+          }
+        }
+      } catch (_) {}
+    }
     if (suppressScrollRef.current || !delta || !onViewportScroll) return;
 
     queueViewportDelta(delta);
@@ -236,7 +315,7 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
                       <div className="flex-1 h-px bg-[var(--color-border)]/60" />
                     </div>
                   )}
-                  <div>
+                  <div data-anchor-key={messageIdentity(msg, index)} data-msg-date={getMessageDateKey(msg) || ''}>
                     <MessageBubble msg={msg} activeThread={activeThread} onRetry={onRetryMessage} />
                   </div>
                 </React.Fragment>

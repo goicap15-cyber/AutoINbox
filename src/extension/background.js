@@ -733,6 +733,150 @@ let currentWsIndex = 0;
 // tick regardless of whether the user actually changed - together with the
 // duplicate-timer bug this is what flooded the server with REGISTER_ACCOUNT
 // (and everything it broadcasts) roughly once a second.
+// Lấy tên + avatar của chính tài khoản đang đăng nhập (operator). Server lưu
+// qua COALESCE nên chỉ điền chỗ còn trống/thay thế tên generic. Chạy tối đa
+// một lần cho mỗi user mỗi phiên service worker; thất bại thì cho thử lại.
+const ownProfileFetchedFor = new Set();
+// Đặt true khi profile đã lấy được nhưng backend chưa sẵn sàng nhận (race với
+// REGISTER_ACCOUNT đầu tiên) - vòng cookie-check 2s sẽ gửi lại khi đủ điều kiện.
+let ownProfileSendPending = false;
+function decodeFbHtmlEntities(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/&#x2?7;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+// fetch() trong service worker chi nhan duoc HTML shell truoc hydration
+// (khong co ten/avatar - reproduced 2026-09-18). Chien luoc moi: mo tab den
+// trang profile cua chinh operator (co marker crm_own_profile=1), CONTENT
+// SCRIPT trong tab (song doc lap voi service worker - khong bao gio bi
+// "ngu" nhu MV3 SW) doc ten + avatar sau khi Facebook hydrate xong roi gui
+// lai qua chrome.runtime.sendMessage. Message tu dong danh thuc SW neu no
+// dang ngu -> khong con race mat ket qua. Tab duoc dong trong handler.
+async function fetchOwnProfileViaTab(accountId) {
+  try {
+    chrome.tabs.create({
+      url: 'https://www.facebook.com/profile.php?id=' + encodeURIComponent(String(accountId)) + '&crm_own_profile=1',
+      active: true
+    }, () => { void chrome.runtime.lastError; });
+  } catch (_) {}
+  return null;
+}
+
+async function fetchAndApplyOwnFbProfile(accountId) {
+  const key = String(accountId || '');
+  if (!key || ownProfileFetchedFor.has(key)) return;
+  ownProfileFetchedFor.add(key);
+  try {
+    const res = await fetch('https://www.facebook.com/profile.php?id=' + encodeURIComponent(key), { credentials: 'include' });
+    if (!res.ok) {
+      ownProfileFetchedFor.delete(key);
+      return;
+    }
+    const html = await res.text();
+    const nameMatch = html.match(/<meta\s+property="og:title"\s+content="([^"]*)"/i)
+      || html.match(/<meta\s+content="([^"]*)"\s+property="og:title"/i);
+    const imgMatch = html.match(/<meta\s+property="og:image"\s+content="([^"]*)"/i)
+      || html.match(/<meta\s+content="([^"]*)"\s+property="og:image"/i);
+    const titleFallback = !nameMatch ? html.match(/<title[^>]*>([^<]+)<\/title>/i) : null;
+    let fetchedName = nameMatch ? decodeFbHtmlEntities(nameMatch[1]).trim() : (titleFallback ? decodeFbHtmlEntities(titleFallback[1]).replace(/\s*[|\-–]\s*Facebook\s*$/i, '').trim() : '');
+    const fetchedAvatar = imgMatch ? decodeFbHtmlEntities(imgMatch[1]).trim() : '';
+    const genericProfileMissedHtml = !fetchedName && !fetchedAvatar;
+    const genericName = /^(?:facebook|messenger|trang cá nhân|profile|người dùng facebook)\s*(?:\|.*)?$/i;
+    if (fetchedName && genericName.test(fetchedName)) fetchedName = '';
+    if (fetchedName && fetchedName !== account_name) account_name = fetchedName;
+    if (fetchedAvatar && /^https?:\/\//.test(fetchedAvatar) && fetchedAvatar !== account_avatar_url) account_avatar_url = fetchedAvatar;
+    if (genericProfileMissedHtml) {
+      // HTML shell khong co og-tag: lay qua tab that (DOM sau hydration).
+      const viaTab = await fetchOwnProfileViaTab(key);
+      if (viaTab) {
+        if (viaTab.name && viaTab.name !== account_name) account_name = viaTab.name;
+        if (viaTab.avatar && /^https?:\/\//.test(viaTab.avatar) && viaTab.avatar !== account_avatar_url) account_avatar_url = viaTab.avatar;
+      }
+    }
+    if (account_name || account_avatar_url) {
+      if (ws && ws.readyState === WebSocket.OPEN && backendAccountRegistered) {
+        console.log('[FB Engine] 🙋 Gửi REGISTER_ACCOUNT kèm profile operator:', { name: account_name, has_avatar: Boolean(account_avatar_url) });
+        sendToBackend('REGISTER_ACCOUNT', { account_id: key, fb_dtsg: fb_dtsg || '', pending_key: null, name: account_name || null, avatar_url: account_avatar_url || null });
+        ownProfileSendPending = false;
+      } else {
+        // Backend chưa nhận đăng ký lần đầu - vòng cookie-check sẽ gửi lại.
+        ownProfileSendPending = true;
+      }
+    }
+  } catch (_) {
+    ownProfileFetchedFor.delete(key);
+  }
+}
+
+// Nhan ten + avatar operator tu content script trong tab profile (tab co
+// marker crm_own_profile=1). Content script doc DOM sau hydration - tin cay
+// hon bat ky luc SW con song hay vua du danh thuc.
+// Hang doi profile Page cho WS san sang (mẫu ownProfileSendPending).
+let pendingPageProfileQueue = [];
+const linkImageFetchedFor = new Set();
+const pageProfileFetchedFor = new Set();
+function flushPendingPageProfiles() {
+  if (!pendingPageProfileQueue.length) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const batch = pendingPageProfileQueue.splice(0, pendingPageProfileQueue.length);
+  for (const item of batch) {
+    console.log('[FB Engine] 📄 Gui UPDATE_PAGE_PROFILE:', { page_id: item.pageId, name: item.data && item.data.name });
+    sendToBackend('UPDATE_PAGE_PROFILE', {
+      page_id: item.pageId,
+      name: (item.data && item.data.name) || null,
+      avatar_url: (item.data && item.data.avatar) || null
+    });
+  }
+}
+async function fetchPageProfileViaTab(pageId) {
+  try {
+    chrome.tabs.create({
+      url: 'https://www.facebook.com/profile.php?id=' + encodeURIComponent(String(pageId)) + '&crm_page_profile=' + encodeURIComponent(String(pageId)),
+      active: true
+    }, () => { void chrome.runtime.lastError; });
+  } catch (_) {}
+}
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  try {
+    if (msg && msg.type === 'CRM_LINK_IMAGE' && msg.hash && /^[0-9a-f]{40}$/.test(String(msg.hash))) {
+      if (msg.image && /^https?:\/\//.test(String(msg.image)) && ws && ws.readyState === WebSocket.OPEN) {
+        sendToBackend('UPDATE_LINK_PREVIEW_IMAGE', { url_hash: msg.hash, image_url: msg.image });
+      }
+      if (sender && sender.tab && sender.tab.id != null) {
+        try { chrome.tabs.remove(sender.tab.id).catch(() => {}); } catch (_) {}
+      }
+      return;
+    }
+    if (msg && msg.type === 'CRM_PAGE_PROFILE' && msg.pageId && /^\d+$/.test(String(msg.pageId))) {
+      pendingPageProfileQueue.push({ pageId: String(msg.pageId), data: msg.data || {} });
+      flushPendingPageProfiles();
+      if (sender && sender.tab && sender.tab.id != null) {
+        try { chrome.tabs.remove(sender.tab.id).catch(() => {}); } catch (_) {}
+      }
+      return;
+    }
+    if (!msg || msg.type !== 'CRM_OPERATOR_PROFILE' || !sender || !sender.tab || sender.tab.id == null) return;
+    const data = msg.data || {};
+    let changed = false;
+    if (data.name && data.name !== account_name) { account_name = data.name; changed = true; }
+    if (data.avatar && /^https?:\/\//.test(data.avatar) && data.avatar !== account_avatar_url) { account_avatar_url = data.avatar; changed = true; }
+    try { chrome.tabs.remove(sender.tab.id).catch(() => {}); } catch (_) {}
+    if (changed && user_id) {
+      if (ws && ws.readyState === WebSocket.OPEN && backendAccountRegistered) {
+        console.log('[FB Engine] 🙋 Gửi REGISTER_ACCOUNT kèm profile operator (từ tab):', { name: account_name, has_avatar: Boolean(account_avatar_url) });
+        sendToBackend('REGISTER_ACCOUNT', { account_id: user_id, fb_dtsg: fb_dtsg || '', pending_key: null, name: account_name || null, avatar_url: account_avatar_url || null });
+        ownProfileSendPending = false;
+      } else {
+        ownProfileSendPending = true;
+      }
+    }
+  } catch (_) {}
+});
+
 async function checkFacebookCookiesAndRegister() {
   try {
     if (!chrome?.cookies) return;
@@ -746,6 +890,12 @@ async function checkFacebookCookiesAndRegister() {
         const hadUser = Boolean(user_id);
         const userChanged = newUserId !== user_id;
         user_id = newUserId;
+        // Ten + avatar that cua operator (thay vi "FB Account (<id>)"): lay tu
+        // profile.php?id=<id> khi Chrome da dang nhap, roi gui lai
+        // REGISTER_ACCOUNT de server COALESCE dien vao accounts.
+        if (!account_name || !account_avatar_url) {
+          fetchAndApplyOwnFbProfile(newUserId);
+        }
         enforceSingleMessengerTabThrottled(user_id).then(async (tab) => {
           if (!tab?.id) return;
           await registerTab(FbCrmMessengerTabRoles.roleKey(user_id, 'chat'), tab.id);
@@ -754,6 +904,12 @@ async function checkFacebookCookiesAndRegister() {
         if (!pending_key && chrome?.storage?.local) {
           const stored = await chrome.storage.local.get(['crm_pending_key']);
           pending_key = stored?.crm_pending_key || null;
+        }
+        flushPendingPageProfiles();
+        if (ownProfileSendPending && backendAccountRegistered && ws && ws.readyState === WebSocket.OPEN) {
+          ownProfileSendPending = false;
+          console.log('[FB Engine] 🙋 Gửi lại REGISTER_ACCOUNT kèm profile operator (delayed):', { name: account_name });
+          sendToBackend('REGISTER_ACCOUNT', { account_id: user_id, fb_dtsg: fb_dtsg || '', pending_key: null, name: account_name || null, avatar_url: account_avatar_url || null });
         }
         if (!hadUser || userChanged || !backendAccountRegistered) {
           if (ws && ws.readyState === WebSocket.OPEN) {
@@ -991,7 +1147,40 @@ function connectWebSocket() {
             await flushBackendOutbox();
           }
           break;
-        }        case 'REGISTER_ACCOUNT_ACK': {
+        }
+        case 'FETCH_LINK_IMAGE': {
+          // Server nhờ đọc og:image của link facebook share trong Chrome đã
+          // đăng nhập (fetch server-side bị chặn og cho link ảnh). Tab nền
+          // tự đóng sau khi content script gửi CRM_LINK_IMAGE.
+          try {
+            const payload = message.data || {};
+            const hash = String(payload.url_hash || '');
+            const linkUrl = String(payload.url || '');
+            if (!/^[0-9a-f]{40}$/.test(hash) || !/^https?:\/\//i.test(linkUrl)) break;
+            if (linkImageFetchedFor.has(hash)) break;
+            linkImageFetchedFor.add(hash);
+            const sep = linkUrl.includes('?') ? '&' : '?';
+            chrome.tabs.create({ url: linkUrl + sep + 'crm_link_img=' + hash, active: false }, () => { void chrome.runtime.lastError; });
+          } catch (_) {}
+          break;
+        }
+        case 'FETCH_PAGE_PROFILES': {
+          // Server giao viec lay profile (ten + avatar) cho cac Page con ten
+          // generic / chua co avatar. Mo tab profile cho tung Page; content
+          // script doc xong se gui CRM_PAGE_PROFILE ve (queue + flush).
+          try {
+            const ids = (message.data && message.data.page_ids) || [];
+            for (const pid of ids) {
+              const idStr = String(pid);
+              if (/^\d+$/.test(idStr) && !pageProfileFetchedFor.has(idStr)) {
+                pageProfileFetchedFor.add(idStr);
+                fetchPageProfileViaTab(idStr);
+              }
+            }
+          } catch (_) {}
+          break;
+        }
+        case 'REGISTER_ACCOUNT_ACK': {
           const ackAccountId = String(message.data?.account_id || '');
           if (user_id && ackAccountId && ackAccountId !== String(user_id)) {
             console.warn('[FB Engine] Ignore stale REGISTER_ACCOUNT_ACK:', ackAccountId, 'expected:', user_id);
@@ -1579,6 +1768,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         page_id: String(msgData.page_id),
         page_name: String(msgData.page_name)
       });
+      // Lay ten + avatar that cua Page (thay vi "Page <id>"): mo tab profile
+      // Page (marker crm_page_profile=<id>), content script doc DOM roi gui
+      // CRM_PAGE_PROFILE ve. Moi Page mot lan moi phien SW.
+      const pid = String(msgData.page_id);
+      if (/^\d+$/.test(pid) && !pageProfileFetchedFor.has(pid)) {
+        pageProfileFetchedFor.add(pid);
+        fetchPageProfileViaTab(pid);
+      }
     }
   }
 
@@ -3693,12 +3890,15 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
       () => getBusinessSuiteTab(page_id),
       async () => {
         const created = await new Promise(resolve => {
-          // Open Page Business Suite in a separate Chrome window. The extension
-          // keeps the Page tab registered by page_id, while personal Messenger
-          // remains in its own window/flow.
-          chrome.tabs.create({ url: targetUrl, active: false }, (createdTab) => {
-            if (createdTab?.id) chrome.tabs.update(createdTab.id, { pinned: true }).catch(() => {});
-            resolve(createdTab);
+          // Business Suite sống TRONG CÙNG cửa sổ với Messenger cá nhân
+          // (yêu cầu 2026-09-18: bỏ chế độ 2 cửa sổ Chrome riêng cho Page).
+          // Ghim vào window chứa tab Messenger của tài khoản để tab không
+          // bao giờ rơi vào một cửa sổ thứ hai.
+          chrome.tabs.query({ url: ['*://www.facebook.com/messages/*', '*://web.facebook.com/messages/*'] }, (msgTabs) => {
+            const personalWindowId = msgTabs && msgTabs.length ? msgTabs[0].windowId : undefined;
+            chrome.tabs.create({ url: targetUrl, active: false, pinned: true, windowId: personalWindowId }, (createdTab) => {
+              resolve(createdTab);
+            });
           });
         });
         if (created?.id) {
@@ -4235,12 +4435,25 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
   // The normal Inbox tick stays lightweight. A separate lightweight mode
   // visits both Requests buttons without waiting for the periodic full crawl.
   const requestsTab = isRealtimeInboxScan ? null : await ensureRoleMessengerTab(account_id, 'requests');
-  if (requestsTab?.id) {
+  let liveRequestsTab = requestsTab;
+  if (liveRequestsTab?.id) {
+    // Tab 'requests' co the da chet tu phien truoc (id khon con ton tai).
+    // Neu khong kiem tra, chrome.tabs.update tren tab chet nem loi ra ngoai
+    // toan bo scan va mat luon phan spam/tin nhan cho (reproduced 2026-09-18:
+    // "No tab with id" giets scan, spam khong bao gio duoc scrape).
+    const alive = await chrome.tabs.get(liveRequestsTab.id).then(() => true).catch(() => false);
+    if (!alive) {
+      await unregisterTab(FbCrmMessengerTabRoles.roleKey(account_id, 'requests')).catch(() => {});
+      liveRequestsTab = await ensureRoleMessengerTab(account_id, 'requests').catch(() => null);
+    }
+  }
+  if (liveRequestsTab?.id) {
+    const requestsTab = liveRequestsTab;
     const requestsUrl = 'https://www.facebook.com/messages/requests?crm_tab_role=requests';
     const spamRequestsUrl = 'https://www.facebook.com/messages/requests/spam?crm_tab_role=requests';
     if (!/\/messages\/requests(?:\/|$|\?)/i.test(String(requestsTab.url || ''))) {
-      const load = waitForTabComplete(requestsTab.id, 15000);
-      await chrome.tabs.update(requestsTab.id, { url: requestsUrl });
+      const load = waitForTabComplete(requestsTab.id, 15000).catch(() => null);
+      await chrome.tabs.update(requestsTab.id, { url: requestsUrl }).catch(() => {});
       await Promise.race([load, delay(6000)]);
       await delay(1400);
     }
@@ -5787,7 +6000,8 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     : page_id
       ? await getBusinessSuiteTab(page_id)
       : await ensureRoleMessengerTab(targetAcc, 'history');
-  if (!tab && page_id) {
+
+  if (!tab && page_id) {
     const pageTargetUrl = thread_url || `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(page_id)}&mailbox_id=${encodeURIComponent(page_id)}&selected_item_id=${encodeURIComponent(navigationThreadId)}&thread_type=FB_MESSAGE`;
     tab = await new Promise((resolve) => {
       chrome.tabs.create({ url: pageTargetUrl, active: false }, (createdTab) => {
@@ -7279,7 +7493,7 @@ async function handleBulkHistorySync({ account_id, job_id, threads = [] } = {}) 
             // Every chunk above has already been sent to the server/DB. Continue
             // only while the round budget, rather than the top of history, ended it.
             if (syncResult.checkpoint?.stop_reason !== 'max_rounds_hit') break;
-            await delay(250);
+            await delay(120);
           }
           completed += 1;
           sendToBackend('BULK_HISTORY_SYNC_PROGRESS', {

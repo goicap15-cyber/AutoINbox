@@ -942,201 +942,6 @@
       });
     }
 
-        let combined = [];
-        for (const row of nestedRows) {
-          combined = combined.concat(parseMessagesFromDOMNode(row, isRealtime));
-        }
-        return combined;
-      }
-    }
-    const messageRow = directRowMatch || node;
-    let rowEmojiContent = extractBubbleEmoji(messageRow);
-
-    // â€”â€” STALE DOM GUARD (Self-Tagging Marker) â€”â€”
-    if (messageRow && messageRow.dataset) {
-      const currentUrlThreadId = extractThreadIdFromUrl();
-      const existingThreadId = messageRow.dataset.crmThreadId;
-      if (existingThreadId && currentUrlThreadId && existingThreadId !== currentUrlThreadId) {
-        return []; // BÃ¡Â»Â  qua vÃƒÂ¬ Ã„â€˜ÃƒÂ¢y lÃƒÂ  DOM cÃ¡Â»Â§a thread cÃ…Â©!
-      }
-      if (currentUrlThreadId) {
-        messageRow.dataset.crmThreadId = currentUrlThreadId;
-      }
-    }
-
-    // â€”â€” Media detection (ảnh gửi/nhận trên Messenger cáº¥ nhân) â€”â€”
-    // Live DOM inspection (2026-08-13, real sent-photo message) found the
-    // photo <img>'s alt is always the fixed UI action label "Mở ảnh" ("Open
-    // photo") - not empty, and not a description. An avatar/read-receipt
-    // <img> next to a bubble always carries the contact's real name instead
-    // (e.g. alt="Thu Oanh Nguyen" or "Thu Oanh Nguyen Ã„â€˜ÃƒÂ£ xem lÃƒÂºc..."), so
-    // matching on this fixed label (rather than "alt is empty", which does
-    // NOT hold here) reliably tells a sent/received photo apart from an
-    // avatar without ever matching a real name. The <img> src for a
-    // just-sent photo is often an inline `data:image/...;base64,...`
-    // thumbnail rather than a real fbcdn/scontent URL - only forward src as
-    // media_url when it's a real CDN link (an unusable, multi-KB data: URI
-    // has no value to the backend, which never uses this value for
-    // confirmation matching - only media_type - and would just waste a
-    // failed download attempt in MediaDownloader).
-    //
-    // Checked BEFORE the aria-label-based hasMessageLabel gate below and
-    // used to bypass it entirely when a photo is found: live testing showed
-    // an image-only row's accessibility label (the "Tin nhắn do ... gửi
-    // lúc" helper text) is not always present yet at the exact moment
-    // MutationObserver's callback fires - React appears to hydrate it a
-    // beat after inserting the <img> itself - so gating on that label made
-    // every real-time photo detection silently miss (return []) while the
-    // *separate*, later-arriving caption-only row (which has its own label
-    // already attached) went through fine. The <img alt="Mở ảnh"> itself is
-    // static markup set at creation time, not hydrated later, so it doesn't
-    // have this race and is sufficient proof on its own that this is a real
-    // message row, not composer/avatar/unrelated UI.
-    const OPEN_PHOTO_ALT_PATTERN = /^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i;
-    const OPEN_VIDEO_LABEL_PATTERN = /(?:ph\u00e1t|m\u1edf|xem|play|open|watch)?\s*video/i;
-    let isPhotoMessage = false;
-    let isVideoMessage = false;
-    let mediaUrl = null;
-    const rowImgs = messageRow.querySelectorAll?.('img[src]') || [];
-    for (const img of rowImgs) {
-      if (img.closest(COMPOSER_EXCLUDE)) continue;
-      const src = img.getAttribute('src') || '';
-      const alt = (img.getAttribute('alt') || '').trim();
-      if (src && OPEN_PHOTO_ALT_PATTERN.test(alt)) {
-        isPhotoMessage = true;
-        mediaUrl = /^https?:\/\/.*(?:fbcdn\.net|scontent)/i.test(src) ? src : null;
-        break;
-      }
-    }
-
-    // Some Messenger builds omit the Open-photo alt text while the image is
-    // hydrating. A large visible image inside one message row is still media;
-    // avatars, receipts and emoji stay below this size threshold.
-    if (!isPhotoMessage) {
-      const largeImage = Array.from(rowImgs).find((img) => {
-        if (img.closest(COMPOSER_EXCLUDE)) return false;
-        const rect = img.getBoundingClientRect?.();
-        const width = Number(rect?.width || img.naturalWidth || 0);
-        const height = Number(rect?.height || img.naturalHeight || 0);
-        return width >= 96 && height >= 96;
-      });
-      if (largeImage) {
-        const source = largeImage.currentSrc || largeImage.getAttribute('src') || '';
-        isPhotoMessage = true;
-        mediaUrl = /^(?:https?:\/\/|data:image\/)/i.test(source) ? source : null;
-      }
-    }
-
-    const rowVideos = messageRow.querySelectorAll?.('video') || [];
-    for (const video of rowVideos) {
-      if (video.closest(COMPOSER_EXCLUDE)) continue;
-      const label = (video.getAttribute('aria-label') || video.getAttribute('title') || '').trim();
-      const sourceCandidates = [
-        video.currentSrc,
-        video.getAttribute('src'),
-        ...Array.from(video.querySelectorAll('source[src]')).map((source) => source.getAttribute('src'))
-      ].filter(Boolean);
-      const source = sourceCandidates.find((candidate) => /^https?:\/\//i.test(candidate)) || sourceCandidates[0] || '';
-      if (source || OPEN_VIDEO_LABEL_PATTERN.test(label) || video.closest('[aria-label*="video" i]')) {
-        isVideoMessage = true;
-        // A blob URL only works inside Facebook, and poster is not a playable
-        // video. Wait for a durable CDN URL instead of poisoning the CRM row.
-        const poster = video.poster || video.getAttribute('poster') || '';
-        // A performance entry belongs to the page, not to this message row.
-        // Reusing the newest entry assigned one customer's video to several
-        // different rows. Only row-scoped sources/posters are safe here.
-        mediaUrl = /^https?:\/\//i.test(source)
-          ? source
-          : (/^(?:https?:\/\/|data:image\/)/i.test(poster) ? poster : null);
-        break;
-      }
-    }
-    if (!isVideoMessage) {
-      const videoControl = Array.from(messageRow.querySelectorAll?.('[aria-label], a[href]') || []).find((element) => {
-        const label = (element.getAttribute('aria-label') || '').trim();
-        const href = element.getAttribute('href') || '';
-        return OPEN_VIDEO_LABEL_PATTERN.test(label) || /\/(?:watch|videos|reel)\//i.test(href) || /\.mp4(?:\?|$)/i.test(href);
-      });
-      if (videoControl) {
-        isVideoMessage = true;
-        const href = videoControl.href || videoControl.getAttribute('href') || '';
-        mediaUrl = /^https?:\/\/.*\.mp4(?:\?|$)/i.test(href) ? href : null;
-      }
-    }
-    if (!isVideoMessage) {
-      const semanticVideo = Array.from(messageRow.querySelectorAll?.('[role="img"]') || []).find((element) => {
-        if (element.closest(COMPOSER_EXCLUDE)) return false;
-        const label = String(element.getAttribute('aria-label') || element.getAttribute('title') || '').trim();
-        return OPEN_VIDEO_LABEL_PATTERN.test(label) && !/(?:cu\u1ed9c g\u1ecdi|video call|call video)/i.test(label);
-      });
-      if (semanticVideo) isVideoMessage = true;
-    }
-
-    const rowAriaLabel = messageRow.getAttribute?.('aria-label') || '';
-    const childMsgEl = !rowAriaLabel ? messageRow.querySelector?.('[aria-label*="Tin nhắn do"], [aria-label*="Message sent"]') : null;
-    const effectiveLabel = rowAriaLabel || (childMsgEl?.getAttribute?.('aria-label') || '');
-
-    const hasMessageLabel = /Tin nhắn do .+ gửi lúc|Message sent by/i.test(effectiveLabel);
-    // [data-message-id] checked first: live DOM inspection (spec 043) found it's
-    // the reliable current-structure marker, set on the row at insertion time -
-    // unlike the aria-label above, which React hydrates a beat later. Checking
-    // it first means a message row already has a STABLE native_id on the very
-    // first (label-not-yet-hydrated) MutationObserver pass, not just the second.
-    const nativeIdEl = messageRow.querySelector?.('[data-message-id], [data-id], [id^="mid."]');
-    // Facebook commonly puts the native id on messageRow itself during the
-    // first render. querySelector() above only searches descendants; include
-    // the row so the first incoming message is captured immediately instead
-    // of waiting for a second message to trigger a React re-render.
-    const hasNativeId = !!nativeIdEl || messageRow.hasAttribute?.('data-message-id') ||
-      messageRow.hasAttribute?.('data-id') || String(messageRow.id || '').startsWith('mid.');
-
-    if (!hasMessageLabel && !hasNativeId && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return []; // Không phải message row
-
-    const rawText = (node.textContent || '').trim();
-    if (!isPhotoMessage && !isVideoMessage) {
-      if (!rawText && !rowEmojiContent) return [];
-
-      for (const pat of EXCLUDED_PATTERNS) {
-        if (pat.test(rawText)) return [];
-      }
-    }
-
-    // â€”â€” TÃƒÂ¬m tÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ leaf bubbles â€”â€”
-    const searchRoot = isRealtime ? node : messageRow;
-    const allBubbles = searchRoot.querySelectorAll?.('div[dir="auto"], span[dir="auto"]');
-    const leafBubbles = [];
-    if (allBubbles && allBubbles.length > 0) {
-      for (const b of allBubbles) {
-        if (b.closest(COMPOSER_EXCLUDE)) continue;
-        if (!b.querySelector('div[dir="auto"], span[dir="auto"]')) {
-          leafBubbles.push(b);
-        }
-      }
-    }
-
-    if (leafBubbles.length === 0) {
-      if (searchRoot.matches?.('div[dir="auto"], span[dir="auto"]') && !searchRoot.querySelector('div[dir="auto"], span[dir="auto"]')) {
-        if (!searchRoot.closest(COMPOSER_EXCLUDE)) {
-          leafBubbles.push(searchRoot);
-        }
-      }
-    }
-
-    let finalBubbles = leafBubbles;
-    if (isRealtime) {
-      // Filter visual bubbles to avoid clones, hidden texts, or accessibility wrappers
-      finalBubbles = leafBubbles.filter(b => {
-        const rects = b.getClientRects();
-        if (!rects || rects.length === 0) return false;
-        const rect = b.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return false;
-        // KiÃ¡Â»Æ’m tra xem cÃƒÂ³ bÃ¡Â»â€¹ Ã¡ÂºÂ©n qua CSS khÃƒÂ´ng
-        const style = window.getComputedStyle(b);
-        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-        return true;
-      });
-    }
-
     if (finalBubbles.length === 0 && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return [];
 
     let sender_name = '';
@@ -1542,8 +1347,25 @@
     }
   }
 
+  // Debounce: trang Messenger phát hàng trăm mutation/giây; xử lý mỗi batch
+  // ngay lập tức làm 2 renderer Chrome chạy ~100% CPU (reproduced 2026-09-18).
+  // Gom mutation lại, xử lý tối đa mỗi 250ms — độ trễ không đáng kể với sync.
+  let crmChatObserverBatch = null;
   const chatObserver = new MutationObserver((mutations) => {
     if (isDedicatedBackgroundTab) return;
+    if (crmChatObserverBatch) {
+      for (const m of mutations) crmChatObserverBatch.push(m);
+      return;
+    }
+    crmChatObserverBatch = Array.from(mutations);
+    setTimeout(() => {
+      const batch = crmChatObserverBatch;
+      crmChatObserverBatch = null;
+      try { processChatMutations(batch); } catch (_) {}
+    }, 250);
+  });
+
+  const processChatMutations = (mutations) => {
     const thread_id = extractThreadIdFromUrl();
     if (!thread_id || !/^\d+$/.test(thread_id)) return;
 
@@ -1684,7 +1506,7 @@
       });
     });
     });
-  });
+  };
 
   // React sometimes hydrates an already-mounted Messenger article by changing
   // text/attributes instead of adding a new element. Reconcile only the tail
@@ -1782,7 +1604,9 @@
     attributeFilter: ['src', 'poster', 'aria-label', 'data-message-id', 'data-id']
   });
   observerPaused = false;
-  setInterval(reconcileLatestIncomingMessages, 250);
+  // 250ms đốt CPU liên tục trên trang đông mutation (reproduced 2026-09-18:
+// 2 renderer Chrome ~100%/lõi). 1500ms vẫn đủ nhanh cho việc đối chiếu.
+setInterval(reconcileLatestIncomingMessages, 1500);
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Call Log Scanner Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€€
   // Quét span[dir="auto"] chÃ¡Â»Â©a text cuÃ¡Â»â„¢c gÃ¡Â»Âi mÃ¡Â»â€”i 2 giÃƒÂ¢y.
@@ -2388,6 +2212,51 @@
     }, 50);
   });
   incomingCallObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'aria-modal', 'role'] });
-  setInterval(scanIncomingCallDialog, 300);
+  setInterval(scanIncomingCallDialog, 1500);
   // Ã¢â€â‚¬Ã¢â€â‚¬ End Call Log Scanner Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€€
+
+// ─── CRM operator profile capture (2026-09-18) ───────────────────────────
+// Chỉ hoạt động trên tab profile do background mở với marker
+// crm_own_profile=1 (trang profile của chính operator). Đọc tên + avatar sau
+// khi Facebook hydrate xong rồi gửi về background qua runtime message. Tab
+// nền bị Facebook chặn hydration nên background mở tab ở chế độ active.
+try {
+  const crmLinkImageMatch = location.search.match(/[?&]crm_link_img=([0-9a-f]{40})/);
+  const crmPageProfileMatch = location.search.match(/[?&]crm_page_profile=(\d+)/);
+  if (/crm_own_profile=1/.test(location.search) || crmPageProfileMatch || crmLinkImageMatch) {
+    const crmTargetPageId = crmPageProfileMatch ? crmPageProfileMatch[1] : null;
+    const crmLinkHash = crmLinkImageMatch ? crmLinkImageMatch[1] : null;
+    let crmProfileTries = 0;
+    const crmPickOperatorProfile = () => {
+      const imgEl = document.querySelector('image') || document.querySelector('img[src*="scontent"]');
+      const avatarHref = imgEl ? (imgEl.getAttribute('xlink:href') || imgEl.getAttribute('href') || imgEl.src || '') : '';
+      const ogEl = document.querySelector('meta[property="og:title"]');
+      let raw = ((ogEl && ogEl.content) || '').trim()
+        || ((document.querySelector('h1') || {}).textContent || '').trim()
+        || (document.title || '').replace(/\s*[|\-–]\s*Facebook\s*$/i, '').trim();
+      let name = raw && !/^(?:facebook|log in|đăng nhập)/i.test(raw) ? raw : '';
+      if (!name) {
+        const descEl = document.querySelector('meta[name="description"]') || document.querySelector('meta[property="og:description"]');
+        const desc = ((descEl && descEl.content) || '').trim();
+        const mDesc = desc.match(/^([^.,!?]{2,80}?)\s+(?:is on Facebook|đang ở trên Facebook|đang trên Facebook)/i);
+        if (mDesc) name = mDesc[1].trim();
+      }
+      return { name: name || null, avatar: /^https?:\/\//.test(avatarHref) ? avatarHref : null };
+    };
+    const crmProfileTimer = setInterval(() => {
+      crmProfileTries += 1;
+      const profile = crmPickOperatorProfile();
+      const crmGotEnough = crmLinkHash ? Boolean(profile.avatar) : Boolean(profile.name || profile.avatar);
+      if (crmGotEnough || crmProfileTries >= 15) {
+        clearInterval(crmProfileTimer);
+        try {
+          if (crmTargetPageId) chrome.runtime.sendMessage({ type: 'CRM_PAGE_PROFILE', pageId: crmTargetPageId, data: profile });
+          else if (crmLinkHash) chrome.runtime.sendMessage({ type: 'CRM_LINK_IMAGE', hash: crmLinkHash, image: profile.avatar });
+          else chrome.runtime.sendMessage({ type: 'CRM_OPERATOR_PROFILE', data: profile });
+        } catch (_) {}
+      }
+    }, 2000);
+  }
+} catch (_) {}
+
 })();

@@ -353,6 +353,10 @@ export default function App() {
   const [activeModal, setActiveModal] = useState(null);
   const [richCapabilities, setRichCapabilities] = useState(null);
   const [bulkHistoryProgress, setBulkHistoryProgress] = useState(null);
+  // Bộ lọc chi tiết ngày: dateFilter='YYYY-MM-DD', dateFilterIds = tập thread id
+  // có tin nhắn trong ngày đó (từ /api/threads/active-on - nguồn messages).
+  const [dateFilter, setDateFilter] = useState('');
+  const [dateFilterIds, setDateFilterIds] = useState(null);
   const [accountSyncing, setAccountSyncing] = useState(null);
   const [historySyncingThreadId, setHistorySyncingThreadId] = useState(null);
   const historySyncTimeoutRef = useRef(null);
@@ -1738,6 +1742,7 @@ export default function App() {
   } : null;
   const activeContact = activeThreadId && selectedThread ? {
     thread_id: String(activeThreadId),
+    source_type: selectedThread.source_type || 'personal_messenger',
     name: selectedThread.contact_name || selectedThread.name || 'Khách hàng',
     nickname: selectedThread.nickname || null,
     avatar_url: selectedThread.avatar_url,
@@ -1773,6 +1778,27 @@ export default function App() {
       call_request_id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`
     });
   }, [activeThreadId, selectedThread, socket, isConnected]);
+
+  // Lấy danh sách hội thoại có tin nhắn trong ngày đang lọc
+  useEffect(() => {
+    if (!dateFilter || !socket || !isConnected) { setDateFilterIds(null); return; }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch('/api/threads/active-on?date=' + encodeURIComponent(dateFilter));
+        const data = await res.json();
+        if (!cancelled && data?.success) setDateFilterIds(new Set((data.thread_ids || []).map(String)));
+      } catch (_) {}
+    };
+    load();
+    const timer = setInterval(load, 15000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [dateFilter, socket, isConnected, accounts]);
+
+  const handleDateFilterChange = useCallback((value) => {
+    setDateFilter(value || '');
+    setDateFilterIds(null);
+  }, []);
 
   const handleBulkHistorySync = useCallback(() => {
     if (!socket || !isConnected || bulkHistoryProgress?.status === 'running') return;
@@ -1821,6 +1847,9 @@ export default function App() {
 
       {/* Column 2: Conversation List */}
       <ConversationSidebar
+        dateFilter={dateFilter}
+        dateFilterIds={dateFilterIds}
+        onDateFilterChange={handleDateFilterChange}
         threads={threads} activeThreadId={activeThreadId}
         onSelectThread={(threadId) => {
           const clickedThread = threads.find((thread) => String(thread.id) === String(threadId));
@@ -1872,6 +1901,7 @@ export default function App() {
               // request locked and the next clicked user cannot mirror scroll.
               key={String(activeThreadId)}
               messages={activeMessages}
+              jumpToDate={dateFilter || null}
               activeThread={selectedThread}
               // Keep automatic first-open sync as the primary path, and expose
               // the existing manual retry control when Facebook confirms an

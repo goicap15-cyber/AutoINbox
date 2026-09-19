@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
+  Copy,
   Phone,
   Mail,
   Download,
@@ -130,6 +131,7 @@ function ExportFooter({ onExportLeads }) {
 
 export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportLeads, onCloseDrawer, leadStatuses = [], onCreateLeadStatus, onDeleteLeadStatus, onSetReminder, onCompleteReminder, onCancelReminder, onArchiveThread }) {
   const [activeTab, setActiveTab] = useState('INFO');
+  const [profileCopied, setProfileCopied] = useState(false);
   const [nickname, setNickname] = useState('');
   const [phone, setPhone] = useState('');
   const [acceptingPhoneCandidateId, setAcceptingPhoneCandidateId] = useState(null);
@@ -683,6 +685,30 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
           <MessageCircle size={12} strokeWidth={1.8} className="text-[var(--color-accent)]" />
           Facebook Messenger
         </div>
+        {(() => {
+          const segments = String(contactInfo?.thread_id || '').split(':').filter(Boolean);
+          const fbId = segments.length ? segments[segments.length - 1] : '';
+          const isPage = contactInfo?.source_type === 'page_messenger';
+          const profileUrl = !isPage && /^\d+$/.test(fbId) ? 'https://www.facebook.com/profile.php?id=' + fbId : null;
+          if (!profileUrl) return null;
+          return (
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(profileUrl);
+                  setProfileCopied(true);
+                  setTimeout(() => setProfileCopied(false), 1800);
+                } catch (_) {}
+              }}
+              className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-[var(--color-accent-subtle)] text-[var(--color-accent)] hover:opacity-80 transition-opacity border border-[var(--color-accent)]/30"
+              title={profileUrl}
+            >
+              {profileCopied ? <Check size={12} strokeWidth={2} /> : <Copy size={12} strokeWidth={1.75} />}
+              {profileCopied ? 'Đã copy link profile!' : 'Copy link profile Facebook'}
+            </button>
+          );
+        })()}
       </div>
 
       {/* Quick actions */}

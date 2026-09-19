@@ -40,6 +40,53 @@ function IncomingAvatar({ url, initial, color, threadId }) {
   );
 }
 
+// Biến URL trong nội dung tin nhắn thành liên kết bấm được (mở bằng trình
+// duyệt hệ thống qua setWindowOpenHandler của Electron). Yêu cầu 2026-09-18:
+// khách/operator gửi link facebook.com/share/v/... chỉ hiện chữ, không bấm được.
+const CRM_URL_RE = /((?:https?:\/\/|www\.)[^\s<>"']+)/gi;
+function renderRichContent(text) {
+  const str = String(text || '');
+  const parts = [];
+  let last = 0;
+  let key = 0;
+  let match;
+  CRM_URL_RE.lastIndex = 0;
+  while ((match = CRM_URL_RE.exec(str)) !== null) {
+    let raw = match[0];
+    // Tách dấu câu cuối (dấu chấm/dấu ngoặc sau link không thuộc link)
+    const trail = raw.match(/[.,;:!?)\]]+$/);
+    const trailing = trail ? trail[0] : '';
+    if (trailing) raw = raw.slice(0, raw.length - trailing.length);
+    if (match.index > last) parts.push(str.slice(last, match.index));
+    const href = /^https?:\/\//i.test(raw) ? raw : 'https://' + raw;
+    // URL dai rat de bubble bi xuong dong lung tung (nhin tach roia). Hien thi
+    // rut gon o giua (gio…cuoi) - link that van nguyen ven khi bam.
+    const display = raw.length > 52
+      ? raw.slice(0, 34).replace(/^https?:\/\//i, '') + '…' + raw.slice(-14)
+      : raw;
+    parts.push(
+      <a
+        key={`lnk-${key++}`}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={href}
+        onClick={(event) => {
+          event.preventDefault();
+          try { window.open(href, '_blank'); } catch (_) {}
+        }}
+        className="inline underline underline-offset-2 font-medium hover:opacity-80 cursor-pointer"
+      >
+        {display}
+      </a>
+    );
+    if (trailing) parts.push(trailing);
+    last = match.index + match[0].length;
+  }
+  if (last < str.length) parts.push(str.slice(last));
+  return parts;
+}
+
 export default function MessageBubble({ msg, activeThread, onRetry }) {
   const [isTimePinned, setIsTimePinned] = useState(false);
   const isPendingDirection = msg.direction_status === 'pending';
@@ -156,8 +203,43 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
                 </div>
               ) : (
                 <>
+                  {msg.link_preview && !hasMedia && (
+                    <a
+                      href={msg.link_preview.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        try { window.open(msg.link_preview.url, "_blank"); } catch (_) {}
+                      }}
+                      className="block mt-2 mb-1 rounded-xl overflow-hidden border border-black/10 bg-black/5 dark:bg-white/5 hover:opacity-90 transition-opacity cursor-pointer"
+                    >
+                      {msg.link_preview.image_url && (
+                        <img
+                          src={msg.link_preview.image_url}
+                          alt=""
+                          className="w-full max-h-56 object-cover"
+                          onError={(ev) => { ev.currentTarget.style.display = "none"; }}
+                        />
+                      )}
+                      <div className="px-2.5 py-1.5">
+                        {(() => {
+                          // Link share ẢNH (/share/p/): Messenger hiển thị chú
+                          // thích "Tên đã thêm một ảnh mới." - tái tạo đúng định
+                          // dạng đó từ og:title (tên người đăng).
+                          const isPhotoShare = /facebook\.com\/share\/p\//i.test(msg.link_preview.url || '');
+                          let cardTitle = msg.link_preview.title || '';
+                          if (isPhotoShare && cardTitle && !/\bảnh\b/i.test(cardTitle)) {
+                            cardTitle = cardTitle + ' đã thêm một ảnh mới.';
+                          }
+                          return cardTitle ? <div className="text-[11px] font-semibold leading-snug line-clamp-2">{cardTitle}</div> : null;
+                        })()}
+                        {msg.link_preview.site_name && <div className="text-[10px] opacity-60 truncate mt-0.5">{msg.link_preview.site_name}</div>}
+                      </div>
+                    </a>
+                  )}
                   <MediaViewer mediaType={mediaType} mediaUrl={mediaUrl} localMediaPath={msg.local_media_path} />
-                  {visibleContent && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words select-text ${hasMedia ? 'mt-1.5' : ''}`}>{visibleContent}</p>}
+                  {visibleContent && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words select-text ${hasMedia ? 'mt-1.5' : ''}`}>{renderRichContent(visibleContent)}</p>}
                 </>
               )}
             </>
