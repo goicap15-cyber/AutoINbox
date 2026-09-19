@@ -99,7 +99,40 @@ class AssignmentManager {
     // last_activity contains both ISO strings and SQLite CURRENT_TIMESTAMP.
     // julianday normalizes both instead of comparing their string shapes.
     query += ' ORDER BY julianday(t.last_activity) DESC, t.id DESC';
-    return this.db.prepare(query).all(...params);
+    const rows = this.db.prepare(query).all(...params);
+
+    // Preview kiểu Messenger: khi last_message là placeholder (sidebar sync
+    // không bóc được preview trong DOM mới), lấy nội dung tin mới nhất trong
+    // DB làm preview thay vì hiện "Chưa có tin nhắn".
+    const isPlaceholderPreview = (v) => {
+      const s = String(v || '').trim();
+      return !s || s === 'Chưa có tin nhắn';
+    };
+    const needPreview = rows.filter((r) => isPlaceholderPreview(r.last_message));
+    if (needPreview.length) {
+      const ids = needPreview.map((r) => String(r.id));
+      const slots = ids.map(() => '?').join(',');
+      const latest = this.db.prepare(`
+        SELECT thread_id, content, media_type FROM messages
+        WHERE thread_id IN (${slots})
+        ORDER BY COALESCE(timestamp_ms, 0) DESC, id DESC
+      `).all(...ids);
+      const latestByThread = new Map();
+      for (const m of latest) {
+        if (!latestByThread.has(m.thread_id)) latestByThread.set(m.thread_id, m);
+      }
+      for (const row of needPreview) {
+        const m = latestByThread.get(String(row.id));
+        if (!m) continue;
+        if (m.media_type && m.media_type !== 'text') {
+          const label = { image: 'Ảnh', video: 'Video', voice: 'Voice', file: 'File', call: 'Cuộc gọi' }[m.media_type] || m.media_type;
+          row.last_message = `[${label}]`;
+        } else if (m.content) {
+          row.last_message = m.content;
+        }
+      }
+    }
+    return rows;
   }
 }
 

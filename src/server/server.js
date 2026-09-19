@@ -512,11 +512,21 @@ function dispatchPageSidebarSync(accountId, reason = 'manual') {
   const accountKey = String(accountId || '');
   if (!accountKey) return 0;
   let dispatched = 0;
+  const isDeep = reason === 'manual' || reason === 'manual_crm_request' || reason === 'manual_sync_window' || reason === 'initial_deep';
   for (const source of activePageSourcesForAccount(accountKey)) {
     const pageId = String(source.page_id);
     const pageWs = pageExtensionConnections.get(pageConnectionKey(accountKey, pageId));
     if (pageWs?.readyState === WebSocket.OPEN) {
-      pageWs.send(JSON.stringify({ type: 'SYNC_PAGE_SIDEBAR', data: { account_id: accountKey, page_id: pageId, reason } }));
+      pageWs.send(JSON.stringify({
+        type: 'SYNC_PAGE_SIDEBAR',
+        data: {
+          account_id: accountKey,
+          page_id: pageId,
+          reason,
+          deep: isDeep,
+          max_rounds: isDeep ? 35 : 1
+        }
+      }));
       dispatched += 1;
     }
     // NOTE: Removed auto-spawn startPageProcess here. When pageWs is not
@@ -837,6 +847,10 @@ const inboundMediaHydration = new InboundMediaHydrationService({
 });
 
 const resolvedPageVideos = new Map();
+
+// Thống kê batch Page: log định kỳ để theo dõi tỉ lệ duplicate/rejected
+// (batch trùng lặp hàng loạt là dấu hiệu state machine phía extension giật).
+const pageBatchStats = { total: 0, committed: 0, duplicate: 0, stale_generation: 0, rejected: 0, other: 0 };
 
 function sendRichMessageError(res, error) {
   const status = Number(error?.httpStatus) || 400;
@@ -1395,6 +1409,9 @@ wss.on('connection', (ws, req) => {
           // InboxSyncScheduler.registerAccount() already starts the lightweight
           // background inbox loop. Do not dispatch a second full SYNC_THREADS
           // crawl here: it competes with realtime receive and manual sends.
+          if (process.env.FB_CRM_DISABLE_INITIAL_SWEEP !== '1') {
+            setTimeout(() => InitialMessageSweepService.start(account_id), 1500);
+          }
           break;
         }
 
@@ -1716,7 +1733,7 @@ wss.on('connection', (ws, req) => {
             break;
           }
           const targetAccountId = m.account_id || ws.accountId || null;
-          const canonicalThreadId = resolveInternalThreadId(db, targetAccountId, threadId);
+          const canonicalThreadId = resolveInternalThreadId(db, targetAccountId, threadId, m.page_id || null);
           if (!canonicalThreadId) {
             console.warn(`[WS] Bỏ qua tin nhắn chưa ánh xạ được thread: raw=${threadId} account=${targetAccountId || 'unknown'}`);
           }
@@ -2762,10 +2779,8 @@ wss.on('connection', (ws, req) => {
                 const threadId = t.thread_id || t.id;
                 const { isBlacklistedThreadId } = require('./utils/threadGuard');
                 if (!threadId || isBlacklistedThreadId(threadId)) continue;
-                // The repository may namespace a Facebook thread id when the
-                // same participant exists under another connected account.
-                // Resolve that durable CRM id before reading previews/messages.
-                const existingInternalThreadId = resolveInternalThreadId(db, account_id, threadId) || threadId;
+                const threadPageId = t.page_id || msg.data?.page_id || null;
+                const existingInternalThreadId = resolveInternalThreadId(db, account_id, threadId, threadPageId) || threadId;
                 const previousThread = db.prepare(`
                   SELECT last_message, is_unread, thread_url, contact_name
                   FROM threads WHERE id = ?
@@ -2837,7 +2852,6 @@ wss.on('connection', (ws, req) => {
                   isActivitySummary,
                   hasRecentMatchingOutbound
                 });
-                const threadPageId = t.page_id || msg.data?.page_id || null;
                 const pageSourceId = (threadPageId || t.source_type === 'page_messenger') ? ('src_page_' + (threadPageId || '')) : null;
                 const storedThread = ConversationRepository.upsertThread({
                   id: threadId,
@@ -2846,7 +2860,8 @@ wss.on('connection', (ws, req) => {
                   source_id: pageSourceId,
                   thread_url: t.thread_url || null,
                   contact_name: name,
-                  last_message: cleanLastMsg,
+                  // Placeholder -> null để COALESCE giữ preview thật trong DB.
+                  last_message: (!cleanLastMsg || cleanLastMsg === 'Chưa có tin nhắn') ? null : cleanLastMsg,
                   is_unread: t.is_unread,
                   inbox_folder: t.inbox_folder || null,
                   inbox_folder_verified: t.inbox_folder_verified === true
@@ -2901,7 +2916,7 @@ wss.on('connection', (ws, req) => {
             // Facebook's native id when history sync confirms the same text.
             for (const changed of changedUnreadThreads) {
               const previewContent = cleanMessageText(changed.preview_content);
-              const canonicalThreadId = resolveInternalThreadId(db, changed.account_id, changed.thread_id) || changed.thread_id;
+              const canonicalThreadId = resolveInternalThreadId(db, changed.account_id, changed.thread_id, changed.page_id || null) || changed.thread_id;
               if (previewContent) {
                 const previewTimestamp = Date.now();
                 const previewHash = crypto.createHash('sha1')
@@ -2992,7 +3007,7 @@ wss.on('connection', (ws, req) => {
             for (const t of threads) {
               const threadId = String(t.id || t.thread_id || '');
               if (!threadId) continue;
-              const canonicalThreadId = resolveInternalThreadId(db, account_id, threadId) || threadId;
+              const canonicalThreadId = resolveInternalThreadId(db, account_id, threadId, t.page_id || msg.data?.page_id || null) || threadId;
               const avatarData = t.avatar_base64 || t.avatar_url;
               if (avatarData) {
                 saveAvatarFromBase64OrUrl(avatarData, canonicalThreadId).then(localFilename => {
@@ -3034,18 +3049,17 @@ wss.on('connection', (ws, req) => {
             : allThreads;
           io.emit('THREADS_SYNCED', { account_id, threads: emittedThreads });
           console.log(`[WS] Đã emit THREADS_SYNCED lên frontend: ${allThreads.length} threads`);
-          // Keep the existing full sweep available as an opt-in fallback.
-          // Normal operation synchronizes history only when CRM opens/scrolls a thread.
-          if (process.env.FB_CRM_ENABLE_INITIAL_HISTORY_SWEEP === '1' && partial !== true) {
+          if (process.env.FB_CRM_DISABLE_INITIAL_SWEEP !== '1' && (partial !== true || Boolean(msg.data?.page_id))) {
             InitialMessageSweepService.start(account_id);
           }
           break;
         }
 
         case 'THREAD_MESSAGES_SYNCED': {
-          const { account_id, thread_id, messages, reason, mode, cursor, checkpoint, fetched_count, scroll_delta } = msg.data;
-          console.log(`[WS] THREAD_MESSAGES_SYNCED: thread=${thread_id} mode=${mode||'full'} count=${messages?.length || 0}${reason ? ` reason=${reason}` : ''}`);
-          InboxSyncScheduler.markThreadSyncResult(account_id, thread_id, reason || null);
+          const { account_id, thread_id, messages, reason, mode, cursor, checkpoint, fetched_count, scroll_delta, page_id } = msg.data;
+          const routeDetail = msg.data?.route_detail ? ` | header="${String(msg.data.route_detail).slice(0, 80)}"` : '';
+          console.log(`[WS] THREAD_MESSAGES_SYNCED: thread=${thread_id} mode=${mode||'full'} count=${messages?.length || 0}${reason ? ` reason=${reason}` : ''}${reason === 'thread_route_mismatch' ? routeDetail : ''}`);
+          InboxSyncScheduler.markThreadSyncResult(account_id, thread_id, reason || null, page_id || null);
 
           if (reason) {
             const HistorySyncManager = require('./services/HistorySyncManager');
@@ -3464,6 +3478,8 @@ wss.on('connection', (ws, req) => {
           pageExtensionConnections.set(key, ws);
           ws.pageConnectionKeys = ws.pageConnectionKeys || new Set();
           ws.pageConnectionKeys.add(key);
+          // Mở gate dispatch cho lane Page này (job đang chờ sẽ được đẩy đi).
+          InboxSyncScheduler.markPageReady(pageId, accountId);
           console.log(`[PageSync] Page extension ready account=${accountId} page=${pageId}`);
           if (InboxSyncScheduler.isSyncWindowActive(accountId) && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'SYNC_PAGE_SIDEBAR', data: { account_id: accountId, page_id: pageId, reason: 'page_ready' } }));
@@ -3495,6 +3511,8 @@ wss.on('connection', (ws, req) => {
               if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: ack }));
               break;
             }
+            const canonicalThreadId = resolveInternalThreadId(db, authenticatedAccountId, pageThreadId, pageId);
+
             if (envelope.page_name) {
               const updated = InboxSourceService.updatePageDisplayName({ pageId, pageName: envelope.page_name }, db);
               if (updated) {
@@ -3504,18 +3522,25 @@ wss.on('connection', (ws, req) => {
             }
             let safePageContactName = cleanContactName(envelope.contact_name, null);
             if (isInvalidContactName(safePageContactName)) safePageContactName = null;
-            const existingPageThread = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(pageThreadId);
+            const existingPageThread = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(canonicalThreadId);
             if (existingPageThread?.contact_name && !isInvalidContactName(existingPageThread.contact_name) && existingPageThread.contact_name !== 'Khách hàng') {
               safePageContactName = safePageContactName || existingPageThread.contact_name;
             }
 
+            // Không bao giờ hạ cấp preview: batch rỗng/rác -> truyền null để
+            // upsertThread COALESCE giữ nguyên last_message thật trong DB
+            // (trước đây 'Chưa có tin nhắn' đè lên preview thật mỗi lần sync).
+            const lastIncomingContent = Array.isArray(envelope.messages) && envelope.messages.length
+              ? (cleanMessageText(envelope.messages[envelope.messages.length - 1].content) || null)
+              : null;
+
             ConversationRepository.upsertThread({
-              id: pageThreadId,
+              id: canonicalThreadId,
               external_thread_id: pageThreadId,
               account_id: authenticatedAccountId,
               source_id: source.id,
               contact_name: safePageContactName || 'Khách hàng',
-              last_message: Array.isArray(envelope.messages) && envelope.messages.length ? (envelope.messages[envelope.messages.length - 1].content || 'Chưa có tin nhắn') : 'Chưa có tin nhắn',
+              last_message: lastIncomingContent,
               is_unread: 0,
               inbox_folder: 'INBOX'
             }, db);
@@ -3528,7 +3553,7 @@ wss.on('connection', (ws, req) => {
                 ON CONFLICT(thread_id) DO UPDATE SET
                   name = COALESCE(excluded.name, contacts.name),
                   avatar_url = COALESCE(excluded.avatar_url, contacts.avatar_url)
-              `).run(pageThreadId, safePageContactName, pageAvatar);
+              `).run(canonicalThreadId, safePageContactName, pageAvatar);
             }
 
             // Bổ sung link video đã giải mã từ Web Worker / DOM vào message batch
@@ -3545,15 +3570,32 @@ wss.on('connection', (ws, req) => {
               }
             }
 
-            const ack = ConversationRepository.processPageBatchEnvelope({ ...envelope, account_id: authenticatedAccountId, page_id: pageId }, db);
-            InboxSyncScheduler.markThreadSyncResult(authenticatedAccountId, pageThreadId, ack.status === 'committed' ? null : (ack.reason || 'page_batch_rejected'));
-            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: ack }));
-            const persistedRows = db.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY COALESCE(sequence_order, id) ASC, id ASC').all(pageThreadId);
-            io.emit('THREAD_MESSAGES_UPDATED', { thread_id: pageThreadId, account_id: authenticatedAccountId, messages: prepareMessagesForClient(persistedRows), authoritative: true, sync_status: ack.status === 'committed' || ack.status === 'duplicate' ? 'SYNCED' : 'FAILED', sync_error: ack.reason || null });
+            const ack = ConversationRepository.processPageBatchEnvelope({
+              ...envelope,
+              thread_id: canonicalThreadId,
+              account_id: authenticatedAccountId,
+              page_id: pageId,
+              source_id: source.id
+            }, db);
+            pageBatchStats.total += 1;
+            if (ack.status === 'committed' || ack.status === 'duplicate' || ack.status === 'stale_generation') {
+              pageBatchStats[ack.status] += 1;
+            } else {
+              pageBatchStats.other += 1;
+            }
+            if (pageBatchStats.total % 100 === 0) {
+              console.log(`[PAGE_BATCH_STATS] total=${pageBatchStats.total} committed=${pageBatchStats.committed} duplicate=${pageBatchStats.duplicate} stale=${pageBatchStats.stale_generation} other=${pageBatchStats.other}`);
+            }
+            InboxSyncScheduler.markThreadSyncResult(authenticatedAccountId, canonicalThreadId, ack.status === 'committed' ? null : (ack.reason || 'page_batch_rejected'), pageId);
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: { ...ack, thread_id: pageThreadId } }));
+            }
+            const persistedRows = db.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY COALESCE(sequence_order, id) ASC, id ASC').all(canonicalThreadId);
+            io.emit('THREAD_MESSAGES_UPDATED', { thread_id: canonicalThreadId, account_id: authenticatedAccountId, messages: prepareMessagesForClient(persistedRows), authoritative: true, sync_status: ack.status === 'committed' || ack.status === 'duplicate' ? 'SYNCED' : 'FAILED', sync_error: ack.reason || null });
           } catch (error) {
             console.error('[PAGE_BATCH] ingest failed:', error.message);
             const ack = { ...ackBase, status: 'retry_required', reason: 'page_batch_ingest_failed' };
-            InboxSyncScheduler.markThreadSyncResult(authenticatedAccountId, pageThreadId, ack.reason);
+            InboxSyncScheduler.markThreadSyncResult(authenticatedAccountId, pageThreadId, ack.reason, pageId);
             if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: ack }));
           }
           break;
@@ -3576,12 +3618,13 @@ wss.on('connection', (ws, req) => {
               targetRow = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(fb_message_id);
             }
             if (!targetRow && thread_id) {
+              const canonicalId = resolveInternalThreadId(db, null, thread_id, msg.data?.page_id || null);
               targetRow = db.prepare(`
                 SELECT * FROM messages
-                WHERE thread_id = ? AND media_type = 'video' AND (media_url IS NULL OR media_url NOT LIKE 'http%')
+                WHERE (thread_id = ? OR thread_id = ?) AND media_type = 'video' AND (media_url IS NULL OR media_url NOT LIKE 'http%')
                 ORDER BY timestamp_ms DESC, id DESC
                 LIMIT 1
-              `).get(thread_id);
+              `).get(canonicalId, thread_id);
             }
 
             if (targetRow) {
@@ -4013,6 +4056,7 @@ io.on('connection', (socket) => {
 
   socket.on('REQUEST_SYNC_THREADS', ({ account_id }) => {
     if (!account_id) return;
+    dispatchPageSidebarSync(account_id, 'manual_crm_request');
     if (!InboxSyncScheduler.requestSidebarSync(account_id, 'crm_manual', { force: true })) {
       console.warn(`[Socket.io] Extension cho account ${account_id} chưa sẵn sàng WebSocket.`);
     }
@@ -4109,8 +4153,10 @@ io.on('connection', (socket) => {
       }));
     }
     HistorySyncRetryPolicy.noteManualRequest(thread.account_id, threadId);
-    InitialMessageSweepService.noteUserActivity(thread.account_id);
-    InboxSyncScheduler.clearQueuedThreadSyncs(thread.account_id, (job) => String(job.reason || '').startsWith('initial_sweep'));
+    const laneKey = (thread.source_type === 'page_messenger' && thread.page_id)
+      ? ('page:' + thread.page_id)
+      : ('personal:' + thread.account_id);
+    InitialMessageSweepService.noteUserActivity(thread.account_id, laneKey);
     InboxSyncScheduler.clearQueuedThreadSyncs(thread.account_id, (job) => (
       ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].some((prefix) => String(job.reason || '').startsWith(prefix))
       && String(job.thread_id) !== threadId
@@ -4218,6 +4264,19 @@ io.on('connection', (socket) => {
     // Nhân viên gõ tay → tạm dừng AI 30 phút
     const pauseResult = aiMediator.pauseForThread(thread_id);
     io.emit('AI_PAUSED', { thread_id, until: pauseResult.until });
+
+    const threadRow = db.prepare(`
+      SELECT t.id, t.account_id, s.source_type, s.external_id AS page_id
+      FROM threads t LEFT JOIN inbox_sources s ON s.id = t.source_id
+      WHERE t.id = ?
+    `).get(thread_id);
+    if (threadRow?.account_id) {
+      const laneKey = (threadRow.source_type === 'page_messenger' && threadRow.page_id)
+        ? ('page:' + threadRow.page_id)
+        : ('personal:' + threadRow.account_id);
+      InitialMessageSweepService.noteUserActivity(threadRow.account_id, laneKey);
+      InboxSyncScheduler.preemptActiveThreadSync(threadRow.account_id, (job) => String(job.thread_id) !== String(thread_id));
+    }
 
     try {
       if (isRichMessage) {
@@ -5606,15 +5665,20 @@ function startServer() {
 InitialMessageSweepService.configure({
   listThreads: (accountId) => db.prepare(`
     SELECT t.id, t.external_thread_id, t.thread_url, t.contact_name,
-           CASE WHEN s.source_type = 'page_messenger' THEN s.external_id ELSE NULL END AS page_id
+           t.is_unread, t.last_activity,
+           CASE WHEN s.source_type = 'page_messenger' THEN s.external_id ELSE NULL END AS page_id,
+           (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) AS message_count
     FROM threads t
     LEFT JOIN inbox_sources s ON s.id = t.source_id
     WHERE t.account_id = ? AND t.archived_at IS NULL
       AND COALESCE(t.sync_status, 'LOCAL') <> 'SYNCED'
-    ORDER BY t.last_activity DESC
+    ORDER BY
+      CASE WHEN COALESCE(t.is_unread, 0) = 1 THEN 0 ELSE 1 END ASC,
+      CASE WHEN (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) = 0 THEN 0 ELSE 1 END ASC,
+      t.last_activity DESC
   `).all(String(accountId)),
   enqueue: (job) => InboxSyncScheduler.enqueueThreadSync(job),
-  isBusy: (accountId) => InboxSyncScheduler.isAccountThreadBusy(accountId),
+  isBusy: (laneKey, accountId) => InboxSyncScheduler.isLaneBusy(laneKey),
   isReady: (accountId) => {
     const connection = extensionConnections.get(String(accountId));
     return Boolean(connection && connection.readyState === WebSocket.OPEN);
@@ -5633,6 +5697,14 @@ InboxSyncScheduler.configure({
     let mode = sync_mode || 'incremental';
     if (!sync_mode && (!syncState?.sync_cursor || Number(persisted?.count || 0) === 0)) mode = 'initial';
     else if (!sync_mode && (syncState.sync_status === 'PARTIAL' || syncState.sync_status === 'FAILED')) mode = 'deep_backfill';
+    // Lưới an toàn định tuyến: row chưa bind source (source_id NULL) phải vẫn
+    // được nhận diện là thread Page qua thread_url, nếu không sẽ bị điều hướng
+    // sang tab Messenger cá nhân và tab Business Suite không bao giờ chuyển user.
+    const threadUrlPageId = String(thread_url || '').match(/[?&](?:asset_id|mailbox_id)=(\d+)/)?.[1] || null;
+    const resolvedPageId = pageSource?.sourceType === 'personal_messenger'
+      ? null
+      : (page_id || pageSource?.pageId || threadUrlPageId || null);
+    const threadRow = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(thread_id);
     extWs.send(JSON.stringify({
       type: 'SYNC_THREAD_MESSAGES',
       data: {
@@ -5640,10 +5712,10 @@ InboxSyncScheduler.configure({
         thread_id,
         external_thread_id: external_thread_id || thread_id,
         thread_url,
-        page_id: pageSource?.sourceType === 'personal_messenger' ? null : (page_id || pageSource?.pageId || null),
+        page_id: resolvedPageId,
         mode,
         cursor: syncState?.sync_cursor || null,
-        contact_name,
+        contact_name: contact_name || threadRow?.contact_name || null,
         reason,
         allow_navigation: allow_navigation === true,
         scroll_delta: Number(scroll_delta) || 0

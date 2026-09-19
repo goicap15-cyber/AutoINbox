@@ -212,6 +212,7 @@ class ConversationRepository {
   static upsertThread(threadData, database = getDefaultDb()) {
     const { id, account_id, thread_url, contact_name, last_message, is_unread, source_id, inbox_folder } = threadData;
     const external_thread_id = String(threadData.external_thread_id || threadData.thread_id || id);
+    const bareExternalId = external_thread_id.includes(':') ? external_thread_id.split(':').pop() : external_thread_id;
     let preferredId = String(id || external_thread_id);
     if (isBlacklistedThreadId(preferredId) || isBlacklistedThreadId(external_thread_id)) {
       return null;
@@ -222,22 +223,46 @@ class ConversationRepository {
       : null;
     const inboxFolderVerified = threadData.inbox_folder_verified === true ? 1 : 0;
 
+    const isPageSource = Boolean(source_id && String(source_id).startsWith('src_page_'));
+    const pageId = isPageSource ? String(source_id).slice('src_page_'.length) : (threadData.page_id ? String(threadData.page_id) : null);
+    if (pageId && !preferredId.startsWith('page:')) {
+      // Bare-first policy: page threads keep the bare id (the extension DOM can
+      // only speak bare ids). Mint a namespaced id ONLY when the bare
+      // conversation is already bound to a DIFFERENT src_* owner - another page
+      // or the personal inbox - i.e. a real cross-conversation collision.
+      const boundElsewhere = account_id ? database.prepare(`
+        SELECT id FROM threads
+        WHERE account_id = ? AND (id = ? OR COALESCE(external_thread_id, id) = ?)
+          AND source_id IS NOT NULL AND source_id != ?
+        LIMIT 1
+      `).get(account_id, preferredId, bareExternalId, source_id || '') : null;
+      if (boundElsewhere) {
+        preferredId = `page:${pageId}:${bareExternalId}`;
+      }
+      // else: keep the bare id - an existing unbound row is adopted downstream
+      // (the UPDATE path binds source_id onto it) instead of minting a
+      // namespaced duplicate.
+    }
+
     let existing = null;
     if (source_id && external_thread_id) {
       existing = database.prepare(`
-        SELECT id, contact_name FROM threads
-        WHERE source_id = ? AND COALESCE(external_thread_id, id) = ?
-      `).get(source_id, external_thread_id);
+        SELECT id, contact_name, source_id, account_id FROM threads
+        WHERE source_id = ? AND (COALESCE(external_thread_id, id) = ? OR id = ? OR COALESCE(external_thread_id, id) = ?)
+      `).get(source_id, external_thread_id, preferredId, bareExternalId);
     }
-    if (!existing && account_id && external_thread_id) {
+    if (!existing && account_id && external_thread_id && !source_id) {
       existing = database.prepare(`
-        SELECT id, contact_name FROM threads
-        WHERE account_id = ? AND COALESCE(external_thread_id, id) = ?
-      `).get(account_id, external_thread_id);
+        SELECT id, contact_name, source_id, account_id FROM threads
+        WHERE account_id = ? AND source_id IS NULL AND (COALESCE(external_thread_id, id) = ? OR id = ?)
+      `).get(account_id, external_thread_id, preferredId);
     }
     if (!existing) {
-      const idCollision = database.prepare('SELECT id, contact_name, account_id FROM threads WHERE id = ?').get(preferredId);
-      if (idCollision && account_id && String(idCollision.account_id) !== String(account_id)) {
+      const idCollision = database.prepare('SELECT id, contact_name, account_id, source_id FROM threads WHERE id = ?').get(preferredId);
+      if (idCollision && source_id && idCollision.source_id && String(idCollision.source_id) !== String(source_id)) {
+        preferredId = `page:${pageId || 'col'}:${Date.now()}_${bareExternalId}`;
+        existing = null;
+      } else if (idCollision && account_id && String(idCollision.account_id) !== String(account_id)) {
         // Facebook participant/thread ids are global and can appear under
         // several connected accounts. Never reuse another account's CRM row.
         preferredId = preferredId.startsWith(`${account_id}:`)
@@ -1101,7 +1126,9 @@ class ConversationRepository {
     if (!threadExists) {
       ConversationRepository.upsertThread({
         id: thread_id,
+        external_thread_id: envelope.external_thread_id || thread_id,
         account_id: envelope.account_id,
+        source_id: envelope.source_id || (envelope.page_id ? `src_page_${envelope.page_id}` : null),
         contact_name: envelope.contact_name || 'Khách hàng',
         last_message: messages.length > 0 ? (messages[messages.length - 1].content || 'Chưa có tin nhắn') : 'Chưa có tin nhắn',
         is_unread: 0,

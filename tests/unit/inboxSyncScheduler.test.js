@@ -182,3 +182,71 @@ test('opening the waiting tab queues a request scan behind the active inbox scan
   scheduler.markSidebarResult('acc');
   scheduler.unregisterAccount('acc');
 });
+
+test('threads from different pages run concurrently in parallel lanes', () => {
+  const dispatched = [];
+  const scheduler = new InboxSyncScheduler({ threadCooldownMs: 1, threadTimeoutMs: 200 });
+  scheduler.configure({
+    getConnection: () => null,
+    dispatchThreadMessagesSync: (job) => {
+      dispatched.push({ thread_id: job.thread_id, page_id: job.page_id });
+      return true;
+    }
+  });
+
+  // Enqueue Page A and Page B threads under the same Facebook account
+  // (page lanes are gated on PAGE_EXTENSION_READY - mark both ready first)
+  scheduler.markPageReady('pageA', 'acc');
+  scheduler.markPageReady('pageB', 'acc');
+  scheduler.enqueueThreadSync({ account_id: 'acc', thread_id: 'thread_pA', page_id: 'pageA' });
+  scheduler.enqueueThreadSync({ account_id: 'acc', thread_id: 'thread_pB', page_id: 'pageB' });
+
+  // Both should be dispatched immediately because they are on different lanes
+  assert.equal(dispatched.length, 2);
+  assert.deepEqual(dispatched.map(d => d.thread_id), ['thread_pA', 'thread_pB']);
+  assert.equal(scheduler.isLaneBusy('page:pageA'), true);
+  assert.equal(scheduler.isLaneBusy('page:pageB'), true);
+
+  // Result for Page A frees Page A lane
+  scheduler.markThreadSyncResult('acc', 'thread_pA');
+  assert.equal(scheduler.isLaneBusy('page:pageA'), false);
+  assert.equal(scheduler.isLaneBusy('page:pageB'), true);
+
+  // Result for Page B frees Page B lane
+  scheduler.markThreadSyncResult('acc', 'thread_pB');
+  assert.equal(scheduler.isLaneBusy('page:pageB'), false);
+
+  scheduler.unregisterAccount('acc');
+});
+
+test('threads from the same page serialize sequentially (single-flight per page)', async () => {
+  const dispatched = [];
+  const scheduler = new InboxSyncScheduler({ threadCooldownMs: 1, threadTimeoutMs: 200 });
+  scheduler.configure({
+    getConnection: () => null,
+    dispatchThreadMessagesSync: (job) => {
+      dispatched.push(job.thread_id);
+      return true;
+    }
+  });
+
+  // Enqueue 2 threads from the same page (gate: page must be READY first)
+  scheduler.markPageReady('pageA', 'acc');
+  scheduler.enqueueThreadSync({ account_id: 'acc', thread_id: 'pA_1', page_id: 'pageA' });
+  scheduler.enqueueThreadSync({ account_id: 'acc', thread_id: 'pA_2', page_id: 'pageA' });
+
+  // Only the first thread should be dispatched immediately
+  assert.deepEqual(dispatched, ['pA_1']);
+  assert.equal(scheduler.isLaneBusy('page:pageA'), true);
+
+  // Completing pA_1 should drain and dispatch pA_2
+  scheduler.markThreadSyncResult('acc', 'pA_1');
+  await new Promise((resolve) => setTimeout(resolve, 35));
+
+  assert.deepEqual(dispatched, ['pA_1', 'pA_2']);
+  scheduler.markThreadSyncResult('acc', 'pA_2');
+  assert.equal(scheduler.isLaneBusy('page:pageA'), false);
+
+  scheduler.unregisterAccount('acc');
+});
+

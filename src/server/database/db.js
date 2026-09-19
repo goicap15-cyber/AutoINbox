@@ -1036,6 +1036,88 @@ const migrations = [
       }
       console.log('[DB] Migration v61: Created quick_templates table and seeded defaults.');
     }
+  },
+  {
+    version: 62,
+    name: 'merge_namespaced_page_threads_into_bare',
+    // Gộp trùng chủ đích: xoá row namespaced sau khi merge về bare -> giảm
+    // số row threads/messages là hành vi đúng, không phải lỗi phá huỷ dữ liệu.
+    allowsRowCountReduction: true,
+    up: (db) => {
+      // Bare-first policy (2026-09-19): page threads are canonically keyed by
+      // the bare Facebook id. Namespaced rows (`page:<pageId>:<psid>`) minted
+      // by the earlier policy duplicated every customer whose bare row already
+      // existed, broke tab navigation routing (page_id resolved NULL for the
+      // bare row) and tripped the UNIQUE(source_id, external_thread_id) index.
+      // Merge each namespaced row into its bare twin, then drop it.
+      const nsRows = db.prepare("SELECT id, external_thread_id, account_id, source_id FROM threads WHERE id LIKE 'page:%:%'").all();
+      let merged = 0;
+      let skipped = 0;
+      for (const ns of nsRows) {
+        const parts = String(ns.id).split(':');
+        if (parts.length !== 3) continue;
+        const pageId = parts[1];
+        const bareId = parts[2];
+        if (!/^\d+$/.test(bareId)) continue;
+
+        const bare = db.prepare('SELECT id, source_id FROM threads WHERE id = ? AND account_id = ?').get(bareId, ns.account_id);
+        const nsSource = ns.source_id || `src_page_${pageId}`;
+        if (!bare) {
+          // No bare twin -> rename this row to the bare id when free.
+          const taken = db.prepare('SELECT id FROM threads WHERE id = ?').get(bareId);
+          if (taken) { skipped += 1; continue; }
+          db.prepare('UPDATE threads SET id = ?, external_thread_id = ? WHERE id = ?').run(bareId, bareId, ns.id);
+          merged += 1;
+          continue;
+        }
+        // Only merge when the bare row is unbound or owned by the SAME page
+        // source. A bare row owned by a different page/personal source is a
+        // genuine separate conversation - leave the pair alone.
+        if (bare.source_id && bare.source_id !== nsSource) { skipped += 1; continue; }
+
+        // 1. Move messages by re-pointing thread_id IN PLACE. (An
+        // INSERT...SELECT copy would collide with the original rows on the
+        // UNIQUE fb_message_id index while they still exist and OR IGNORE
+        // would silently drop every row - reproduced on the real DB.)
+        db.prepare('UPDATE OR IGNORE messages SET thread_id = ? WHERE thread_id = ?').run(bareId, ns.id);
+        db.prepare('DELETE FROM messages WHERE thread_id = ?').run(ns.id);
+
+        // 2. Re-point every other table carrying a thread_id column.
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name);
+        for (const table of tables) {
+          if (table === 'threads' || table === 'messages' || table === 'contacts' || table.startsWith('messages_fts')) continue;
+          const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+          if (!cols.some((c) => c.name === 'thread_id')) continue;
+          try {
+            db.prepare(`UPDATE OR IGNORE ${table} SET thread_id = ? WHERE thread_id = ?`).run(bareId, ns.id);
+            db.prepare(`DELETE FROM ${table} WHERE thread_id = ?`).run(ns.id);
+          } catch (_) {}
+        }
+
+        // 3. Merge the contact row (thread_id is the PK there) and drop the twin.
+        const nsContact = db.prepare('SELECT name, avatar_url FROM contacts WHERE thread_id = ?').get(ns.id);
+        if (nsContact) {
+          db.prepare(`
+            INSERT INTO contacts (thread_id, name, avatar_url)
+            VALUES (?, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET
+              name = COALESCE(contacts.name, excluded.name),
+              avatar_url = COALESCE(contacts.avatar_url, excluded.avatar_url)
+          `).run(bareId, nsContact.name, nsContact.avatar_url);
+          db.prepare('DELETE FROM contacts WHERE thread_id = ?').run(ns.id);
+        }
+
+        // 4. Drop the namespaced thread row (references are gone now).
+        db.prepare('DELETE FROM threads WHERE id = ?').run(ns.id);
+
+        // 5. Bind the page source onto the bare row (safe - the twin is gone).
+        if (!bare.source_id) {
+          try { db.prepare('UPDATE threads SET source_id = ? WHERE id = ?').run(nsSource, bareId); } catch (_) {}
+        }
+        merged += 1;
+      }
+      console.log(`[DB] Migration v62: Merged ${merged} namespaced page thread(s) into bare ids (skipped ${skipped} genuine cross-page collisions).`);
+    }
   }
 ];
 
@@ -1081,7 +1163,9 @@ function runMigrations() {
         messages: db.prepare('SELECT COUNT(*) AS count FROM messages').get().count
       };
       const expectedMessageReduction = pending.some(m => m.allowsMessageRowReduction);
-      if (afterCounts.threads < beforeCounts.threads || (afterCounts.messages < beforeCounts.messages && !expectedMessageReduction)) {
+      const expectedRowCountReduction = pending.some(m => m.allowsRowCountReduction);
+      if ((afterCounts.threads < beforeCounts.threads && !expectedRowCountReduction)
+        || (afterCounts.messages < beforeCounts.messages && !expectedMessageReduction && !expectedRowCountReduction)) {
         throw new Error('Migration reduced persisted thread/message row counts');
       }
     } catch (err) {

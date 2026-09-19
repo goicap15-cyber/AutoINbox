@@ -28,13 +28,31 @@ class InboxSyncScheduler {
 
     this.accounts = new Map();
     this.threadInFlight = new Set();
+    this.threadJobsInFlight = new Map();
     this.threadTimeouts = new Map();
     this.threadCooldownUntil = new Map();
     this.pendingThreadSyncs = new Map();
     this.threadQueues = new Map();
     this.accountThreadBusy = new Set();
+    // Page lane chỉ được dispatch khi tab Business Suite của page đó đã báo
+    // PAGE_EXTENSION_READY - chống dispatch lệch sang extension Chrome cá nhân
+    // khi Chrome page còn đang khởi động (reproduce 2026-09-19: job initial
+    // sweep bay vào extension cá nhân, lane page kẹt busy vĩnh viễn).
+    this.readyPages = new Map(); // pageId -> accountId
+    this.pageGateTimers = new Map();
     this.getConnection = null;
     this.dispatchThreadMessagesSync = null;
+  }
+
+  markPageReady(pageId, accountId = null) {
+    const pid = String(pageId || '');
+    if (!pid) return;
+    this.readyPages.set(pid, String(accountId || ''));
+    this.drainThreadQueue(`page:${pid}`);
+  }
+
+  isPageReady(pageId) {
+    return this.readyPages.has(String(pageId || ''));
   }
 
   configure({ getConnection, dispatchThreadMessagesSync }) {
@@ -168,17 +186,43 @@ class InboxSyncScheduler {
     if (state.timeout) clearTimeout(state.timeout);
     if (state.syncWindowTimer) clearTimeout(state.syncWindowTimer);
     this.accounts.delete(accId);
-    this.threadQueues.delete(accId);
     this.accountThreadBusy.delete(accId);
+    for (const [laneKey, queue] of [...this.threadQueues.entries()]) {
+      if (laneKey === accId || laneKey.endsWith(`:${accId}`)) {
+        this.threadQueues.delete(laneKey);
+        this.accountThreadBusy.delete(laneKey);
+      }
+    }
 
     for (const key of [...this.threadInFlight]) {
-      if (key.startsWith(`${accId}:`)) this.threadInFlight.delete(key);
+      if (key.startsWith(`${accId}:`)) {
+        this.threadInFlight.delete(key);
+        this.threadJobsInFlight.delete(key);
+      }
     }
     for (const [key, timeout] of [...this.threadTimeouts.entries()]) {
       if (key.startsWith(`${accId}:`)) {
         clearTimeout(timeout);
         this.threadTimeouts.delete(key);
       }
+    }
+    // RECOMPUTE busy flags thay vì chỉ xoá lane trùng `:<accId>`: lane Page có
+    // key `page:<pageId>` KHÔNG kết thúc bằng account id, nên bản cũ để sót
+    // cờ busy -> lane kẹt vĩnh viễn, mọi job sau chỉ COALESCED mãi mãi
+    // (reproduce 2026-09-19: 15+ lần crm_scroll_older không bao giờ dispatch).
+    // Cờ busy chỉ còn hợp lệ cho các job in-flight của tài khoản KHÁC.
+    const stillBusyLanes = new Set();
+    for (const job of this.threadJobsInFlight.values()) {
+      stillBusyLanes.add(this.getLaneKey(job));
+    }
+    this.accountThreadBusy = stillBusyLanes;
+    // Page extension của account này đã offline: job lane page phải chờ READY mới.
+    for (const [pid, owner] of [...this.readyPages.entries()]) {
+      if (!accountId || String(owner) === accId) this.readyPages.delete(pid);
+    }
+    // Đánh thức các lane page đang chờ gate (có thể READY đã trở lại).
+    for (const laneKey of [...this.threadQueues.keys()]) {
+      if (String(laneKey).startsWith('page:')) this.drainThreadQueue(laneKey);
     }
     for (const key of [...this.threadCooldownUntil.keys()]) {
       if (key.startsWith(`${accId}:`)) this.threadCooldownUntil.delete(key);
@@ -342,14 +386,35 @@ class InboxSyncScheduler {
     }
   }
 
-  enqueueThreadSync({ account_id, thread_id, external_thread_id = null, thread_url = null, page_id = null, contact_name = null, reason = 'changed', allow_navigation = false, priority = 'normal', sync_mode = null, scroll_delta = 0 }) {
+  getLaneKey(jobOrAccountId, pageId = null) {
+    if (jobOrAccountId && typeof jobOrAccountId === 'object') {
+      if (jobOrAccountId.lane_key) return String(jobOrAccountId.lane_key);
+      if (jobOrAccountId.page_id) return `page:${jobOrAccountId.page_id}`;
+      return String(jobOrAccountId.account_id || '');
+    }
+    const id = String(jobOrAccountId || '');
+    if (pageId) return `page:${pageId}`;
+    return id;
+  }
+
+  isLaneBusy(laneKey) {
+    return this.accountThreadBusy.has(String(laneKey || ''));
+  }
+
+  isAccountThreadBusy(accountId, pageId = null) {
+    const laneKey = this.getLaneKey(accountId, pageId);
+    return this.accountThreadBusy.has(laneKey) || this.accountThreadBusy.has(String(accountId || ''));
+  }
+
+  enqueueThreadSync({ account_id, thread_id, external_thread_id = null, thread_url = null, page_id = null, lane_key = null, contact_name = null, reason = 'changed', allow_navigation = false, priority = 'normal', sync_mode = null, scroll_delta = 0 }) {
     const accId = String(account_id || '');
     const threadId = String(thread_id || '');
     if (!accId || !threadId || !this.dispatchThreadMessagesSync) return false;
 
+    const resolvedLane = this.getLaneKey({ account_id: accId, page_id, lane_key });
     const key = `${accId}:${threadId}`;
     const now = Date.now();
-    const jobData = { account_id: accId, thread_id: threadId, external_thread_id, thread_url, page_id, contact_name, reason, allow_navigation: allow_navigation === true, priority, sync_mode, scroll_delta: Number(scroll_delta) || 0 };
+    const jobData = { account_id: accId, thread_id: threadId, external_thread_id, thread_url, page_id, lane_key: resolvedLane, contact_name, reason, allow_navigation: allow_navigation === true, priority, sync_mode, scroll_delta: Number(scroll_delta) || 0, key };
     const cooldownUntil = this.threadCooldownUntil.get(key) || 0;
     // Explicit CRM navigation/scroll may reacquire a thread immediately after
     // it was preempted when the operator switched away and then back.
@@ -360,7 +425,7 @@ class InboxSyncScheduler {
         : jobData.scroll_delta;
       this.pendingThreadSyncs.set(key, { ...jobData, scroll_delta: combinedScrollDelta, reason: `${reason}_replay` });
       const deferredBy = this.threadInFlight.has(key) ? 'in_flight' : 'cooldown';
-      console.log(`[INBOX_SYNC_MESSAGES_DEFER] account=${accId} thread=${threadId} reason=${reason} defer=${deferredBy}`);
+      console.log(`[INBOX_SYNC_MESSAGES_DEFER] account=${accId} lane=${resolvedLane} thread=${threadId} reason=${reason} defer=${deferredBy}`);
       if (deferredBy === 'cooldown') {
         const timer = setTimeout(() => this.replayPendingThread(key), Math.max(25, cooldownUntil - now));
         if (typeof timer.unref === 'function') timer.unref();
@@ -368,43 +433,55 @@ class InboxSyncScheduler {
       return false;
     }
 
-    const queue = this.threadQueues.get(accId) || [];
+    const queue = this.threadQueues.get(resolvedLane) || [];
     const existingIndex = queue.findIndex(job => job.key === key);
     if (existingIndex >= 0) {
       const existing = queue[existingIndex];
       const combinedScrollDelta = sync_mode === 'ondemand_viewport' && existing.sync_mode === 'ondemand_viewport'
         ? Math.max(-3600, Math.min(3600, Number(existing.scroll_delta || 0) + Number(jobData.scroll_delta || 0)))
         : jobData.scroll_delta;
-      queue[existingIndex] = { key, ...jobData, scroll_delta: combinedScrollDelta };
-      console.log(`[INBOX_SYNC_MESSAGES_COALESCED] account=${accId} thread=${threadId} reason=${reason}`);
+      const queuedAt = Number(existing.queuedAt || 0) || now;
+      queue[existingIndex] = { key, ...jobData, scroll_delta: combinedScrollDelta, queuedAt };
+      const waitedMs = now - queuedAt;
+      console.log(`[INBOX_SYNC_MESSAGES_COALESCED] account=${accId} lane=${resolvedLane} thread=${threadId} reason=${reason} waited_ms=${waitedMs}`);
+      // Anti-starve: job của thao tác user chờ quá 20s không được dispatch
+      // (lane bận/kẹt) -> đẩy đầu hàng và thử drain ngay thay vì nuốt mãi.
+      if (priority === 'high' && waitedMs > 20000) {
+        const escalated = queue.splice(existingIndex, 1)[0];
+        queue.unshift(escalated);
+        this.drainThreadQueue(resolvedLane);
+      }
       return false;
     }
 
-    if (priority === 'high') queue.unshift({ key, ...jobData });
-    else queue.push({ key, ...jobData });
-    this.threadQueues.set(accId, queue);
+    if (priority === 'high') queue.unshift({ key, ...jobData, queuedAt: now });
+    else queue.push({ key, ...jobData, queuedAt: now });
+    this.threadQueues.set(resolvedLane, queue);
     this.threadCooldownUntil.set(key, now + this.threadCooldownMs);
-    console.log(`[INBOX_SYNC_MESSAGES_QUEUED] account=${accId} thread=${threadId} reason=${reason} queue_depth=${queue.length}`);
-    this.drainThreadQueue(accId);
+    console.log(`[INBOX_SYNC_MESSAGES_QUEUED] account=${accId} lane=${resolvedLane} thread=${threadId} reason=${reason} queue_depth=${queue.length}`);
+    this.drainThreadQueue(resolvedLane);
     return true;
   }
 
   clearQueuedThreadSyncs(accountId, predicate = () => true) {
     const accId = String(accountId || '');
-    const queue = this.threadQueues.get(accId) || [];
-    const removedJobs = queue.filter(predicate);
-    if (removedJobs.length === 0) return 0;
-    this.threadQueues.set(accId, queue.filter((job) => !predicate(job)));
-    for (const job of removedJobs) this.pendingThreadSyncs.delete(job.key);
-    console.log(`[INBOX_SYNC_MESSAGES_CLEARED] account=${accId} removed=${removedJobs.length}`);
-    return removedJobs.length;
+    let removedTotal = 0;
+    for (const [laneKey, queue] of [...this.threadQueues.entries()]) {
+      const removedJobs = queue.filter(job => (String(job.account_id || '') === accId || laneKey === accId) && predicate(job));
+      if (removedJobs.length === 0) continue;
+      this.threadQueues.set(laneKey, queue.filter(job => !((String(job.account_id || '') === accId || laneKey === accId) && predicate(job))));
+      for (const job of removedJobs) this.pendingThreadSyncs.delete(job.key);
+      removedTotal += removedJobs.length;
+    }
+    if (removedTotal) console.log(`[INBOX_SYNC_MESSAGES_CLEARED] account=${accId} removed=${removedTotal}`);
+    return removedTotal;
   }
 
   clearPendingThreadSyncs(accountId, predicate = () => true) {
     const accId = String(accountId || '');
     let removed = 0;
     for (const [key, job] of [...this.pendingThreadSyncs.entries()]) {
-      if (!key.startsWith(`${accId}:`) || !predicate(job)) continue;
+      if ((!key.startsWith(`${accId}:`) && String(job?.account_id || '') !== accId) || !predicate(job)) continue;
       this.pendingThreadSyncs.delete(key);
       removed += 1;
     }
@@ -418,38 +495,54 @@ class InboxSyncScheduler {
     for (const key of [...this.threadInFlight]) {
       if (!key.startsWith(`${accId}:`)) continue;
       const threadId = key.slice(accId.length + 1);
-      const activeJob = { key, account_id: accId, thread_id: threadId };
+      const activeJob = this.threadJobsInFlight.get(key) || { key, account_id: accId, thread_id: threadId };
       if (!predicate(activeJob)) continue;
+      const laneKey = this.getLaneKey(activeJob);
       this.threadInFlight.delete(key);
+      this.threadJobsInFlight.delete(key);
       const timeout = this.threadTimeouts.get(key);
       if (timeout) clearTimeout(timeout);
       this.threadTimeouts.delete(key);
       this.pendingThreadSyncs.delete(key);
+      this.accountThreadBusy.delete(laneKey);
+      this.accountThreadBusy.delete(accId);
       removed += 1;
     }
     if (removed) {
-      this.accountThreadBusy.delete(accId);
       console.log(`[INBOX_SYNC_MESSAGES_PREEMPTED] account=${accId} removed=${removed}`);
     }
     return removed;
   }
 
-  isAccountThreadBusy(accountId) {
-    return this.accountThreadBusy.has(String(accountId || ''));
-  }
+  drainThreadQueue(laneKeyOrAccountId) {
+    const laneKey = String(laneKeyOrAccountId || '');
+    if (!laneKey || this.accountThreadBusy.has(laneKey)) return;
 
-  drainThreadQueue(accountId) {
-    const accId = String(accountId || '');
-    if (!accId || this.accountThreadBusy.has(accId)) return;
+    // Gate: job lane Page chỉ dispatch khi tab Business Suite của page đó đã
+    // báo PAGE_EXTENSION_READY. Job giữ nguyên trong queue, thử lại mỗi giây.
+    const pageGateId = laneKey.startsWith('page:') ? laneKey.slice('page:'.length) : null;
+    if (pageGateId && !this.readyPages.has(pageGateId)) {
+      if (!this.pageGateTimers.has(laneKey)) {
+        const gateTimer = setTimeout(() => {
+          this.pageGateTimers.delete(laneKey);
+          this.drainThreadQueue(laneKey);
+        }, 1000);
+        if (typeof gateTimer.unref === 'function') gateTimer.unref();
+        this.pageGateTimers.set(laneKey, gateTimer);
+      }
+      return;
+    }
 
-    const queue = this.threadQueues.get(accId) || [];
+    const queue = this.threadQueues.get(laneKey) || [];
     const job = queue.shift();
     if (!job) return;
-    this.threadQueues.set(accId, queue);
+    this.threadQueues.set(laneKey, queue);
 
-    this.accountThreadBusy.add(accId);
+    const accId = String(job.account_id || laneKey);
+    this.accountThreadBusy.add(laneKey);
     this.threadInFlight.add(job.key);
-    console.log(`[INBOX_SYNC_MESSAGES_DISPATCHED] account=${accId} thread=${job.thread_id} reason=${job.reason} remaining_queue=${queue.length}`);
+    this.threadJobsInFlight.set(job.key, job);
+    console.log(`[INBOX_SYNC_MESSAGES_DISPATCHED] lane=${laneKey} account=${accId} thread=${job.thread_id} reason=${job.reason} remaining_queue=${queue.length}`);
 
     const dispatched = this.dispatchThreadMessagesSync({
       account_id: job.account_id,
@@ -467,7 +560,8 @@ class InboxSyncScheduler {
 
     if (!dispatched) {
       this.threadInFlight.delete(job.key);
-      this.accountThreadBusy.delete(accId);
+      this.threadJobsInFlight.delete(job.key);
+      this.accountThreadBusy.delete(laneKey);
       // A user can select a blank thread while Chrome/the extension is still
       // reconnecting. Retain that explicit request instead of silently losing
       // it; replay is cancelled naturally if the operator selects another chat.
@@ -481,19 +575,20 @@ class InboxSyncScheduler {
         if (typeof retryTimer.unref === 'function') retryTimer.unref();
       } else {
         this.pendingThreadSyncs.delete(job.key);
-        console.warn(`[INBOX_SYNC_MESSAGES_ABORT] account=${accId} thread=${job.thread_id} reason=${job.reason} max_retries_exceeded`);
+        console.warn(`[INBOX_SYNC_MESSAGES_ABORT] account=${accId} lane=${laneKey} thread=${job.thread_id} reason=${job.reason} max_retries_exceeded`);
       }
-      setTimeout(() => this.drainThreadQueue(accId), 250);
+      setTimeout(() => this.drainThreadQueue(laneKey), 250);
       return;
     }
 
     const timeout = setTimeout(() => {
       this.threadTimeouts.delete(job.key);
+      this.threadJobsInFlight.delete(job.key);
       if (this.threadInFlight.delete(job.key)) {
-        this.accountThreadBusy.delete(accId);
-        console.warn(`[INBOX_SYNC_MESSAGES_TIMEOUT] account=${accId} thread=${job.thread_id} timeout_ms=${this.threadTimeoutMs}`);
+        this.accountThreadBusy.delete(laneKey);
+        console.warn(`[INBOX_SYNC_MESSAGES_TIMEOUT] account=${accId} lane=${laneKey} thread=${job.thread_id} timeout_ms=${this.threadTimeoutMs}`);
         this.replayPendingThread(job.key);
-        this.drainThreadQueue(accId);
+        this.drainThreadQueue(laneKey);
         const sidebarState = this.accounts.get(accId);
         if (sidebarState?.pending) this.requestSidebarSync(accId, 'thread_timeout_replay', { force: true });
       }
@@ -515,20 +610,37 @@ class InboxSyncScheduler {
     return this.enqueueThreadSync(pending);
   }
 
-  markThreadSyncResult(accountId, threadId, reason = null) {
+  markThreadSyncResult(accountId, threadId, reason = null, pageId = null) {
     const accId = String(accountId || '');
-    const key = `${accId}:${String(threadId || '')}`;
+    let key = `${accId}:${String(threadId || '')}`;
+    let job = this.threadJobsInFlight.get(key);
+    if (!job && pageId) {
+      const bareId = String(threadId).includes(':') ? String(threadId).split(':').pop() : String(threadId);
+      const altKey1 = `${accId}:page:${pageId}:${bareId}`;
+      const altKey2 = `${accId}:${bareId}`;
+      if (this.threadJobsInFlight.has(altKey1)) {
+        key = altKey1;
+        job = this.threadJobsInFlight.get(key);
+      } else if (this.threadJobsInFlight.has(altKey2)) {
+        key = altKey2;
+        job = this.threadJobsInFlight.get(key);
+      }
+    }
+    const laneKey = job ? this.getLaneKey(job) : this.getLaneKey(accountId, pageId);
+    this.threadJobsInFlight.delete(key);
+
     if (this.threadInFlight.delete(key)) {
       const timeout = this.threadTimeouts.get(key);
       if (timeout) clearTimeout(timeout);
       this.threadTimeouts.delete(key);
+      this.accountThreadBusy.delete(laneKey);
       this.accountThreadBusy.delete(accId);
-      console.log(`[INBOX_SYNC_MESSAGES_RESULT] account=${accountId} thread=${threadId}${reason ? ` reason=${reason}` : ''}`);
+      console.log(`[INBOX_SYNC_MESSAGES_RESULT] lane=${laneKey} account=${accountId} thread=${threadId}${reason ? ` reason=${reason}` : ''}`);
       this.replayPendingThread(key);
       const timer = setTimeout(() => {
-        this.drainThreadQueue(accId);
+        this.drainThreadQueue(laneKey);
         const sidebarState = this.accounts.get(accId);
-        if (!this.accountThreadBusy.has(accId) && sidebarState?.pending) {
+        if (!this.isAccountThreadBusy(accId) && sidebarState?.pending) {
           this.requestSidebarSync(accId, 'thread_result_replay', { force: true });
         }
       }, 25);

@@ -84,6 +84,9 @@ if (isBusiness) {
     // (reproduce 2026-09-18: tab trắng treo spinner vô hạn).
     let bizInboxRenderedHealthy = false;
     let blankPageReported = false;
+    // Thread bare id gần nhất xác định được rõ ràng (aria-selected/URL) - dùng
+    // làm fallback cho realtime khi trạng thái DOM tạm thời không đọc được ID.
+    let lastKnownBizThreadId = null;
 
     function markBizInboxHealthy() { bizInboxRenderedHealthy = true; }
 
@@ -208,6 +211,13 @@ if (isBusiness) {
     setInterval(scanPageSidebarThreads, 3500);
     setTimeout(scanPageSidebarThreads, 1500);
 
+    // Tự động kích hoạt Deep Sidebar Scroller sau khi tab đã tải ổn định (~10s)
+    setTimeout(() => {
+        if (!crawlInProgress && !deepSidebarScanInProgress) {
+            scrollPageSidebarDeeply({ maxRounds: 30, stepDistance: 600 }).catch(() => {});
+        }
+    }, 10000);
+
     // Feature Realtime Sidebar: Lắng nghe biến động Sidebar phát hiện tin nhắn mới tức thì
     let sidebarDebounceTimer = null;
     function setupSidebarObserver() {
@@ -261,25 +271,44 @@ if (isBusiness) {
             return urlMatch[1];
         }
 
-        const selectors = [
-            '[role="navigation"] [aria-selected="true"] a',
-            '[role="gridcell"] a[href*="selected_item_id="]',
-            'div[role="navigation"] a[aria-current="page"]',
-            'a[href*="selected_item_id="]',
-            'a[href*="/messages/t/"]'
-        ];
+        // Không còn fallback "link đầu tiên trong DOM": khi không có dấu hiệu
+        // rõ ràng (aria-selected / URL) thì trả null thay vì đoán - attribution
+        // sai thread làm tin nhắn của khách này dán nhầm cho khách khác
+        // (reproduce 2026-09-19: lướt lên Phạm Hùng nhưng tab đang mở
+        // Lê Kim Thanh Ngân, batch bị gán nhầm thread).
+        return null;
+    }
 
-        for (const sel of selectors) {
-            const els = document.querySelectorAll(sel);
-            for (const el of els) {
-                const linkHref = el.getAttribute('href') || el.href || '';
-                const match = linkHref.match(/(?:selected_item_id|thread_id)=(\d+)/) || linkHref.match(/\/messages\/(?:e2ee\/)?t\/(\d+)/);
-                if (match && match[1]) {
-                    return match[1];
-                }
+    function bareThreadIdOf(id) {
+        const str = String(id || '');
+        return str.includes(':') ? str.split(':').pop() : str;
+    }
+
+    function looseNameMatch(a, b) {
+        const norm = (s) => String(s || '').toLowerCase().normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/đ/g, 'd')
+            .replace(/[^a-z0-9]/g, '');
+        const na = norm(a);
+        const nb = norm(b);
+        if (!na || !nb) return false;
+        return na === nb || na.includes(nb) || nb.includes(na);
+    }
+
+    // Tên hội thoại đang hiển thị trên header khung chat (cột detail).
+    function getVisibleBizChatHeaderName() {
+        try {
+            const candidates = Array.from(document.querySelectorAll('[data-surface*="detail_column"]')).sort((a, b) => {
+                const ra = a.getBoundingClientRect();
+                const rb = b.getBoundingClientRect();
+                return (Math.round(ra.top) - Math.round(rb.top)) || (Math.round(ra.left) - Math.round(rb.left));
+            });
+            for (const el of candidates) {
+                if (el.closest('[role="complementary"], aside')) continue;
+                const txt = (el.textContent || '').trim().split('\n')[0].trim();
+                if (txt && txt.length >= 2 && txt.length <= 80 && !/^\d+$/.test(txt)) return txt;
             }
-        }
-
+        } catch (_) {}
         return null;
     }
 
@@ -797,6 +826,8 @@ if (isBusiness) {
     let threadSM = null;
     let lastSyncedOldestMessageId = null;
     let lastSyncedMountedSignature = '';
+    // Chống spam batch passive: tối thiểu 3s giữa 2 lần emit PAGE_THREAD_MESSAGES_SYNCED_V1
+    let lastPassiveEmitAt = 0;
 
     function getOrInitStateMachine(threadId) {
         if (!threadId) return null;
@@ -1100,10 +1131,15 @@ if (isBusiness) {
         currentTick++;
         try {
             // Early thread resolution to reset cache if needed, and try to find contact info
-            const currentThreadId = resolveCurrentThreadId();
-            if (!currentThreadId) return; // Ngắt quét an toàn khi không xác định được thread ID
+            // ID tạm không đọc được (null) -> GIỮ NGUYÊN thread hiện tại:
+            // trước đây mỗi tick flap null<->id bị tính là "đổi thread" làm
+            // reset contact/signature/state machine và spam batch sync mỗi giây.
+            const resolvedThreadId = resolveCurrentThreadId();
+            if (!resolvedThreadId && !lastKnownBizThreadId) return;
+            const currentThreadId = resolvedThreadId || lastKnownBizThreadId;
+            lastKnownBizThreadId = currentThreadId;
 
-            const threadJustChanged = currentThreadId !== lastKnownThreadId;
+            const threadJustChanged = resolvedThreadId != null && currentThreadId !== lastKnownThreadId;
             isLikelyBacklog(currentThreadId); // this updates lastKnownThreadId and resets cache if thread changed
             if (threadJustChanged) {
                 lastThreadSwitchAt = Date.now();
@@ -1229,10 +1265,12 @@ if (isBusiness) {
             // Kích hoạt Baselining theo State Machine khi thread mới mở và DOM đã mount tin nhắn
             // HOẶC khi DOM thay đổi / mount thêm tin nhắn & Like mới trong lúc State Machine đã READY
             const sm = getOrInitStateMachine(currentThreadId);
-            if (sm && sm.getState() === 'UNINITIALIZED' && messageListContainer) {
+            const canPassiveEmit = (Date.now() - lastPassiveEmitAt) >= 3000;
+            if (sm && sm.getState() === 'UNINITIALIZED' && messageListContainer && canPassiveEmit) {
                 const batchMessages = collectMountedBatchMessages(messageListContainer);
                 // Chỉ kích hoạt baselining khi DOM đã thực sự render ít nhất 1 tin nhắn (tránh gửi batch rỗng count=0)
                 if (batchMessages.length > 0) {
+                    lastPassiveEmitAt = Date.now();
                     const meta = sm.startBaselining();
                     lastSyncedOldestMessageId = batchMessages[0].fb_message_id;
                     lastSyncedMountedSignature = currentMountedSignature;
@@ -1252,9 +1290,10 @@ if (isBusiness) {
                         }
                     });
                 }
-            } else if (sm && sm.getState() === 'READY' && !crawlInProgress && messageListContainer && currentMountedSignature && currentMountedSignature !== lastSyncedMountedSignature) {
+            } else if (sm && sm.getState() === 'READY' && !crawlInProgress && messageListContainer && currentMountedSignature && currentMountedSignature !== lastSyncedMountedSignature && canPassiveEmit) {
                 const batchMessages = collectMountedBatchMessages(messageListContainer);
                 if (batchMessages.length > 0) {
+                    lastPassiveEmitAt = Date.now();
                     const meta = sm.startBaselining();
                     lastSyncedOldestMessageId = batchMessages[0].fb_message_id;
                     lastSyncedMountedSignature = currentMountedSignature;
@@ -1785,7 +1824,9 @@ if (isBusiness) {
                 ? false
                 : null);
 
-        const threadId = resolveCurrentThreadId();
+        // ID hiện tại ưu tiên tuyệt đối; khi DOM tạm không đọc được (URL thiếu
+        // selected_item_id, không có aria-selected) dùng lastKnown thay vì bỏ tin.
+        const threadId = resolveCurrentThreadId() || lastKnownBizThreadId;
         if (!threadId) return;
 
         const assetId = resolveCurrentPageId();
@@ -2028,15 +2069,46 @@ if (isBusiness) {
                 }
             }
         } else if (request.type === 'SCAN_PAGE_SIDEBAR') {
-            // A manual CRM sync window explicitly requests a fresh Page list.
+            const isDeep = Boolean(request.data?.deep);
             lastSidebarSyncHash = '';
             lastSidebarSyncTime = 0;
-            scanPageSidebarThreads();
-            sendResponse({ success: true });
+            if (isDeep) {
+                scrollPageSidebarDeeply(request.data || {}).then(res => {
+                    sendResponse({ success: true, ...res });
+                }).catch(err => {
+                    sendResponse({ success: false, error: err?.message || String(err) });
+                });
+                return true;
+            } else {
+                const threads = scanPageSidebarThreads(true);
+                sendResponse({ success: true, count: threads?.length || 0 });
+            }
+        } else if (request.type === 'TRIGGER_DEEP_SIDEBAR_SCAN') {
+            scrollPageSidebarDeeply(request.data || {}).then(res => {
+                sendResponse({ success: true, ...res });
+            }).catch(err => {
+                sendResponse({ success: false, error: err?.message || String(err) });
+            });
+            return true;
         } else if (request.type === 'REQUEST_PAGE_BATCH_SYNC') {
             const req = request.data || {};
             const threadId = req.thread_id || resolveCurrentThreadId();
             if (!threadId) return;
+
+            // Verify route: conversation đang mount trên DOM phải đúng thread
+            // được yêu cầu. Sai route -> báo background và KHÔNG thu thập gì
+            // (tránh gán nhầm tin của khách khác vào thread này).
+            const expectedBareId = String(req.expected_bare_id || bareThreadIdOf(req.thread_id) || '');
+            const verifyThreadRoute = () => {
+                if (!expectedBareId) return true;
+                const currentId = resolveCurrentThreadId();
+                if (currentId && String(currentId) === expectedBareId) return true;
+                if (!currentId && req.contact_name) {
+                    const headerName = getVisibleBizChatHeaderName();
+                    if (headerName && looseNameMatch(headerName, req.contact_name)) return true;
+                }
+                return false;
+            };
 
             // Feature 055: Mutex coalescing - ngăn nhiều request crawl chạy song song cho cùng 1 thread
             const crawlToken = crawlMutex.acquire(threadId);
@@ -2049,6 +2121,17 @@ if (isBusiness) {
 
             (async () => {
                 try {
+                    if (!verifyThreadRoute()) {
+                        console.warn(`[PageContent] 🚫 THREAD_ROUTE_MISMATCH: yêu cầu thread ${expectedBareId} nhưng DOM đang mở ${resolveCurrentThreadId() || 'không rõ'}. Hủy crawl, không thu thập tin.`);
+                        chrome.runtime.sendMessage({
+                            type: 'PAGE_THREAD_ROUTE_MISMATCH',
+                            data: { thread_id: threadId, expected_bare_id: expectedBareId, current_thread_id: resolveCurrentThreadId(), page_id: req.page_id || null }
+                        }).catch(() => {});
+                        crawlMutex.release(crawlToken);
+                        crawlInProgress = false;
+                        return;
+                    }
+
                     const scrollerHelper = typeof FbPageActiveScroller !== 'undefined' ? FbPageActiveScroller : null;
                     const accumulator = scrollerHelper && typeof scrollerHelper.createMessageAccumulator === 'function'
                         ? scrollerHelper.createMessageAccumulator()
@@ -2089,8 +2172,18 @@ if (isBusiness) {
                             const maxRounds = 4;
                             for (let round = 0; round < maxRounds; round++) {
                                 // Kiểm tra khẩn cấp: nếu người dùng đã đổi thread hoặc iframe reload -> hủy crawler ngay
-                                if (!crawlMutex.isTokenValid(crawlToken, resolveCurrentThreadId())) {
+                                // (ID tạm thời không đọc được coi như "vẫn thread cũ" - verifyThreadRoute lo phần đúng/sai)
+                                const nowResolvedId = resolveCurrentThreadId() || threadId;
+                                if (!crawlMutex.isTokenValid(crawlToken, nowResolvedId)) {
                                     console.warn(`[PageContent] Hủy crawler: thread đã đổi từ ${threadId} sang ${resolveCurrentThreadId()} tại vòng ${round + 1}`);
+                                    return;
+                                }
+                                if (!verifyThreadRoute()) {
+                                    console.warn(`[PageContent] 🚫 THREAD_ROUTE_MISMATCH tại vòng ${round + 1}: yêu cầu ${expectedBareId}, DOM đang mở ${resolveCurrentThreadId() || 'không rõ'}. Dừng crawl.`);
+                                    chrome.runtime.sendMessage({
+                                        type: 'PAGE_THREAD_ROUTE_MISMATCH',
+                                        data: { thread_id: threadId, expected_bare_id: expectedBareId, current_thread_id: resolveCurrentThreadId(), page_id: req.page_id || null, round: round + 1 }
+                                    }).catch(() => {});
                                     return;
                                 }
 
@@ -2183,7 +2276,9 @@ if (isBusiness) {
                     }
 
                     // Kiểm tra thread lần cuối trước khi đóng gói gửi backend
-                    const currentThreadNow = resolveCurrentThreadId();
+                    // ID tạm không đọc được (null) coi như "vẫn thread cũ" - route
+                    // đã được verifyThreadRoute kiểm tra trước và trong mỗi vòng.
+                    const currentThreadNow = resolveCurrentThreadId() || threadId;
                     if (!crawlMutex.isTokenValid(crawlToken, currentThreadNow)) {
                         console.warn(`[PageContent] Hủy phát batch: thread hiện tại (${currentThreadNow}) không khớp token (${threadId}).`);
                         return;
@@ -2242,11 +2337,126 @@ if (isBusiness) {
     // Tự động cào danh sách hội thoại từ Sidebar của Meta Business Suite
     let lastSidebarSyncHash = '';
     let lastSidebarSyncTime = 0;
+    let lastSidebarScanDiag = '';
+    let deepSidebarScanInProgress = false;
 
-    function scanPageSidebarThreads() {
+    function findSidebarScrollContainer() {
+        // 1. Dò từ các phần tử dòng hoặc link hội thoại trong Cột 2
+        const rowEl = document.querySelector('[data-surface*="thread_row"], [data-crm-thread-id], a[href*="selected_item_id="]')
+            || document.querySelector('[role="row"], [role="listitem"]');
+        if (rowEl) {
+            let curr = rowEl.parentElement;
+            while (curr && curr !== document.body && curr !== document.documentElement) {
+                const rect = curr.getBoundingClientRect();
+                if (rect.left >= 0 && rect.left <= 600 && rect.height >= 250) {
+                    const style = window.getComputedStyle(curr);
+                    const overflowY = style.overflowY || '';
+                    if (['auto', 'scroll', 'overlay'].includes(overflowY) && curr.scrollHeight > curr.clientHeight) {
+                        return curr;
+                    }
+                }
+                curr = curr.parentElement;
+            }
+        }
+
+        // 2. Dò theo thuộc tính container danh sách Cột 2
+        const candidates = Array.from(document.querySelectorAll('[data-surface*="thread_list"], [role="grid"], [role="navigation"] div, div[style*="overflow"]')).filter(el => {
+            try {
+                const rect = el.getBoundingClientRect();
+                if (rect.left >= 0 && rect.left <= 600 && rect.width >= 160 && rect.height >= 250) {
+                    const style = window.getComputedStyle(el);
+                    const overflowY = style.overflowY || '';
+                    return ['auto', 'scroll', 'overlay'].includes(overflowY) && el.scrollHeight > el.clientHeight;
+                }
+                return false;
+            } catch (_) { return false; }
+        });
+
+        if (candidates.length > 0) {
+            const withRows = candidates.find(c => c.querySelector('[data-surface*="thread_row"], [role="row"], a[href*="selected_item_id="]'));
+            if (withRows) return withRows;
+            candidates.sort((a, b) => b.scrollHeight - a.scrollHeight);
+            return candidates[0];
+        }
+
+        return null;
+    }
+
+    async function scrollPageSidebarDeeply({ maxRounds = 35, stepDistance = 600 } = {}) {
+        if (deepSidebarScanInProgress) {
+            console.log('[PageContent] Deep sidebar scan is already in progress, skipping duplicate.');
+            return { running: true, inProgress: true };
+        }
+        deepSidebarScanInProgress = true;
+        console.log(`[PageContent] 📜 Bắt đầu cuộn sâu Sidebar Business Suite (maxRounds=${maxRounds}, stepDistance=${stepDistance}px)...`);
+
+        try {
+            const scroller = findSidebarScrollContainer();
+            if (!scroller) {
+                console.warn('[PageContent] Không tìm thấy scroll container của Sidebar Business Suite. Quét tại chỗ.');
+                const threads = scanPageSidebarThreads(true);
+                return { totalThreads: threads?.length || 0, rounds: 0, reason: 'no_scroller_found' };
+            }
+
+            const allDiscovered = new Map();
+            let consecutiveNoGrowthRounds = 0;
+            let lastHeight = scroller.scrollHeight;
+            let actualRounds = 0;
+
+            const initialThreads = scanPageSidebarThreads(true) || [];
+            for (const t of initialThreads) allDiscovered.set(String(t.id), t);
+
+            for (let round = 1; round <= maxRounds; round++) {
+                actualRounds = round;
+                const prevCount = allDiscovered.size;
+
+                scroller.scrollTop += stepDistance;
+                scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+
+                // Chờ DOM settle và tải thêm dữ liệu ảo hóa (~1100ms)
+                await new Promise(r => setTimeout(r, 1100));
+
+                const roundThreads = scanPageSidebarThreads(true) || [];
+                for (const t of roundThreads) allDiscovered.set(String(t.id), t);
+
+                const newlyAdded = allDiscovered.size - prevCount;
+                const currentHeight = scroller.scrollHeight;
+
+                console.log(`[PageContent] [DEEP_SIDEBAR] Vòng ${round}/${maxRounds}: +${newlyAdded} threads (Tổng: ${allDiscovered.size}), scrollTop=${scroller.scrollTop}/${scroller.scrollHeight}`);
+
+                const isAtBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 50;
+                if (newlyAdded === 0 && (isAtBottom || currentHeight === lastHeight)) {
+                    consecutiveNoGrowthRounds++;
+                    if (consecutiveNoGrowthRounds >= 3) {
+                        console.log(`[PageContent] [DEEP_SIDEBAR] Dừng: 3 vòng liên tiếp không có hội thoại mới hoặc đã chạm đáy.`);
+                        break;
+                    }
+                } else {
+                    consecutiveNoGrowthRounds = 0;
+                }
+                lastHeight = currentHeight;
+            }
+
+            try {
+                scroller.scrollTo({ top: 0, behavior: 'smooth' });
+            } catch (_) {
+                scroller.scrollTop = 0;
+            }
+
+            console.log(`[PageContent] ✅ Hoàn thành cuộn sâu Sidebar: tìm thấy tổng cộng ${allDiscovered.size} hội thoại sau ${actualRounds} vòng.`);
+            return { totalThreads: allDiscovered.size, rounds: actualRounds, success: true };
+        } catch (err) {
+            console.error('[PageContent] Lỗi khi cuộn sâu Sidebar:', err);
+            throw err;
+        } finally {
+            deepSidebarScanInProgress = false;
+        }
+    }
+
+    function scanPageSidebarThreads(force = false) {
         try {
             const now = Date.now();
-            if (now - lastSidebarSyncTime < 1000) return;
+            if (!force && now - lastSidebarSyncTime < 1000) return [];
 
             // Yêu cầu MAIN world (injected.js) quét và đóng dấu fiber
             try { window.postMessage({ type: 'CRM_EXTRACT_BIZ_SIDEBAR_REQUEST' }, '*'); } catch (_) {}
@@ -2433,15 +2643,21 @@ if (isBusiness) {
                     // Avatar
                     const avatarUrl = extractAvatarFromElement(row);
 
-                    // Last message
+                    // Last message: dùng innerText của row (bền vững với mọi cấu
+                    // trúc DOM - span 0x0, div lồng nhau) thay vì leaf-node scan
+                    // vốn trả rỗng trên DOM Business Suite mới -> preview bị đè
+                    // thành "Chưa có tin nhắn". Bỏ qua: tên, giờ, thứ/tháng.
                     let lastMessage = '';
-                    const textNodes = Array.from(row.querySelectorAll('span, div')).filter(el => el.children.length === 0);
-                    for (let i = textNodes.length - 1; i >= 0; i--) {
-                        const t = (textNodes[i].textContent || '').trim();
-                        if (t && t !== name && !/^\d{1,2}:\d{2}$/.test(t) && !isInvalidText(t) && t.length > 1) {
-                            lastMessage = t;
-                            break;
-                        }
+                    const rowLines = String(row.innerText || '').split(/\n+/).map(s => s.trim()).filter(Boolean);
+                    for (let li = rowLines.length - 1; li >= 0; li--) {
+                        const t = rowLines[li];
+                        if (!t || t === name) continue;
+                        if (/^\d{1,2}:\d{2}$/.test(t)) continue;
+                        if (/^(?:T[2-7]|Thứ\s*\d|Tháng\s*\d+|Hôm qua|Hôm nay|Năm qua)$/i.test(t)) continue;
+                        if (/^\d+\s+Tháng\s*\d+$/i.test(t)) continue;
+                        if (isInvalidText(t)) continue;
+                        lastMessage = t;
+                        break;
                     }
 
                     const isOutgoingPreview = /^(?:Bạn:|You:)/i.test(lastMessage.trim());
@@ -2462,9 +2678,27 @@ if (isBusiness) {
                 } catch (_) {}
             }
 
+            // Chẩn đoán discovery: đủ để biết điểm gãy khi khách mới không vào CRM.
+            //   rows=0            -> selector thread_row hết khớp DOM
+            //   rows>0 stamped=0  -> cầu nối MAIN world (injected.js) chưa đóng dấu
+            //   threads=0         -> trích threadId/tên thất bại trên từng dòng
+            let stampedCount = 0;
+            for (const span of bizRowSpans) {
+                if (span.getAttribute('data-crm-thread-id')) stampedCount += 1;
+            }
+            const scanDiag = `rows=${bizRowSpans.length} stamped=${stampedCount} threads=${discoveredThreads.length}`;
+            if (scanDiag !== lastSidebarScanDiag) {
+                lastSidebarScanDiag = scanDiag;
+                if (bizRowSpans.length > 0 && stampedCount === 0) {
+                    console.warn(`[PageContent] ⚠️ Sidebar scan: ${scanDiag} — row chưa được đóng dấu thread-id, kiểm tra cầu nối MAIN world (injected.js)`);
+                } else {
+                    console.log(`[PageContent] 🔎 Sidebar scan: ${scanDiag}`);
+                }
+            }
+
             if (discoveredThreads.length > 0) {
                 const currentHash = discoveredThreads.map(t => `${t.id}:${t.contact_name}:${t.last_message}:${t.avatar_url || ''}`).join('|');
-                if (currentHash !== lastSidebarSyncHash) {
+                if (force || currentHash !== lastSidebarSyncHash) {
                     lastSidebarSyncHash = currentHash;
                     lastSidebarSyncTime = now;
                     console.log(`[PageContent] 🚀 Tự động cào được ${discoveredThreads.length} hội thoại Page:`, discoveredThreads.map(t => `${t.contact_name} (${t.id})`));
@@ -2477,8 +2711,10 @@ if (isBusiness) {
                     });
                 }
             }
+            return discoveredThreads;
         } catch (e) {
             console.warn('[PageContent] Lỗi scanPageSidebarThreads:', e.message);
+            return [];
         }
     }
 

@@ -177,8 +177,18 @@ const QUEUED_DISPATCH_IDEMPOTENCY_MS = 10 * 60 * 1000;
 // invalidating its navigation token and returning navigation_superseded.
 const personalHistoryChains = new Map();
 // A failed upload can leave Messenger's hidden attachment draft mounted in
-// the composer. Track only tabs where our own media operation failed so a
-// later text send cannot accidentally inherit that stale draft.
+// Track active Page tab navigation locks so background sweeps do not navigate
+// the single Business Suite tab away while the user is chatting or sending messages.
+const pageNavigationLockThreadId = new Map(); // page_id -> thread_id
+const pageNavigationLockUntil = new Map();    // page_id -> timestamp ms
+
+function extractBareThreadId(threadId) {
+  if (!threadId) return '';
+  const str = String(threadId).trim();
+  const parts = str.split(':').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : str;
+}
+
 const dirtyAttachmentDraftTabs = new Set();
 function runPersonalSendSerialized(accountId, operation) {
   const key = String(accountId || user_id || 'default');
@@ -1044,7 +1054,14 @@ function connectWebSocket() {
           const tabs = await chrome.tabs.query({ url: ['*://business.facebook.com/*'] });
           for (const tab of tabs) {
             if (!tab?.id || (pageId && !String(tab.url || '').includes(`asset_id=${pageId}`))) continue;
-            chrome.tabs.sendMessage(tab.id, { type: 'SCAN_PAGE_SIDEBAR', data: { page_id: pageId } }).catch(() => {});
+            chrome.tabs.sendMessage(tab.id, {
+              type: 'SCAN_PAGE_SIDEBAR',
+              data: {
+                page_id: pageId,
+                deep: Boolean(message.data?.deep),
+                max_rounds: Number(message.data?.max_rounds || 35)
+              }
+            }).catch(() => {});
           }
           break;
         }
@@ -1069,19 +1086,29 @@ function connectWebSocket() {
           {
             const isUserClick = ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].includes(String(message.data?.reason || ''));
             if (isUserClick) {
-              // Lock the history tab to the thread the user just clicked.
-              // Background sync for any other thread is now blocked.
-              userNavigationLockThreadId = String(message.data?.thread_id || '');
-              if (bulkHistorySyncInFlight) {
-                bulkHistorySyncAbortRequested = true;
-                console.log('[FB Engine] [BULK_HISTORY] Abort requested by user-click navigation.');
+              if (message.data?.page_id) {
+                const pid = String(message.data.page_id);
+                const tid = String(message.data?.thread_id || '');
+                pageNavigationLockThreadId.set(pid, tid);
+                pageNavigationLockUntil.set(pid, Date.now() + 30000);
+                console.log(`[FB Engine] [PAGE_NAV_LOCK] Business Suite tab for page=${pid} locked to thread=${tid}`);
+              } else {
+                // Lock the personal history tab to the thread the user just clicked.
+                // Background sync for any other personal thread is now blocked.
+                userNavigationLockThreadId = String(message.data?.thread_id || '');
+                if (bulkHistorySyncInFlight) {
+                  bulkHistorySyncAbortRequested = true;
+                  console.log('[FB Engine] [BULK_HISTORY] Abort requested by user-click navigation.');
+                }
+                console.log('[FB Engine] [NAV_LOCK] History tab locked to thread:', userNavigationLockThreadId);
               }
-              console.log('[FB Engine] [NAV_LOCK] History tab locked to thread:', userNavigationLockThreadId);
             }
-            const historyKey = `${message.data?.account_id || user_id}:history`;
+            const laneKey = message.data?.page_id
+              ? `page:${message.data.page_id}`
+              : `${message.data?.account_id || user_id}:history`;
             await runPersonalHistorySerialized(
-              historyKey,
-              () => runPersonalHistoryWithDeadline(historyKey, message.data, () => handleSyncThreadMessages(message.data)),
+              laneKey,
+              () => runPersonalHistoryWithDeadline(laneKey, message.data, () => handleSyncThreadMessages(message.data)),
               isUserClick
             );
           }
@@ -1490,6 +1517,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'PAGE_SCROLLER_DEBUG') {
     sendToBackend('PAGE_SCROLLER_DEBUG', message.data);
+  }
+
+  // Crawler từ chối thu thập vì khung chat đang mở KHÁC thread được yêu cầu.
+  // Relay về server để markThreadSyncResult nhả in-flight lock của lane.
+  if (message.type === 'PAGE_THREAD_ROUTE_MISMATCH') {
+    const msgData = message.data || {};
+    console.warn(`[FB Engine] 🚫 PAGE_THREAD_ROUTE_MISMATCH thread=${msgData.thread_id} expected=${msgData.expected_bare_id || 'unknown'} current=${msgData.current_thread_id || 'unknown'}`);
+    sendToBackend('THREAD_MESSAGES_SYNCED', {
+      account_id: user_id || msgData.account_id,
+      thread_id: msgData.thread_id,
+      page_id: msgData.page_id || null,
+      messages: [],
+      reason: 'thread_route_mismatch',
+      mode: 'page_sync'
+    });
   }
 
   if (message.type === 'NEW_PAGE_MESSAGE_FROM_DOM') {
@@ -3626,8 +3668,16 @@ async function typeAndSubmitComposer(tabId, content) {
 async function handleSendPageMessage({ thread_id, content, page_id, client_message_id, attachment = null, attachmentManifest = null, expected_contact_name = null }) {
   console.log(`[FB Engine] 📤 Bắt đầu gửi qua Business Suite: page_id=${page_id} thread=${thread_id} expected_name=${expected_contact_name || 'none'}`);
 
-  // Extract recipient PSID from thread_id (format is "sourceId:recipientPsid" or just "recipientPsid")
-  const recipientPsid = thread_id.includes(':') ? thread_id.split(':')[1] : thread_id;
+  if (page_id) {
+    const pid = String(page_id);
+    const tid = String(thread_id || '');
+    pageNavigationLockThreadId.set(pid, tid);
+    pageNavigationLockUntil.set(pid, Date.now() + 30000);
+    console.log(`[FB Engine] [PAGE_NAV_LOCK] Send action locked page=${pid} to thread=${tid}`);
+  }
+
+  // Extract recipient PSID from thread_id (format is "page:pageId:recipientPsid" or "sourceId:recipientPsid" or just "recipientPsid")
+  const recipientPsid = extractBareThreadId(thread_id);
   const targetUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(page_id)}&mailbox_id=${encodeURIComponent(page_id)}&selected_item_id=${encodeURIComponent(recipientPsid)}&thread_type=FB_MESSAGE`;
 
   const role = `page:${page_id}`;
@@ -5235,6 +5285,14 @@ async function getCurrentThreadIdInTab(tabId) {
     const res = await chrome.scripting.executeScript({
       target: { tabId },
       func: () => {
+        // URL là trạng thái định tuyến CHÍNH THỨC của Facebook (selected_item_id
+        // được FB tự ghi khi mở hội thoại) - ưu tiên tuyệt đối. aria-selected
+        // trên sidebar có thể stale và trỏ sang hội thoại khác sau khi
+        // Business Suite điều hướng mà chưa kịp cập nhật highlight.
+        const urlMatch = location.href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/) ||
+                         location.href.match(/[?&](?:selected_item_id|thread_id)=(\d+)/);
+        if (urlMatch) return decodeURIComponent(urlMatch[1]);
+
         const selected = document.querySelector('[role="navigation"] [aria-selected="true"], [role="gridcell"] [aria-selected="true"], [data-surface*="thread_list"] [aria-selected="true"], [aria-selected="true"], [aria-current="page"], [aria-current="true"]');
         if (selected) {
           const links = selected.tagName === 'A' ? [selected] : Array.from(selected.querySelectorAll('a[href]'));
@@ -5243,10 +5301,6 @@ async function getCurrentThreadIdInTab(tabId) {
             if (m) return m[1];
           }
         }
-
-        const match = location.href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/) ||
-                      location.href.match(/[?&](?:selected_item_id|thread_id)=(\d+)/);
-        if (match) return decodeURIComponent(match[1]);
 
         return null;
       }
@@ -5302,13 +5356,91 @@ function waitForTabComplete(tabId, timeoutMs = 15000) {
   });
 }
 
+// Đọc các tên ứng viên đang hiển thị trên header khung chat Business Suite
+// (so khớp danh tính sau điều hướng - không tin vào URL/aria-selected một mình).
+// Trả về MẢNG dòng-text ứng viên (thứ tự trên->trái) vì header có nhiều phần tử
+// data-surface, dòng đầu của wrapper có thể không phải tên khách.
+async function getVisibleBizContactNames(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const candidates = Array.from(document.querySelectorAll('[data-surface*="detail_column"]')).sort((a, b) => {
+          const ra = a.getBoundingClientRect();
+          const rb = b.getBoundingClientRect();
+          return (Math.round(ra.top) - Math.round(rb.top)) || (Math.round(ra.left) - Math.round(rb.left));
+        });
+        const names = [];
+        for (const el of candidates) {
+          if (el.closest('[role="complementary"], aside')) continue;
+          const lines = (el.textContent || '').split('\n').map((s) => s.trim()).filter(Boolean);
+          for (const txt of lines.slice(0, 3)) {
+            if (txt && txt.length >= 2 && txt.length <= 80 && !/^\d+$/.test(txt) && !names.includes(txt)) {
+              names.push(txt);
+            }
+          }
+          if (names.length >= 6) break;
+        }
+        return names;
+      }
+    });
+    return Array.isArray(results?.[0]?.result) ? results[0].result : [];
+  } catch (_) { return []; }
+}
+
+function looseBizNameMatch(a, b) {
+  const norm = (s) => String(s || '').toLowerCase().normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/[^a-z0-9]/g, '');
+  const na = norm(a);
+  const nb = norm(b);
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
+// Verify kiên nhẫn: SPA cập nhật URL/sidebar TRƯỚC khi header render lại tên,
+// nên lần đọc đầu có thể thấy tên của hội thoại TRƯỚC. Poll tới timeoutMs;
+// header không đọc được -> tin vào ID (không abort nhầm); hết giờ vẫn sai -> fail.
+async function verifyBizHeaderIdentity(tabId, contactName, timeoutMs = 3500) {
+  if (!contactName) return { ok: true, visible: null };
+  const deadline = Date.now() + timeoutMs;
+  let lastNames = [];
+  while (Date.now() < deadline) {
+    const names = await getVisibleBizContactNames(tabId);
+    if (!names.length) return { ok: true, visible: null }; // không đọc được header -> tin vào ID
+    lastNames = names;
+    if (names.some((n) => looseBizNameMatch(n, contactName))) return { ok: true, visible: names[0] };
+    await new Promise((r) => setTimeout(r, 350));
+  }
+  console.warn(`[FB Engine] [BIZ_IDENTITY] ❌ Header "${lastNames.slice(0, 2).join('" | "')}" không khớp "${contactName}" sau ${timeoutMs}ms`);
+  return { ok: false, visible: lastNames[0] || null };
+}
+
 async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId = null, navigationToken = null, contactName = null, options = {}) {
   const targetId = String(targetThreadId);
   const forceCleanViewport = options?.forceCleanViewport === true;
   const isBiz = isBusinessSuiteUrl(tab.url);
-  const currentFromUrl = isBiz ? null : extractThreadIdFromMessengerUrl(tab.url);
+  // Verify danh tính cuối cùng cho Business Suite: URL/aria-selected có thể
+  // stale (khớp ID nhưng khung chat đang mount hội thoại KHÁC - reproduce
+  // 2026-09-19: yêu cầu Phạm Hùng, tab đang mở Lê Kim Thanh Ngân).
+  const verifyBizIdentity = async () => {
+    if (!contactName) return true; // không có tên để đối chiếu -> tin vào ID
+    const verdict = await verifyBizHeaderIdentity(tab.id, contactName, 3500);
+    return verdict.ok;
+  };
+  // URL tab là bằng chứng định tuyến chính thức: khi Facebook TỰ ghi
+  // selected_item_id=<target> vào URL, hội thoại đó đã mở - tin tuyệt đối,
+  // không veto bằng header (tránh race header render chậm hơn URL).
+  const currentFromUrl = isBiz
+    ? (String(tab.url || '').match(/[?&](?:selected_item_id|thread_id)=(\d+)/)?.[1] || null)
+    : extractThreadIdFromMessengerUrl(tab.url);
   const currentFromPage = currentFromUrl || await getCurrentThreadIdInTab(tab.id);
   if (!forceCleanViewport && String(currentFromPage) === targetId) {
+    if (isBiz) {
+      if (currentFromUrl) return true; // URL khớp -> Facebook đã route đúng
+      return await verifyBizIdentity();
+    }
     return true;
   }
 
@@ -5364,6 +5496,8 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
           await delay(200);
           const currentId = await getCurrentThreadIdInTab(tab.id);
           if (String(currentId) === targetId) {
+            // URL/aria khớp chưa đủ - header phải khớp tên mới tin SPA đã đổi hội thoại
+            if (!(await verifyBizIdentity())) break;
             console.log(`[FB Engine] ✅ Navigation Business Suite tới thread ${targetId} thành công (dom_biz_sidebar_click)`);
             return true;
           }
@@ -5381,7 +5515,7 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
       await delay(1500);
 
       const currentId = await getCurrentThreadIdInTab(tab.id);
-      if (String(currentId) === targetId) return true;
+      if (String(currentId) === targetId) return await verifyBizIdentity();
       console.warn(`[FB Engine] Business Suite chưa vào đúng thread. requested=${targetId}, current=${currentId || 'unknown'}`);
       return false;
     } catch (e) {
@@ -5555,7 +5689,7 @@ async function handleMessageRequestAction(data) {
     if (!tab?.id) throw new Error('Không tìm thấy tab Messenger của tài khoản.');
     await chrome.tabs.update(tab.id, { active: true }).catch(() => null);
     const navigationToken = beginPersonalNavigation(accountId);
-    const onThread = await ensureTabOnThread(tab, threadId.includes(':') ? threadId.split(':').pop() : threadId, data.thread_url || null, null, navigationToken, data.contact_name || null);
+    const onThread = await ensureTabOnThread(tab, extractBareThreadId(threadId), data.thread_url || null, null, navigationToken, data.contact_name || null);
     if (!onThread) throw new Error('Không mở đúng được hội thoại Tin nhắn chờ trên Messenger.');
     let snapshot = { controls: [], contactUnavailable: false };
     for (let attempt = 0; attempt < 12; attempt += 1) {
@@ -5619,8 +5753,26 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     });
     return;
   }
+  if (page_id && !isUserDrivenReason) {
+    const pid = String(page_id);
+    const lockedUntil = pageNavigationLockUntil.get(pid) || 0;
+    const lockedThread = pageNavigationLockThreadId.get(pid);
+    if (Date.now() < lockedUntil && lockedThread && lockedThread !== String(thread_id || '')) {
+      console.log(`[FB Engine] [PAGE_NAV_LOCK] Skipping background sync for thread=${thread_id} on page=${pid} — tab locked to ${lockedThread}`);
+      sendToBackend('THREAD_MESSAGES_SYNCED', {
+        account_id: account_id || user_id,
+        thread_id,
+        page_id: pid,
+        messages: [],
+        reason: 'page_locked_by_user_action',
+        mode,
+        cursor
+      });
+      return;
+    }
+  }
   const targetAcc = account_id || user_id;
-  const navigationThreadId = String(external_thread_id || thread_id).split(':').pop();
+  const navigationThreadId = extractBareThreadId(external_thread_id || thread_id);
   const usesVisibleCrmTab = !page_id && !_history_tab_id
     && ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].includes(baseReason);
   const navigationToken = (page_id || _history_tab_id)
@@ -5692,13 +5844,36 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   console.log(`[DOM Sync Verification] requested thread: ${thread_id} | current Facebook URL: ${updatedTab?.url || tab.url} | current thread id: ${currentTabThreadId}`);
 
   if (onTargetThread) crmHistoryThreadByTab.set(tab.id, navigationThreadId);
-  if (!onTargetThread || (currentTabThreadId && String(currentTabThreadId) !== navigationThreadId)) {
-    console.warn(`[DOM Sync Verification] ⚠️ Tab Facebook đang mở thread ${currentTabThreadId || 'khác'}, không khớp thread ${thread_id}. Result count: 0. Hủy sync để tránh ghi nhầm DB.`);
+
+  // Page thread yêu cầu danh tính NGHIÊM NGẶT: URL/aria có thể trả null (URL
+  // thiếu selected_item_id) hoặc stale. Khi ID không đọc được, chấp nhận nếu
+  // tên trên header khung chat khớp contact_name; ngược lại -> mismatch.
+  let pageIdentityOk = true;
+  let routeDetail = null;
+  if (page_id) {
+    if (onTargetThread && currentTabThreadId != null && String(currentTabThreadId) === String(navigationThreadId)) {
+      pageIdentityOk = true;
+    } else if (contact_name) {
+      const verdict = await verifyBizHeaderIdentity(tab.id, contact_name, 3500);
+      pageIdentityOk = verdict.ok;
+      routeDetail = verdict.visible || 'không đọc được';
+      if (!pageIdentityOk) {
+        console.warn(`[FB Engine] [PAGE_IDENTITY] ❌ Header "${routeDetail}" không khớp "${contact_name}" cho thread ${thread_id}`);
+      }
+    } else {
+      pageIdentityOk = false;
+    }
+  }
+
+  if (!onTargetThread || !pageIdentityOk || (currentTabThreadId && String(currentTabThreadId) !== navigationThreadId)) {
+    console.warn(`[DOM Sync Verification] ⚠️ Tab Facebook đang mở thread ${currentTabThreadId || 'khác'} (header: ${routeDetail || 'n/a'}), không khớp thread ${thread_id}. Hủy sync để tránh ghi nhầm DB.`);
     sendToBackend('THREAD_MESSAGES_SYNCED', {
       account_id: targetAcc,
       thread_id,
+      page_id: page_id || null,
       messages: [],
-      reason: 'url_mismatch',
+      reason: page_id ? 'thread_route_mismatch' : 'url_mismatch',
+      route_detail: page_id ? routeDetail : null,
       mode,
       cursor
     });
@@ -5710,7 +5885,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     const pageMode = mode === 'ondemand_older' ? 'page_scroll_older' : (mode === 'ondemand_viewport' ? 'ondemand_viewport' : 'page_initial');
     chrome.tabs.sendMessage(tab.id, {
       type: 'REQUEST_PAGE_BATCH_SYNC',
-      data: { account_id: targetAcc, thread_id, page_id, mode: pageMode, cursor }
+      data: { account_id: targetAcc, thread_id, page_id, mode: pageMode, cursor, expected_bare_id: navigationThreadId, contact_name: contact_name || null }
     }).catch(async (error) => {
       console.warn('[FB Engine] Page content script unavailable:', error?.message || error);
       if (error?.message && error.message.includes('Receiving end does not exist')) {
@@ -5722,7 +5897,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           await new Promise(r => setTimeout(r, 600));
           return chrome.tabs.sendMessage(tab.id, {
             type: 'REQUEST_PAGE_BATCH_SYNC',
-            data: { account_id: targetAcc, thread_id, page_id, mode: pageMode, cursor }
+            data: { account_id: targetAcc, thread_id, page_id, mode: pageMode, cursor, expected_bare_id: navigationThreadId, contact_name: contact_name || null }
           });
         } catch (injectErr) {
           console.warn('[FB Engine] Re-inject page scripts thất bại:', injectErr.message);
@@ -7204,7 +7379,7 @@ async function handleTriggerMessengerCall({ thread_id, account_id = user_id, cal
     // Execute call trigger in background Messenger tab so user stays on CRM page (http://localhost:5050)
     // while Facebook's "Cuộc gọi qua Messenger" popup window opens on top.
 
-    const recipientPsid = thread_id.includes(':') ? thread_id.split(':')[1] : thread_id;
+    const recipientPsid = extractBareThreadId(thread_id);
     const onThread = await ensureTabOnThread(tab, recipientPsid, null);
     if (!onThread) {
       sendToBackend('CALL_TRIGGER_RESULT', { thread_id, success: false, error: 'Không thể điều hướng tới cuộc trò chuyện' });
