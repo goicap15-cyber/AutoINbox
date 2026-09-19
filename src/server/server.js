@@ -620,6 +620,13 @@ function sweepAbandonedPendingProfiles() {
       }
       if (ageMs < PENDING_SWEEP_MIN_AGE_MS) continue;
       try {
+        // Phiên bỏ hoang CÓ THỂ còn Chrome đang mở (cửa sổ BS/popup phiền) -
+        // kill tree theo profile trước rồi mới xóa, nếu không sweep sẽ bị
+        // khóa file và cửa sổ zombie sống mãi (reproduced 2026-09-19).
+        const killPs = `Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue | Where-Object { ($_.CommandLine -replace '\\','/') -like '*${entry.name.replace(/'/g, "''")}*' } | ForEach-Object { taskkill.exe /PID $_.ProcessId /T /F | Out-Null }`;
+        const encodedKill = Buffer.from(killPs, 'utf16le').toString('base64');
+        spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedKill], { timeout: 15000, windowsHide: true });
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 800); // sleep dong bo (ham khong async)
         fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
         removed++;
         console.log(`[ProfileCleanup] Đã xóa profile pending bỏ hoang: ${entry.name}`);
@@ -3559,18 +3566,19 @@ wss.on('connection', (ws, req) => {
         }
         case 'UPDATE_LINK_PREVIEW_IMAGE': {
           try {
-            const { url_hash, image_url } = msg.data || {};
+            const { url_hash, image_url, title } = msg.data || {};
             const hash = String(url_hash || '');
             if (!/^[0-9a-f]{40}$/.test(hash)) break;
-            if (!image_url || !/^https?:\/\//i.test(String(image_url))) break;
+            const safeTitle = (typeof title === 'string' && title.trim()) ? title.trim().slice(0, 200) : null;
+            if ((!image_url || !/^https?:\/\//i.test(String(image_url))) && !safeTitle) break;
             // Tai anh ve local - URL lookaside/scontent cua FB la tam thoi
             let stored = String(image_url);
             try {
               const localFile = await saveAvatarFromBase64OrUrl(stored, 'link_' + hash);
               if (localFile) stored = '/api/avatars/' + localFile;
             } catch (_) {}
-            db.prepare('UPDATE link_previews SET image_url = ? WHERE url_hash = ?')
-              .run(stored, hash);
+            db.prepare('UPDATE link_previews SET image_url = COALESCE(?, image_url), title = COALESCE(?, title) WHERE url_hash = ?')
+              .run(stored, safeTitle, hash);
             console.log('[LINK_PREVIEW] Ảnh bổ sung từ extension cho hash ' + hash.slice(0, 10) + '…');
           } catch (_) {}
           break;
@@ -4630,13 +4638,16 @@ app.post('/api/accounts/:id/start', async (req, res) => {
   // Start every Page already connected to this Facebook account in its own
   // Chrome profile as part of Connect Facebook. This keeps Page and Personal
   // Messenger independent and does not modify either existing process.
-  const pageLaunches = activePageSourcesForAccount(accountId).map((source) =>
-    processManager.startPageProcess(source.page_id, accountId).catch((error) => {
+  // Tuần tự hóa launch Page: chạy song song từng bị race startAccountProcess
+  // (3 Page = 3 lần launch Chrome tranh nhau - reproduced 2026-09-19). Mỗi
+  // Page vẫn mở Business Suite tab riêng trong CÙNG Chrome account.
+  for (const source of activePageSourcesForAccount(accountId)) {
+    try {
+      await processManager.startPageProcess(source.page_id, accountId);
+    } catch (error) {
       console.warn(`[PageSync] Could not launch Page ${source.page_id} on connect:`, error.message);
-      return false;
-    })
-  );
-  await Promise.all(pageLaunches);
+    }
+  }
 
   res.json({ success: true, page_windows_requested: pageLaunches.length });
 });

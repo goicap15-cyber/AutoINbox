@@ -758,10 +758,8 @@ function decodeFbHtmlEntities(value) {
 // dang ngu -> khong con race mat ket qua. Tab duoc dong trong handler.
 async function fetchOwnProfileViaTab(accountId) {
   try {
-    chrome.tabs.create({
-      url: 'https://www.facebook.com/profile.php?id=' + encodeURIComponent(String(accountId)) + '&crm_own_profile=1',
-      active: true
-    }, () => { void chrome.runtime.lastError; });
+    await closeOrphanMarkerTabs();
+    openMarkerTabInMessengerWindow('https://www.facebook.com/profile.php?id=' + encodeURIComponent(String(accountId)) + '&crm_own_profile=1');
   } catch (_) {}
   return null;
 }
@@ -832,14 +830,36 @@ function flushPendingPageProfiles() {
     });
   }
 }
-async function fetchPageProfileViaTab(pageId) {
+// Tab phu (profile/link-image) phai nam TRONG cua so Messenger ca nhan -
+// tao ngoai windowId khi moi cua so dang an/parked thi Chrome sinh mot cua
+// so rieng nho (133x38) o goc - chinh la "2 cai gi do" user thay.
+async function openMarkerTabInMessengerWindow(url) {
   try {
-    chrome.tabs.create({
-      url: 'https://www.facebook.com/profile.php?id=' + encodeURIComponent(String(pageId)) + '&crm_page_profile=' + encodeURIComponent(String(pageId)),
-      active: true
-    }, () => { void chrome.runtime.lastError; });
+    const wins = await chrome.windows.getAll({ populate: true });
+    const target = wins.find((w) => (w.tabs || []).some((t) => /facebook\.com\/(messages|business\.facebook)/.test(t.url || '')));
+    chrome.tabs.create({ url, active: false, pinned: true, windowId: target ? target.id : undefined }, () => { void chrome.runtime.lastError; });
   } catch (_) {}
 }
+// Quet don tab marker mo coi (mat ket noi SW luc content script gui ket qua,
+// hoac redirect lam handler khong chay) - goi khi SW thuc day va truoc khi
+// mo tab marker moi.
+async function closeOrphanMarkerTabs() {
+  try {
+    const tabs = await chrome.tabs.query({ url: ['*://www.facebook.com/*'] });
+    for (const t of tabs) {
+      if (/crm_link_img=|crm_page_profile=|crm_own_profile=/.test(t.url || '') && t.id != null) {
+        try { await chrome.tabs.remove(t.id); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+}
+async function fetchPageProfileViaTab(pageId) {
+  try {
+    await closeOrphanMarkerTabs();
+    openMarkerTabInMessengerWindow('https://www.facebook.com/profile.php?id=' + encodeURIComponent(String(pageId)) + '&crm_page_profile=' + encodeURIComponent(String(pageId)));
+  } catch (_) {}
+}
+closeOrphanMarkerTabs();
 chrome.runtime.onMessage.addListener((msg, sender) => {
   try {
     if (msg && msg.type === 'CRM_LINK_IMAGE' && msg.hash && /^[0-9a-f]{40}$/.test(String(msg.hash))) {
@@ -1159,8 +1179,13 @@ function connectWebSocket() {
             if (!/^[0-9a-f]{40}$/.test(hash) || !/^https?:\/\//i.test(linkUrl)) break;
             if (linkImageFetchedFor.has(hash)) break;
             linkImageFetchedFor.add(hash);
-            const sep = linkUrl.includes('?') ? '&' : '?';
-            chrome.tabs.create({ url: linkUrl + sep + 'crm_link_img=' + hash, active: false }, () => { void chrome.runtime.lastError; });
+            // Gửi cho content script trong tab Messenger có sẵn (fetch
+            // same-origin trong đó) — KHÔNG mở tab/window mới nữa.
+            const msgTabsL = await chrome.tabs.query({ url: ['*://www.facebook.com/messages/*', '*://web.facebook.com/messages/*'] });
+            const liveTabL = (msgTabsL || []).find((t) => t.id != null);
+            if (liveTabL) {
+              chrome.tabs.sendMessage(liveTabL.id, { type: 'CRM_FETCH_LINK_PREVIEW', url: linkUrl, hash }).catch(() => {});
+            }
           } catch (_) {}
           break;
         }

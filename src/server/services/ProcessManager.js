@@ -84,25 +84,32 @@ if ($profile) {
   if ($profileProcs) { foreach ($c in $profileProcs) { $targetPids += $c.ProcessId } }
 }
 
-$allChrome = Get-Process -Name 'chrome' -ErrorAction SilentlyContinue
-$processedCount = 0
-foreach ($p in $allChrome) {
-  if ($targetPids.Count -eq 0 -or $targetPids -contains $p.Id) {
-    if ($p.MainWindowHandle -ne 0) {
-      $hwnd = $p.MainWindowHandle
-      $ex = [WinHelper]::GetWindowLong($hwnd, -20)
-      $ex = ($ex -band -bnot 0x00040000) -bor 0x00000080
-      [WinHelper]::SetWindowLong($hwnd, -20, $ex) | Out-Null
-      # Keep Chrome's top-level window shown so Chromium continues rendering
-      # Messenger DOM in background tabs. SW_HIDE made document visibility
-      # hidden and caused request/history scrapes to return partial results.
-      [WinHelper]::ShowWindow($hwnd, 4) | Out-Null
-      ${keepWindowOnScreen ? '' : '[WinHelper]::SetWindowPos($hwnd, [IntPtr]::Zero, -32000, -32000, 0, 0, 0x0015) | Out-Null'}
-      $processedCount++
+# Retry: window co the mount cham hon thoi diem quet - quet lai den khi bat
+# duoc moi thoi (truoc day quet 1 lan, truot la hien tuong "an luc duoc luc khong")
+$processedTotal = 0
+for ($attempt = 0; $attempt -lt 16; $attempt++) {
+  $allChrome = Get-Process -Name 'chrome' -ErrorAction SilentlyContinue
+  $processedCount = 0
+  foreach ($p in $allChrome) {
+    if ($targetPids.Count -eq 0 -or $targetPids -contains $p.Id) {
+      if ($p.MainWindowHandle -ne 0) {
+        $hwnd = $p.MainWindowHandle
+        $ex = [WinHelper]::GetWindowLong($hwnd, -20)
+        $ex = ($ex -band -bnot 0x00040000) -bor 0x00000080
+        [WinHelper]::SetWindowLong($hwnd, -20, $ex) | Out-Null
+        # Keep Chrome's top-level window shown so Chromium continues rendering
+        # Messenger DOM in background tabs. SW_HIDE made document visibility
+        # hidden and caused request/history scrapes to return partial results.
+        [WinHelper]::ShowWindow($hwnd, 4) | Out-Null
+        ${keepWindowOnScreen ? '' : '[WinHelper]::SetWindowPos($hwnd, [IntPtr]::Zero, -32000, -32000, 0, 0, 0x0015) | Out-Null'}
+        $processedCount++
+      }
     }
   }
+  if ($processedCount -gt 0) { break }
+  Start-Sleep -Milliseconds 500
 }
-if ($processedCount -eq 0) {
+if ($processedTotal -eq 0 -and $processedCount -eq 0) {
   [Console]::Error.WriteLine("NO_WINDOW_FOUND")
   exit 1
 }
@@ -211,6 +218,21 @@ function cleanStaleInstalledExtension(profileDir) {
           }
         }
       } catch (_) { /* Preferences hỏng - bỏ qua, Chrome sẽ tự dựng lại */ }
+    }
+  } catch (_) {}
+}
+
+// Chrome bị kill (taskkill/restart app) ghi exit_type='Crashed' -> lần mở sau
+// hiện popup "Restore pages?" (cửa sổ phụ gây màn hình đen thứ 2). Đặt lại
+// exit_type='Normal' + launch kèm flag chặn bubble => hết popup.
+function suppressCrashRestoreBubble(profileDir) {
+  try {
+    const prefsPath = path.join(profileDir, 'Default', 'Preferences');
+    if (!fs.existsSync(prefsPath)) return;
+    const prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8'));
+    if (prefs.profile && prefs.profile.exit_type && prefs.profile.exit_type !== 'Normal') {
+      prefs.profile.exit_type = 'Normal';
+      fs.writeFileSync(prefsPath, JSON.stringify(prefs));
     }
   } catch (_) {}
 }
@@ -369,6 +391,7 @@ class ProcessManager {
     }
     ensureProfilePermissions(profileDir);
     cleanStaleInstalledExtension(profileDir);
+    suppressCrashRestoreBubble(profileDir);
 
     const chromeExecutable = this.getInteractiveSetupChromeExecutable();
     const absExtPath = path.resolve(this.extensionPath).replace(/\\/g, '/');
@@ -411,6 +434,8 @@ class ProcessManager {
         defaultViewport: null,
         enableExtensions: true,
         args: [
+          '--hide-crash-restore-bubble',
+          '--disable-session-crashed-bubble',
           '--start-maximized',
           '--no-first-run',
           '--no-default-browser-check',
@@ -486,6 +511,14 @@ class ProcessManager {
     const safePageId = String(pageId || '').trim();
     const safeAccountId = String(accountId || '').trim();
     if (!/^\d+$/.test(safePageId) || !safeAccountId) return false;
+    // Khoa per-account: nhieu Page goi cung luc thi xep hang, tranh race
+    // startAccountProcess nhieu lan (sinh nhieu cua so Chrome).
+    this._pageTabLocks = this._pageTabLocks || new Map();
+    const prev = this._pageTabLocks.get(safeAccountId) || Promise.resolve();
+    let release;
+    const lock = new Promise((r) => { release = r; });
+    this._pageTabLocks.set(safeAccountId, prev.then(() => lock));
+    await prev.catch(() => {});
     const targetUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(safePageId)}&mailbox_id=${encodeURIComponent(safePageId)}&thread_type=FB_MESSAGE`;
 
     let entry = this.processes.get(safeAccountId);
@@ -524,6 +557,8 @@ class ProcessManager {
     } catch (error) {
       console.warn(`[ProcessManager] Không thể mở Business Suite cho Page ${safePageId}:`, error.message);
       return false;
+    } finally {
+      release();
     }
   }
 
@@ -570,6 +605,7 @@ class ProcessManager {
     }
     ensureProfilePermissions(profileDir);
     cleanStaleInstalledExtension(profileDir);
+    suppressCrashRestoreBubble(profileDir);
 
     const chromeExecutable = this.getInteractiveSetupChromeExecutable();
     const absExtPath = path.resolve(this.extensionPath).replace(/\\/g, '/');
@@ -614,6 +650,8 @@ class ProcessManager {
         defaultViewport: null,
         enableExtensions: true,
         args: [
+          '--hide-crash-restore-bubble',
+          '--disable-session-crashed-bubble',
           '--start-maximized',
           '--no-first-run',
           '--no-default-browser-check',
@@ -782,6 +820,7 @@ public class Win32UnhideHelper {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int m);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int m);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
   [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder text, int count);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
 
@@ -862,6 +901,10 @@ foreach ($handle in $handles) {
   }
   [Win32UnhideHelper]::ShowWindow($handle, 3) | Out-Null
   [Win32UnhideHelper]::SetForegroundWindow($handle) | Out-Null
+  # Ep Chromium ve lai: cua so tu -32000 ve man hinh thuong bi frame cu/black
+  # vi GPU khong repaint - FRAMECHANGED + RedrawWindow toan bo con lại ép vẽ.
+  [Win32UnhideHelper]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, 0, 0, 0x0020) | Out-Null
+  [Win32UnhideHelper]::RedrawWindow($handle, [IntPtr]::Zero, [IntPtr]::Zero, 0x0585) | Out-Null
   $processedCount++
 }
 

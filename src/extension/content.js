@@ -136,6 +136,41 @@
   try {
     if (chrome?.runtime?.onMessage) {
       chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // CRM_FETCH_LINK_PREVIEW: doc og:image + og:title cho link preview card
+  // (dung indexOf thay regex de tranh loi nhay quote trong chuoi XML meta)
+  if (msg && msg.type === 'CRM_FETCH_LINK_PREVIEW' && msg.url && msg.hash) {
+    (async () => {
+      let image = null, title = null;
+      try {
+        const res = await fetch(msg.url, { credentials: 'include' });
+        const html = (await res.text()).slice(0, 2000000);
+        const pickOg = (prop) => {
+          let idx = html.indexOf('"' + prop + '"');
+          while (idx >= 0) {
+            const win = html.slice(Math.max(0, idx - 140), idx + 220);
+            const ci = win.indexOf('content="');
+            if (ci >= 0) {
+              const start = ci + 9;
+              const endQ = win.indexOf('"', start);
+              if (endQ > start) {
+                return win.slice(start, endQ)
+                  .replace('&amp;', '&').replace('&quot;', '"')
+                  .replace(/&#0?39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+              }
+            }
+            idx = html.indexOf('"' + prop + '"', idx + 1);
+          }
+          return '';
+        };
+        title = pickOg('og:title') || null;
+        image = pickOg('og:image') || null;
+      } catch (_) {}
+      try {
+        chrome.runtime.sendMessage({ type: 'CRM_LINK_IMAGE', hash: msg.hash, image: image, title: title });
+      } catch (_) {}
+    })();
+  }
+
         if (msg.type === 'FB_CRM_HEALTH_CHECK') {
           if (globalThis.__FB_CRM_CONTENT_ACTIVE__ !== contentInstance) return;
           contentInstance.last_health_at = Date.now();
@@ -2223,6 +2258,9 @@ setInterval(reconcileLatestIncomingMessages, 1500);
 try {
   const crmLinkImageMatch = location.search.match(/[?&]crm_link_img=([0-9a-f]{40})/);
   const crmPageProfileMatch = location.search.match(/[?&]crm_page_profile=(\d+)/);
+  // Link-preview fetch ngay trong trang Messenger (không mở tab): background
+  // gửi link cần đọc og:image/og:title — fetch same-origin có cookie FB.
+  if (/crm_fetch_link=1/.test('1') && false) { /* placeholder no-op */ }
   if (/crm_own_profile=1/.test(location.search) || crmPageProfileMatch || crmLinkImageMatch) {
     const crmTargetPageId = crmPageProfileMatch ? crmPageProfileMatch[1] : null;
     const crmLinkHash = crmLinkImageMatch ? crmLinkImageMatch[1] : null;
@@ -2247,7 +2285,7 @@ try {
       crmProfileTries += 1;
       const profile = crmPickOperatorProfile();
       const crmGotEnough = crmLinkHash ? Boolean(profile.avatar) : Boolean(profile.name || profile.avatar);
-      if (crmGotEnough || crmProfileTries >= 15) {
+      if (crmGotEnough || crmProfileTries >= 30) {
         clearInterval(crmProfileTimer);
         try {
           if (crmTargetPageId) chrome.runtime.sendMessage({ type: 'CRM_PAGE_PROFILE', pageId: crmTargetPageId, data: profile });
