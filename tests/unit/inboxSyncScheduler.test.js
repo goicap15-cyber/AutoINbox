@@ -15,7 +15,7 @@ test('default lightweight inbox fallback targets near-realtime delivery', () => 
   assert.equal(scheduler.requestsIntervalMs, 60000);
 });
 
-test('account registration keeps sidebar polling asleep until the operator opens a sync window', () => {
+test('operator opening a sync window dispatches a deep FULL scan immediately (2026-09-19: bấm sync = quét sâu ngay, không phải realtime nhẹ)', () => {
   const wsMessages = [];
   const ws = { readyState: 1, send: (payload) => wsMessages.push(JSON.parse(payload)) };
   const scheduler = new InboxSyncScheduler();
@@ -25,7 +25,7 @@ test('account registration keeps sidebar polling asleep until the operator opens
   const state = scheduler.startSyncWindow('acc', 60000);
   assert.equal(state.enabled, true);
   assert.equal(wsMessages[0]?.type, 'SYNC_THREADS');
-  assert.equal(wsMessages[0]?.data?.scan_mode, 'realtime');
+  assert.equal(wsMessages[0]?.data?.scan_mode, 'full');
   scheduler.stopSyncWindow('acc');
   assert.equal(wsMessages.some((message) => message.type === 'SET_SIDEBAR_SYNC_WINDOW' && message.data.enabled === false), true);
   scheduler.unregisterAccount('acc');
