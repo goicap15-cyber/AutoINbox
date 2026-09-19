@@ -411,6 +411,16 @@ class ProcessManager {
       const page = pages[0] || await browser.newPage();
       await page.goto('https://www.facebook.com/messages/', { waitUntil: 'domcontentloaded', timeout: 30000 });
 
+      // Chính sách "1 account = 1 Chrome": mở thêm tab Business Suite cho từng
+      // Page ACTIVE của account ngay trong Chrome này (không còn Chrome riêng
+      // cho từng Page - đã gỡ 2026-09-19).
+      if (!String(accountId || '').startsWith('pending_')) {
+        const activePageIds = this.getActivePageIdsForAccount(accountId);
+        for (const pid of activePageIds) {
+          try { await this.openBusinessTabForPage(pid, accountId); } catch (_) {}
+        }
+      }
+
       console.log(`[ProcessManager] Chrome Stable [PID ${child.pid}] đã tự cài extension cho account ${accountId}.`);
       return true;
     } catch (err) {
@@ -419,83 +429,78 @@ class ProcessManager {
     }
   }
 
-  // Additive Page launcher: keeps the personal account process untouched and
-  // opens a second managed Chrome profile with the same extension installed.
-  // The Page profile is keyed separately, so it can run alongside Messenger.
-  async startPageProcess(pageId, accountId) {
-    const safePageId = String(pageId || '').trim();
-    const safeAccountId = String(accountId || '').trim();
-    if (!/^\d+$/.test(safePageId) || !safeAccountId) throw new Error('Thiếu Page ID hoặc tài khoản sở hữu Page');
-    const key = `page:${safeAccountId}:${safePageId}`;
-    const profileDir = path.join(APP_DATA_ROOT, 'page-profiles', `${safeAccountId}_${safePageId}`);
-    const targetUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(safePageId)}&mailbox_id=${encodeURIComponent(safePageId)}&thread_type=FB_MESSAGE`;
-    const started = await this.startAccountProcess(key, profileDir, { forceExtensionReload: false });
-    if (!started) return false;
-    const entry = this.processes.get(key);
+  // Danh sách Page ACTIVE đang sở hữu bởi account (nguồn sự thật: inbox_sources).
+  getActivePageIdsForAccount(accountId) {
     try {
-      if (entry?.browser?.connected) {
-        const pages = await entry.browser.pages();
-        const page = pages[0] || await entry.browser.newPage();
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      } else {
-        const chromeExecutable = this.getInteractiveSetupChromeExecutable();
-        spawn(chromeExecutable, [`--user-data-dir=${path.resolve(profileDir)}`, '--new-window', targetUrl], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
-      }
-    } catch (error) {
-      console.warn(`[ProcessManager] Không thể mở Business Suite cho Page ${safePageId}:`, error.message);
+      return db.prepare(`
+        SELECT external_id FROM inbox_sources
+        WHERE source_type = 'page_messenger' AND owner_account_id = ? AND status = 'ACTIVE'
+      `).all(String(accountId || '')).map((r) => String(r.external_id)).filter(Boolean);
+    } catch (_) {
+      return [];
     }
-    return true;
   }
 
-  // Mở tab Hộp thư Meta Business Suite trực tiếp trên cửa sổ Chrome đã đăng nhập của tài khoản sở hữu Page
-  async openPageInboxInAccountChrome(accountId, pageId) {
+  // Mở (hoặc kích hoạt) tab Business Suite cho 1 Page TRONG Chrome cá nhân của
+  // account - chính sách "1 account = 1 Chrome". Không còn spawn Chrome riêng
+  // cho từng Page (đã gỡ 2026-09-19).
+  async openBusinessTabForPage(pageId, accountId) {
     const safePageId = String(pageId || '').trim();
     const safeAccountId = String(accountId || '').trim();
-    if (!safePageId || !safeAccountId) return false;
+    if (!/^\d+$/.test(safePageId) || !safeAccountId) return false;
     const targetUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(safePageId)}&mailbox_id=${encodeURIComponent(safePageId)}&thread_type=FB_MESSAGE`;
 
     let entry = this.processes.get(safeAccountId);
-    let profileDir = entry?.profileDir;
-    if (!profileDir) {
-      for (const [key, proc] of this.processes.entries()) {
-        if (typeof key === 'string' && key.startsWith('pending_') && proc?.profileDir) {
-          entry = proc;
-          profileDir = proc.profileDir;
-          break;
-        }
-      }
+    if (!entry?.browser?.connected) {
+      // Chrome cá nhân chưa chạy -> khởi động nó trước (tự mở tab Messenger).
+      await this.startAccountProcess(safeAccountId, null, {});
+      entry = this.processes.get(safeAccountId);
     }
-    if (!profileDir) {
-      try {
-        const row = db.prepare('SELECT profile_dir FROM accounts WHERE id = ?').get(safeAccountId);
-        if (row?.profile_dir) profileDir = row.profile_dir;
-      } catch (_) {}
-    }
-    if (!profileDir) {
-      profileDir = path.join(APP_DATA_ROOT, `profiles/${safeAccountId}`);
-    }
-
-    const absProfileDir = path.isAbsolute(profileDir) ? profileDir : path.resolve(APP_DATA_ROOT, profileDir);
 
     try {
       this.unhideWindow(safeAccountId);
       if (entry?.browser?.connected) {
-        const page = await entry.browser.newPage();
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        console.log(`[ProcessManager] Đã mở tab Business Suite cho Page ${safePageId} qua Puppeteer.`);
+        // Đã có tab business cho page này -> kích hoạt lại, không mở trùng.
+        const openPages = await entry.browser.pages();
+        const existing = openPages.find((p) => String(p.url() || '').includes(`asset_id=${safePageId}`));
+        if (existing) {
+          await existing.bringToFront().catch(() => {});
+          console.log(`[ProcessManager] Tab Business Suite cho Page ${safePageId} đã tồn tại - kích hoạt lại.`);
+          return true;
+        }
+        const bizPage = await entry.browser.newPage();
+        await bizPage.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        console.log(`[ProcessManager] Đã mở tab Business Suite cho Page ${safePageId} trong Chrome account ${safeAccountId}.`);
         return true;
       }
+
+      // Puppeteer không điều khiển được (Chrome mở ngoài) -> spawn thêm tab trên profile đã có.
+      const profileDir = entry?.profileDir
+        || db.prepare('SELECT profile_dir FROM accounts WHERE id = ?').get(safeAccountId)?.profile_dir
+        || path.join(APP_DATA_ROOT, `profiles/${safeAccountId}`);
+      const absProfileDir = path.isAbsolute(profileDir) ? profileDir : path.resolve(APP_DATA_ROOT, profileDir);
       const chromeExecutable = this.getInteractiveSetupChromeExecutable();
-      spawn(chromeExecutable, [
-        `--user-data-dir=${absProfileDir}`,
-        targetUrl
-      ], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+      spawn(chromeExecutable, [`--user-data-dir=${absProfileDir}`, targetUrl], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
       console.log(`[ProcessManager] Đã gửi lệnh mở Business Suite cho Page ${safePageId} trên profile ${absProfileDir}.`);
       return true;
     } catch (error) {
       console.warn(`[ProcessManager] Không thể mở Business Suite cho Page ${safePageId}:`, error.message);
       return false;
     }
+  }
+
+  // DEPRECATED (2026-09-19): trước đây mỗi Page có Chrome riêng (profile
+  // page-profiles/<acc>_<page>). Giờ Page chạy dạng TAB trong Chrome cá nhân.
+  async startPageProcess(pageId, accountId) {
+    return this.openBusinessTabForPage(pageId, accountId);
+  }
+
+  // (Đã gỡ launcher "mỗi Page 1 Chrome riêng" - Page giờ chạy dạng tab trong
+  // Chrome cá nhân qua openBusinessTabForPage / startPageProcess ở trên.)
+
+  // Alias tương thích: mở tab Business Suite cho Page trong Chrome account.
+  async openPageInboxInAccountChrome(accountId, pageId) {
+    return this.openBusinessTabForPage(pageId, accountId);
   }
 
   // Khởi chạy Chrome Portable cho phiên thêm tài khoản mới (pending session)

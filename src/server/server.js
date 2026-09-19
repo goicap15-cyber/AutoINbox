@@ -4465,10 +4465,20 @@ app.get('/api/accounts', (req, res) => {
   res.json(result);
 });
 app.post('/api/accounts/:id/start', async (req, res) => {
+  const accountId = String(req.params.id);
+  // Key dạng page:<ownerAcc>:<pageId> không phải tài khoản trong bảng accounts -
+  // chính sách 1 Chrome/account: bảo đảm Chrome cá nhân chạy + mở tab Business.
+  if (accountId.startsWith('page:')) {
+    const parts = accountId.split(':');
+    const ownerAccountId = parts[1];
+    const pageId = parts[2];
+    if (!ownerAccountId || !pageId) return res.status(400).json({ success: false, error: 'Key Page không hợp lệ' });
+    const ok = await processManager.openBusinessTabForPage(pageId, ownerAccountId);
+    return res.json({ success: ok });
+  }
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
     return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
   }
-  const accountId = String(req.params.id);
   const startInBackground = req.body?.background === true;
   if (startInBackground) {
     backgroundAfterConnectRequests.set(accountId, Date.now());
