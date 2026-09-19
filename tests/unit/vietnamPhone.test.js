@@ -22,7 +22,7 @@ describe('vietnamPhone.js', () => {
         '052', '055', '056', '058', '059',
         '070', '076', '077', '078', '079',
         '081', '082', '083', '084', '085', '086', '087', '088', '089',
-        '090', '091', '092', '093', '094',
+        '090', '091', '092', '093', '094', '095',
         '096', '097', '098', '099'];
       for (const prefix of active) {
         assert.equal(isPrefixActive(prefix), true, `expected ${prefix} to be active`);
@@ -31,13 +31,13 @@ describe('vietnamPhone.js', () => {
 
     test('rejects gaps just outside the whitelisted ranges', () => {
       for (const prefix of ['030', '031', '040', '050', '051', '053', '054', '057',
-        '071', '072', '073', '074', '075', '080', '095']) {
+        '071', '072', '073', '074', '075', '080']) {
         assert.equal(isPrefixActive(prefix), false, `expected ${prefix} to be inactive`);
       }
     });
 
-    test('095 is registered but inactive by default (newly allocated, needs explicit enable)', () => {
-      assert.equal(isPrefixActive('095'), false);
+    test('095 is active (Viettel allocation live since 07/2026 - enabled 2026-09-17)', () => {
+      assert.equal(isPrefixActive('095'), true);
     });
   });
 
