@@ -166,7 +166,7 @@ class InboxSourceService {
     const targetThreadId = threadId || canonicalThreadId;
 
     // 1. Upsert inbox_source row (idempotent)
-    const existing = database.prepare('SELECT id, display_name FROM inbox_sources WHERE id = ?').get(sourceId);
+    const existing = database.prepare('SELECT id, display_name, owner_account_id FROM inbox_sources WHERE id = ?').get(sourceId);
     if (!existing) {
       const initialDisplayName = this.isValidPageDisplayName(pageName) ? pageName.trim() : ('Page ' + pageId);
       database.prepare(`
@@ -175,9 +175,19 @@ class InboxSourceService {
         VALUES (?, 'page_messenger', ?, ?, ?, 'ACTIVE')
       `).run(sourceId, accountId || null, String(pageId), initialDisplayName);
       console.log(`[PAGE_SOURCE] ✅ Tự động tạo page source: ${sourceId} (${initialDisplayName})`);
-    } else if (pageName && this.isValidPageDisplayName(pageName) && (!existing.display_name || existing.display_name === 'Page ' + pageId || existing.display_name.startsWith('Page ') || !this.isValidPageDisplayName(existing.display_name))) {
-      database.prepare('UPDATE inbox_sources SET display_name = ? WHERE id = ?').run(pageName.trim(), sourceId);
-      console.log(`[PAGE_SOURCE] 🏷️ Tự động cập nhật display_name cho source ${sourceId}: "${pageName.trim()}"`);
+    } else {
+      // Gắn chủ cho row được tự tạo TRƯỚC khi user bấm "Kết nối Page":
+      // các row này tồn tại với owner NULL (scan Business Suite tự phát hiện),
+      // khiến danh sách "Page đã kết nối" lọc theo owner mất page và các luồng
+      // ingest chặt chẽ bị từ chối. Chỉ bind khi chưa có chủ.
+      if (accountId && !existing.owner_account_id) {
+        database.prepare('UPDATE inbox_sources SET owner_account_id = ? WHERE id = ?').run(String(accountId), sourceId);
+        console.log(`[PAGE_SOURCE] 🔗 Đã gắn owner ${accountId} cho source ${sourceId} (trước đây NULL).`);
+      }
+      if (pageName && this.isValidPageDisplayName(pageName) && (!existing.display_name || existing.display_name === 'Page ' + pageId || existing.display_name.startsWith('Page ') || !this.isValidPageDisplayName(existing.display_name))) {
+        database.prepare('UPDATE inbox_sources SET display_name = ? WHERE id = ?').run(pageName.trim(), sourceId);
+        console.log(`[PAGE_SOURCE] 🏷️ Tự động cập nhật display_name cho source ${sourceId}: "${pageName.trim()}"`);
+      }
     }
 
     // 2. Bind thread → source if not already correct
