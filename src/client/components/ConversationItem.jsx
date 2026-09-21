@@ -1,5 +1,5 @@
 import React from 'react';
-import { BellRing, Clock3, Archive } from 'lucide-react';
+import { BellRing, Clock3, Archive, Mail, MailOpen } from 'lucide-react';
 import { getStatusBadgeStyle } from '../utils/color.js';
 import { getReminderDueAriaLabel, getReminderDueState } from '../utils/reminderPresentation.js';
 import { normalizeThreadTimestamp } from '../utils/threadActivity.js';
@@ -19,11 +19,18 @@ function formatTime(value) {
   return parsed.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
 }
 
-export default function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSources = [], selectionMode = false, isChecked = false, onToggle }) {
+export default function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSources = [], selectionMode = false, isChecked = false, onToggle, onToggleUnread }) {
   const account = accounts.find((item) => String(item.id) === String(thread.account_id));
   const source = inboxSources.find((item) => String(item.id) === String(thread.source_id));
   const isOnline = account ? account.is_extension_connected !== false : true;
   const unreadCount = Number(thread.unread_count || (thread.is_unread ? 1 : 0));
+  const isThreadUnreadRow = unreadCount > 0 || Number(thread.unread_manual) === 1;
+  const handleToggleUnread = (event) => {
+    if (!onToggleUnread) return;
+    event.stopPropagation();
+    event.preventDefault();
+    onToggleUnread(thread, !isThreadUnreadRow);
+  };
   const avatarColor = pickAvatarColor(thread.id || thread.nickname || thread.contact_name);
   const title = thread.nickname || thread.contact_name || thread.name || 'Khách hàng';
   const preview = thread.last_message || 'Chưa có tin nhắn';
@@ -122,11 +129,30 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
               </span>
             )}
           </div>
-          {unreadCount > 0 && (
-            <span className="bg-[var(--color-accent)] text-[var(--color-text-on-accent)] text-xs rounded-full min-w-5 h-5 px-1.5 flex items-center justify-center font-bold shadow-sm animate-pulse">
-              {unreadCount}
-            </span>
-          )}
+          <span className="flex items-center gap-1.5 shrink-0">
+            {unreadCount > 0 && (
+              <span className="bg-[var(--color-accent)] text-[var(--color-text-on-accent)] text-xs rounded-full min-w-5 h-5 px-1.5 flex items-center justify-center font-bold shadow-sm animate-pulse">
+                {unreadCount}
+              </span>
+            )}
+            {!selectionMode && onToggleUnread && (
+              <span
+                role="button"
+                tabIndex={0}
+                onClick={handleToggleUnread}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') handleToggleUnread(event);
+                }}
+                title={isThreadUnreadRow ? 'Đánh dấu đã đọc' : 'Đánh dấu chưa đọc'}
+                aria-label={isThreadUnreadRow ? 'Đánh dấu đã đọc' : 'Đánh dấu chưa đọc'}
+                className={'w-6 h-6 rounded-md inline-flex items-center justify-center transition-colors cursor-pointer ' + (isThreadUnreadRow
+                  ? 'text-[var(--color-accent)] bg-[var(--color-accent-subtle)] hover:brightness-110'
+                  : 'text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:bg-[var(--color-bg-hover)]')}
+              >
+                {isThreadUnreadRow ? <MailOpen size={13} strokeWidth={2.2} /> : <Mail size={13} strokeWidth={2.2} />}
+              </span>
+            )}
+          </span>
         </div>
       </div>
     </button>

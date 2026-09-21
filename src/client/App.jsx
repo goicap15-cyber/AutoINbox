@@ -554,6 +554,25 @@ export default function App() {
 
   const loadThreadsRef = useRef(loadThreads);
   useEffect(() => { loadThreadsRef.current = loadThreads; }, [loadThreads]);
+
+  // Đánh dấu chưa đọc/đã đọc: cập nhật LOCAL ngay cho mượt, server là nguồn chân lý.
+  const handleToggleThreadUnread = useCallback(async (thread, nextUnread) => {
+    const threadId = String(thread?.id || '');
+    if (!threadId) return;
+    setThreads((prev) => prev.map((t) => (String(t.id) === threadId
+      ? { ...t, is_unread: nextUnread ? 1 : 0, unread_manual: nextUnread ? 1 : -1 }
+      : t)));
+    try {
+      const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/unread', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ unread: nextUnread })
+      });
+      if (!res.ok) throw new Error('fail');
+    } catch (_) {
+      loadThreadsRef.current();
+    }
+  }, []);
   useEffect(() => {
     if (sessionUser && licenseStatus?.isLicensed) {
       loadThreads(); loadWaitingCount(); loadAccounts(); loadInboxSources(); loadLeadStatuses();
@@ -942,6 +961,7 @@ export default function App() {
       // Existing rows are patched synchronously above. Only fetch the complete
       // list when a legacy event lacks the new summary payload.
       if (!newMsg.thread_summary?.id) loadThreadsRef.current();
+
 
       // Media URLs are already included in NEW_MESSAGE/THREAD_MESSAGES_UPDATED.
       // Do not replace the live state with a delayed REST response: that response
@@ -1340,6 +1360,14 @@ export default function App() {
       setThreads(prev => prev.map(t => String(t.id) === tidStr ? { ...t, ai_paused_until: until } : t));
     });
     socket.on('THREAD_ASSIGNED', () => loadThreadsRef.current());
+    socket.on('THREAD_UNREAD_CHANGED', (payload) => {
+      const tid = String(payload?.thread_id || '');
+      const next = Number(payload?.is_unread) === 1;
+      if (!tid) return;
+      setThreads((prev) => prev.map((t) => (String(t.id) === tid
+        ? { ...t, is_unread: next ? 1 : 0, unread_manual: next ? 1 : -1 }
+        : t)));
+    });
     socket.on('THREAD_COMPLETED', () => loadThreadsRef.current());
     socket.on('INBOX_SOURCE_ADDED', () => { loadInboxSources(); loadThreadsRef.current(); });
     socket.on('INBOX_SOURCE_REMOVED', () => { loadInboxSources(); loadThreadsRef.current(); });
@@ -1853,6 +1881,8 @@ export default function App() {
         threads={threads} activeThreadId={activeThreadId}
         onSelectThread={(threadId) => {
           const clickedThread = threads.find((thread) => String(thread.id) === String(threadId));
+          // Chỉ nút phong bì mới đổi trạng thái chưa đọc (yêu cầu 21/09):
+          // mở hội thoại KHÔNG tự đánh dấu đã đọc.
           requestThreadNavigation(clickedThread);
         }}
         activeTab={activeTab} onTabChange={handleConversationTabChange}
@@ -1872,6 +1902,7 @@ export default function App() {
         onCancelCampaignSelection={cancelCampaignSelection}
         onCreateCampaign={() => setActiveModal('campaigns')}
         onBulkHistorySync={handleBulkHistorySync}
+        onToggleUnread={handleToggleThreadUnread}
         bulkHistoryProgress={bulkHistoryProgress}
       />
 

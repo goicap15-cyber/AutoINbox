@@ -19,10 +19,18 @@ export function threadActivityTime(thread) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+// Hội thoại chưa đọc (kể cả đánh dấu tay) luôn nổi lên đầu danh sách;
+// đọc rồi thì về đúng thứ tự theo thời gian hoạt động.
+function isThreadUnread(thread) {
+  return Number(thread?.is_unread) === 1 || Number(thread?.unread_manual) === 1;
+}
+
 export function sortThreadsByActivity(threads = []) {
   return threads
     .map((thread, index) => ({ thread, index }))
     .sort((left, right) => {
+      const unreadDelta = (isThreadUnread(right.thread) ? 1 : 0) - (isThreadUnread(left.thread) ? 1 : 0);
+      if (unreadDelta !== 0) return unreadDelta;
       const delta = threadActivityTime(right.thread) - threadActivityTime(left.thread);
       return delta || left.index - right.index;
     })

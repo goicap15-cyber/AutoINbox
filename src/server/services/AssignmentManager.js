@@ -42,7 +42,7 @@ class AssignmentManager {
     let query = `
       SELECT t.*, c.nickname, c.phone, c.email, c.address, c.tags, c.lead_captured, c.avatar_url,
         s.source_type, s.display_name AS source_name, s.status AS source_status, s.external_id AS source_external_id,
-        c.status_id, ls.name AS status_name, ls.color AS status_color, r.due_at AS reminder_due_at, r.note AS reminder_note, r.status AS reminder_status
+        c.status_id, ls.name AS status_name, ls.color AS status_color, r.due_at AS reminder_due_at, r.note AS reminder_note, r.status AS reminder_status, t.unread_manual
       FROM threads t
       JOIN accounts a ON a.id = t.account_id
       LEFT JOIN contacts c ON c.thread_id = t.id
@@ -98,7 +98,9 @@ class AssignmentManager {
     if (where.length) query += ' WHERE ' + where.join(' AND ');
     // last_activity contains both ISO strings and SQLite CURRENT_TIMESTAMP.
     // julianday normalizes both instead of comparing their string shapes.
-    query += ' ORDER BY julianday(t.last_activity) DESC, t.id DESC';
+    // Chưa đọc luôn nổi đầu danh sách (mới nhất trước); đọc rồi thì quay về
+    // đúng vị trí theo thời gian như cũ.
+    query += ' ORDER BY CASE WHEN COALESCE(t.is_unread, 0) = 1 OR COALESCE(t.unread_manual, 0) = 1 THEN 0 ELSE 1 END ASC, julianday(t.last_activity) DESC, t.id DESC';
     const rows = this.db.prepare(query).all(...params);
 
     // Preview kiểu Messenger: khi last_message là placeholder (sidebar sync

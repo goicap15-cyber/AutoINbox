@@ -26,7 +26,7 @@ export default function ConversationSidebar({
   onToggleCampaignThread,
   onStartCampaignSelection, onCancelCampaignSelection, onCreateCampaign,
   onBulkHistorySync, onContinueFacebookSync, onCancelFacebookSync, bulkHistoryProgress,
-  dateFilter = '', dateFilterIds = null, onDateFilterChange
+  dateFilter = '', dateFilterIds = null, onDateFilterChange, onToggleUnread
 }) {
   const [appliedFilters, setAppliedFilters] = useState(() => normalizeFilters(createDefaultFilters()));
   const [isFilterPopoverOpen, setIsFilterPopoverOpen] = useState(false);
@@ -206,6 +206,7 @@ export default function ConversationSidebar({
               selectionMode={campaignSelectionMode}
               isChecked={selectedCampaignThreadIds.some((threadId) => String(threadId) === String(thread.id))}
               onToggle={() => onToggleCampaignThread(thread.id)}
+              onToggleUnread={onToggleUnread}
             />
           ))
         )}

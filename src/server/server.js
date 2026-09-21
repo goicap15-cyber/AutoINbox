@@ -2098,13 +2098,28 @@ wss.on('connection', (ws, req) => {
           // Persist/emit remote media immediately. Local hydration is queued
           // after the row exists so a slow video cannot block later messages.
 
-          // FIX FOREIGN KEY: Đảm bảo thread tồn tại/được upsert TRƯỚC KHI insert message
+          // FIX FOREIGN KEY: Đảm bảo thread tồn tại/được upsert TRƯỚC KHI insert message.
+          // DOM observer replay lại tin cũ RẤT NHIỀU lần (log thực tế: cùng một
+          // fb_message_id được gửi lại hàng trăm lần). Replay KHÔNG được đổi
+          // trạng thái đọc/chưa đọc và không được xóa cờ đánh tay - nếu không
+          // hội thoại sẽ nhảy lên nhảy xuống liên tục giữa replay và sync.
+          const isReplayedObservation = m.fb_message_id
+            ? Boolean(db.prepare('SELECT 1 FROM messages WHERE thread_id = ? AND fb_message_id = ?')
+              .get(String(canonicalThreadId), String(m.fb_message_id)))
+            : false;
+          if (!isReplayedObservation && !isOutgoing) {
+            // Tin mới của khách: bật chưa đọc + GẮN CỜ DÍNH. Chỉ nút phong bì
+            // trong CRM mới được gỡ (yêu cầu sản phẩm 21/09): mở hội thoại,
+            // trả lời tin hay Facebook tự đánh dấu đọc đều KHÔNG tắt nhắc.
+            db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+            io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
+          }
           ConversationRepository.upsertThread({
             id: m.thread_id,
             account_id: targetAccountId,
             contact_name: m.contact_name || 'Khách hàng',
             last_message: m.content,
-            is_unread: !isOutgoing
+            is_unread: isReplayedObservation ? undefined : !isOutgoing
           });
 
           // Auto-register Page source & rebind thread khi đến từ Business Suite
@@ -2931,6 +2946,16 @@ wss.on('connection', (ws, req) => {
                   hasRecentMatchingOutbound
                 });
                 const pageSourceId = (threadPageId || t.source_type === 'page_messenger') ? ('src_page_' + (threadPageId || '')) : null;
+                // Cờ đánh tay phải sống qua mọi lần sync, CẢ HAI CHIỀU:
+                //  1  = user đánh chưa đọc -> FB báo đã đọc cũng giữ chưa đọc
+                // -1  = user đánh đã đọc   -> FB vẫn treo chấm xanh cũng giữ đã đọc
+                let syncUnread = t.is_unread;
+                if (previousThread) {
+                  const manualRow = db.prepare('SELECT unread_manual FROM threads WHERE id = ?').get(existingInternalThreadId);
+                  const manual = Number(manualRow?.unread_manual || 0);
+                  if (manual === 1) syncUnread = 1;
+                  else if (manual === -1) syncUnread = 0;
+                }
                 const storedThread = ConversationRepository.upsertThread({
                   id: threadId,
                   external_thread_id: t.external_thread_id || threadId,
@@ -2940,7 +2965,7 @@ wss.on('connection', (ws, req) => {
                   contact_name: name,
                   // Placeholder -> null để COALESCE giữ preview thật trong DB.
                   last_message: (!cleanLastMsg || cleanLastMsg === 'Chưa có tin nhắn') ? null : cleanLastMsg,
-                  is_unread: t.is_unread,
+                  is_unread: syncUnread,
                   inbox_folder: t.inbox_folder || null,
                   inbox_folder_verified: t.inbox_folder_verified === true
                 });
@@ -3385,6 +3410,21 @@ wss.on('connection', (ws, req) => {
                 recovered_from_history: true
               });
             }
+            // Tin khách VỪA nhắn (trong 10 phút) mà chỉ đến được qua sync lịch
+            // sử - kênh realtime lỡ mất vì tab Facebook đang đậu đúng thread
+            // đó nên Facebook tự đánh dấu đã đọc. Bật chưa đọc + phát socket
+            // để hội thoại được đẩy lên đầu danh sách ngay.
+            const hasRecentIncomingHistory = historyInsertedRows.some((r) => {
+              const atMs = Number(r.timestamp_ms) || Date.parse(r.created_at || '') || 0;
+              return atMs >= Date.now() - 10 * 60 * 1000;
+            });
+            if (hasRecentIncomingHistory) {
+              const historyManualState = db.prepare('SELECT unread_manual FROM threads WHERE id = ?').get(thread_id);
+              if (Number(historyManualState?.unread_manual || 0) !== 1) {
+                db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 0 WHERE id = ?').run(thread_id);
+                io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(thread_id), is_unread: 1 });
+              }
+            }
             const collapsedMediaCompanions = OutboundDomCorrelationService.collapseStoredMediaCompanions(db, thread_id);
             const collapsedTemporaryIds = OutboundDomCorrelationService.collapseStoredTemporaryIdUpgrades(db, thread_id);
             const reconciledDomRows = ConversationRepository.reconcileObservedDomSequence(thread_id, sequencedMessages, db);
@@ -3660,6 +3700,21 @@ wss.on('connection', (ws, req) => {
               ? (cleanMessageText(envelope.messages[envelope.messages.length - 1].content) || null)
               : null;
 
+            // Hard-code is_unread: 0 ở đây từng làm tin nhắn mới của khách
+            // qua Page không bao giờ nổi lên (đè trạng thái chưa đọc ngay sau
+            // khi kênh realtime bật). Giờ tôn trọng cờ đánh tay + tin mới
+            // trong 10 phút qua Page mới bật chưa đọc; còn lại giữ nguyên.
+            const pageManualState = db.prepare('SELECT unread_manual FROM threads WHERE id = ?').get(canonicalThreadId);
+            const pageManual = Number(pageManualState?.unread_manual || 0);
+            const hasRecentIncomingPage = Array.isArray(envelope.messages) && envelope.messages.some((pm) => {
+              if (pm.is_outgoing === true || pm.is_outgoing === 1) return false;
+              const atMs = Number(pm?.timestamp_ms) || Date.parse(pm?.created_at || '') || 0;
+              return atMs >= Date.now() - 10 * 60 * 1000;
+            });
+            let pageUnreadState;
+            if (pageManual === 1) pageUnreadState = 1;
+            else if (pageManual === -1) pageUnreadState = 0;
+            else pageUnreadState = hasRecentIncomingPage ? 1 : undefined;
             ConversationRepository.upsertThread({
               id: canonicalThreadId,
               external_thread_id: pageThreadId,
@@ -3667,7 +3722,7 @@ wss.on('connection', (ws, req) => {
               source_id: source.id,
               contact_name: safePageContactName || 'Khách hàng',
               last_message: lastIncomingContent,
-              is_unread: 0,
+              is_unread: pageUnreadState,
               inbox_folder: 'INBOX'
             }, db);
 
@@ -4916,6 +4971,26 @@ app.post('/api/threads/:id/restore', (req, res) => {
   }
 });
 
+// Đánh dấu chưa đọc / đã đọc bằng tay. Không gửi "unread" trong body = toggle.
+app.post('/api/threads/:id/unread', (req, res) => {
+  try {
+    const id = req.params.id;
+    const row = db.prepare('SELECT is_unread FROM threads WHERE id = ?').get(id);
+    if (!row) return res.status(404).json({ error: 'Không tìm thấy hội thoại.' });
+    const desired = req.body && req.body.unread !== undefined ? Number(req.body.unread) : null;
+    const next = desired === null ? (Number(row.is_unread) ? 0 : 1) : (desired ? 1 : 0);
+    if (next !== Number(row.is_unread)) {
+      // unread_manual 3 trạng thái: 1 = đánh tay CHƯA ĐỌC, -1 = đánh tay ĐÃ ĐỌC
+      // (dính cả hai chiều, sync sidebar không được đè), 0 = tự động theo FB.
+      db.prepare('UPDATE threads SET is_unread = ?, unread_manual = ? WHERE id = ?').run(next, next ? 1 : -1, id);
+    }
+    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(id), is_unread: next });
+    res.json({ success: true, id: String(id), is_unread: next });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Không thể cập nhật trạng thái chưa đọc.' });
+  }
+});
+
 app.post('/api/threads/:id/assign', (req, res) => {
   const user_id = req.user.id;
   const result = assignmentManager.assignThread(req.params.id, user_id);
@@ -5193,6 +5268,41 @@ app.post('/api/inbox-sources/page', (req, res) => {
 });
 
 // Lead Statuses — staff-created, reusable, color-coded (feature 022)
+// Quản lý màu nhãn khách hàng (2026-09-19): bảng lead_tags (name + color).
+app.get('/api/lead-tags', (req, res) => {
+  try {
+    const tags = db.prepare('SELECT id, name, color, text_color FROM lead_tags ORDER BY name COLLATE NOCASE ASC').all();
+    res.json(tags);
+  } catch (error) {
+    res.status(500).json({ error: 'Không thể tải danh sách nhãn.' });
+  }
+});
+app.post('/api/lead-tags', (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim().slice(0, 50);
+    const isHex = (s) => /^#[0-9a-fA-F]{6}$/.test(String(s || ''));
+    const color = isHex(req.body?.color) ? req.body.color : '#6366F1';
+    const textColor = isHex(req.body?.text_color) ? req.body.text_color : '#FFFFFF';
+    if (!name) return res.status(400).json({ error: 'Tên nhãn không được để trống.' });
+    const existing = db.prepare('SELECT id, name FROM lead_tags WHERE name = ? COLLATE NOCASE').get(name);
+    if (existing) {
+      db.prepare('UPDATE lead_tags SET color = ?, text_color = ? WHERE id = ?').run(color, textColor, existing.id);
+      return res.json({ id: existing.id, name: existing.name, color, text_color: textColor });
+    }
+    const r = db.prepare('INSERT INTO lead_tags (name, color, text_color) VALUES (?, ?, ?)').run(name, color, textColor);
+    res.json({ id: Number(r.lastInsertRowid), name, color, text_color: textColor });
+  } catch (error) {
+    res.status(500).json({ error: 'Không thể lưu nhãn.' });
+  }
+});
+app.delete('/api/lead-tags/:id', (req, res) => {
+  try {
+    db.prepare('DELETE FROM lead_tags WHERE id = ?').run(Number(req.params.id));
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Không thể xóa nhãn.' });
+  }
+});
 app.get('/api/lead-statuses', (req, res) => {
   res.json(db.prepare('SELECT id, name, color FROM lead_statuses ORDER BY id ASC').all());
 });

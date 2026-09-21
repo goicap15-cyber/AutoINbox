@@ -306,7 +306,34 @@ const migrations = [
     }
   },
   {
-    version: 12,
+    version: 20260921001,
+    name: 'add_threads_unread_manual',
+    up: (db) => {
+      try { db.exec('ALTER TABLE threads ADD COLUMN unread_manual INTEGER NOT NULL DEFAULT 0;'); } catch (e) { }
+    }
+  },
+  {
+    version: 20260919001,
+    name: 'add_lead_tags_with_colors',
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS lead_tags (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        color TEXT NOT NULL DEFAULT '#6366F1',
+        text_color TEXT NOT NULL DEFAULT '#FFFFFF',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`);
+      try { db.exec("ALTER TABLE lead_tags ADD COLUMN text_color TEXT NOT NULL DEFAULT '#FFFFFF';"); } catch (e) { }
+      const seed = [
+        ['Tiềm năng', '#22C55E', '#FFFFFF'],
+        ['Quan tâm', '#F59E0B', '#FFFFFF'],
+        ['Cần tư vấn', '#3B82F6', '#FFFFFF']
+      ];
+      const ins = db.prepare('INSERT OR IGNORE INTO lead_tags (name, color, text_color) VALUES (?, ?, ?)');
+      for (const [n, c, tc] of seed) ins.run(n, c, tc);
+    }
+  },
+  {
     name: 'add_lead_statuses',
     up: (db) => {
       db.exec(`

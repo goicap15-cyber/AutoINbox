@@ -25,7 +25,13 @@ import {
 import EmptyState from './EmptyState.jsx';
 import LeadStatusColorPicker from './LeadStatusColorPicker.jsx';
 import { ConfirmDialog, Toast } from './CrmFeedback.jsx';
+import { HexColorPicker } from 'react-colorful';
 import { getStatusBadgeStyle } from '../utils/color.js';
+
+function getTagChipStyle(colors) {
+  if (!colors || !colors.bg) return undefined;
+  return { backgroundColor: colors.bg, color: colors.text || '#FFFFFF', borderColor: colors.bg };
+}
 import {
   STARTER_TAGS,
   MAX_TAG_LENGTH,
@@ -132,6 +138,33 @@ function ExportFooter({ onExportLeads }) {
 export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportLeads, onCloseDrawer, leadStatuses = [], onCreateLeadStatus, onDeleteLeadStatus, onSetReminder, onCompleteReminder, onCancelReminder, onArchiveThread }) {
   const [activeTab, setActiveTab] = useState('INFO');
   const [profileCopied, setProfileCopied] = useState(false);
+  // Màu nhãn khách hàng (bảng lead_tags): map lowercase name -> hex
+  const [tagColors, setTagColors] = useState({});
+  const [colorPickerTag, setColorPickerTag] = useState(null);
+  // Danh sách định nghĩa nhãn từ bảng lead_tags (để chip chưa chọn vẫn hiện)
+  const [tagDefs, setTagDefs] = useState([]);
+  // Palette màu inline cho nhãn mới (luôn hiển thị trong editor)
+  const TAG_PALETTE = ['#22C55E', '#3B82F6', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899',
+    '#14B8A6', '#F97316', '#6366F1', '#84CC16', '#0EA5E9', '#64748B'];
+  const [newTagColor, setNewTagColor] = useState({ bg: '#6366F1', text: '#FFFFFF' });
+  const newTagColorRef = useRef(newTagColor);
+  useEffect(() => { newTagColorRef.current = newTagColor; }, [newTagColor]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/lead-tags').then((r) => (r.ok ? r.json() : [])).then((rows) => {
+      if (cancelled || !Array.isArray(rows)) return;
+      const map = {};
+      rows.forEach((row) => {
+        map[String(row.name || '').toLowerCase()] = {
+          bg: row.color || '#6366F1',
+          text: row.text_color || '#FFFFFF'
+        };
+      });
+      setTagColors(map);
+      setTagDefs(rows);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
   const [nickname, setNickname] = useState('');
   const [phone, setPhone] = useState('');
   const [acceptingPhoneCandidateId, setAcceptingPhoneCandidateId] = useState(null);
@@ -285,6 +318,26 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
     }
     if (areTagsEqual(previousTags, toggleResult.tags)) return;
 
+    // Bỏ tích chỉ gỡ nhãn khỏi khách, không được làm mất định nghĩa nhãn:
+    // nhãn cũ chưa có trong bảng lead_tags sẽ được tạo để chip vẫn hiện xám.
+    const wasAttached = hasTag(previousTags, tagToToggle);
+    const stillAttached = hasTag(toggleResult.tags, tagToToggle);
+    if (wasAttached && !stillAttached) {
+      const lk = String(tagToToggle).toLowerCase();
+      const known = tagDefs.some((d) => String((d && d.name) || '').toLowerCase() === lk)
+        || Object.prototype.hasOwnProperty.call(tagColors, lk);
+      if (!known) {
+        const fallback = tagColors[lk] || { bg: '#6366F1', text: '#FFFFFF' };
+        setTagDefs((prev) => (prev.some((d) => String((d && d.name) || '').toLowerCase() === lk)
+          ? prev : [...prev, { name: tagToToggle, color: fallback.bg, text_color: fallback.text }]));
+        fetch('/api/lead-tags', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: tagToToggle, color: fallback.bg, text_color: fallback.text })
+        }).catch(() => {});
+      }
+    }
+
     const operationId = tagOperationRef.current + 1;
     tagOperationRef.current = operationId;
     setCommittedTags(toggleResult.tags);
@@ -399,6 +452,27 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
     setDraftTags(result.tags);
     setCustomTagInput('');
     setTagError('');
+    // Luu mau cho nhan vua them (palette inline chon TRUOC khi bam Them)
+    const chosen = newTagColorRef.current;
+    setTagColors((prev) => ({ ...prev, [trimmed.toLowerCase()]: { bg: chosen.bg, text: chosen.text } }));
+    fetch('/api/lead-tags', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: trimmed, color: chosen.bg, text_color: chosen.text })
+    }).catch(() => {});
+    setNewTagColor({ bg: '#6366F1', text: '#FFFFFF' });
+  };
+
+  const handleSaveTagColor = async (tagName, hex) => {
+    setColorPickerTag(null);
+    setTagColors((prev) => ({ ...prev, [String(tagName).toLowerCase()]: hex }));
+    try {
+      await fetch('/api/lead-tags', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: tagName, color: hex })
+      });
+    } catch (_) {}
   };
 
   const handleRemoveDraftTag = (tagToRemove) => {
@@ -613,6 +687,82 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
       onConfirm: () => archiveThread(false)
     });
   };
+
+  // Mọi nhãn hiển thị: starter + định nghĩa lead_tags + nhãn đang gắn
+  const allTagDefs = (() => {
+    const seen = new Set();
+    const list = [];
+    const push = (name) => {
+      const key = String(name || '').trim();
+      if (!key) return;
+      const lk = key.toLowerCase();
+      if (seen.has(lk)) return;
+      seen.add(lk);
+      list.push(key);
+    };
+    STARTER_TAGS.forEach(push);
+    tagDefs.forEach((d) => push(d && d.name));
+    committedTags.forEach(push);
+    return list;
+  })();
+
+  // Popover đổi màu nhãn — dùng chung trong và ngoài editor.
+  // Chỉ tạo JSX khi colorPickerTag có giá trị: biểu thức trong JSX được tính
+  // ngay lúc tạo phần tử, đọc .name trên null sẽ làm sập toàn bộ app.
+  const colorPickerPopover = colorPickerTag ? (
+    <div className="p-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] space-y-2">
+      <div className="text-[11px] font-semibold text-[var(--color-text-primary)]">
+        Màu nhãn: {colorPickerTag.name}
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] text-[var(--color-text-muted)] w-14 shrink-0">Màu nền</span>
+        <HexColorPicker
+          color={colorPickerTag.bg}
+          onChange={(hex) => setColorPickerTag((prev) => ({ ...prev, bg: hex }))}
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] text-[var(--color-text-muted)] w-14 shrink-0">Màu chữ</span>
+        <HexColorPicker
+          color={colorPickerTag.text}
+          onChange={(hex) => setColorPickerTag((prev) => ({ ...prev, text: hex }))}
+        />
+      </div>
+      <div className="flex items-center gap-2 pt-1">
+        <span
+          className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold border"
+          style={{ backgroundColor: colorPickerTag.bg, color: colorPickerTag.text, borderColor: colorPickerTag.bg }}
+        >
+          Xem trước
+        </span>
+        <button
+          type="button"
+          onClick={async () => {
+            const name = colorPickerTag.name;
+            setTagColors((prev) => ({ ...prev, [name.toLowerCase()]: { bg: colorPickerTag.bg, text: colorPickerTag.text } }));
+            try {
+              await fetch('/api/lead-tags', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, color: colorPickerTag.bg, text_color: colorPickerTag.text })
+              });
+            } catch (_) {}
+            setColorPickerTag(null);
+          }}
+          className="ml-auto px-2.5 py-1 rounded-lg text-[11px] font-bold bg-[var(--color-accent)] text-[var(--color-text-on-accent)] hover:opacity-90 transition-opacity cursor-pointer"
+        >
+          Lưu màu
+        </button>
+        <button
+          type="button"
+          onClick={() => setColorPickerTag(null)}
+          className="px-2.5 py-1 rounded-lg text-[11px] font-semibold text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] cursor-pointer"
+        >
+          Đóng
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   const isVip = hasTag(committedTags, 'VIP');
   const quickActions = [
@@ -1140,20 +1290,25 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
               )}
 
               <div className="flex flex-wrap gap-1.5 items-center">
-                {/* 1. Starter tags as interactive toggle buttons */}
-                {STARTER_TAGS.map((starterTag) => {
-                  const isSelected = hasTag(committedTags, starterTag);
+                {/* Mọi nhãn đã định nghĩa: đang gắn = màu, đã bỏ tích = xám (không mất nhãn) */}
+                {allTagDefs.map((tagName) => {
+                  const isSelected = hasTag(committedTags, tagName);
+                  const tagColorEntry = tagColors[tagName.toLowerCase()] || {};
+                  const chipStyle = isSelected ? getTagChipStyle(tagColorEntry) : undefined;
                   return (
                     <button
-                      key={starterTag}
+                      key={tagName.toLowerCase()}
                       type="button"
-                      onClick={() => handleToggleTag(starterTag)}
+                      onClick={() => handleToggleTag(tagName)}
                       aria-pressed={isSelected}
                       disabled={savingTags}
-                      aria-label={`${isSelected ? 'Bỏ chọn' : 'Chọn'} nhãn ${starterTag}`}
+                      aria-label={`${isSelected ? 'Bỏ chọn' : 'Chọn'} nhãn ${tagName}`}
+                      style={chipStyle}
                       className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer border ${
                         isSelected
-                          ? 'bg-[var(--color-accent-subtle)] text-[var(--color-accent)] border-[var(--color-accent)]/30 shadow-xs ring-1 ring-[var(--color-accent)]/20'
+                          ? (chipStyle
+                            ? 'shadow-xs ring-1 ring-black/10 hover:opacity-80'
+                            : 'bg-[var(--color-accent-subtle)] text-[var(--color-accent)] border-[var(--color-accent)]/30 shadow-xs ring-1 ring-[var(--color-accent)]/20')
                           : 'bg-[var(--color-bg-surface)] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] border-[var(--color-border)]'
                       } disabled:opacity-50 disabled:cursor-not-allowed`}
                     >
@@ -1162,28 +1317,19 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
                       ) : (
                         <Tag size={12} strokeWidth={1.75} className="text-[var(--color-text-muted)] shrink-0" />
                       )}
-                      <span>{starterTag}</span>
+                      <span className="truncate max-w-[120px]">{tagName}</span>
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`Đổi màu nhãn ${tagName}`}
+                        title="Đổi màu nền + màu chữ của nhãn"
+                        onClick={(e) => { e.stopPropagation(); setColorPickerTag({ name: tagName, bg: tagColorEntry.bg || '#6366F1', text: tagColorEntry.text || '#FFFFFF' }); }}
+                        className="inline-flex w-3.5 h-3.5 rounded-full border border-white/40 cursor-pointer hover:scale-110 transition-transform shrink-0 ml-0.5"
+                        style={{ background: `linear-gradient(135deg, ${tagColorEntry.bg || '#6366F1'} 55%, ${tagColorEntry.text || '#FFFFFF'} 55%)` }}
+                      />
                     </button>
                   );
                 })}
-
-                {/* 2. Custom/Legacy tags outside starter list */}
-                {committedTags
-                  .filter((t) => !STARTER_TAGS.some((st) => st.toLowerCase() === t.toLowerCase()))
-                  .map((customTag) => (
-                    <button
-                      key={customTag}
-                      type="button"
-                      onClick={() => handleToggleTag(customTag)}
-                      aria-pressed="true"
-                      disabled={savingTags}
-                      aria-label={`Bỏ chọn nhãn ${customTag}`}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-[var(--color-success-subtle)] text-[var(--color-success)] border border-[var(--color-success)]/30 shadow-xs ring-1 ring-[var(--color-success)]/20 hover:opacity-80 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <Check size={12} strokeWidth={2.5} className="shrink-0" />
-                      <span className="truncate max-w-[120px]">{customTag}</span>
-                    </button>
-                  ))}
 
                 {/* 3. Add custom tag button */}
                 <button
@@ -1197,6 +1343,8 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
                   <span>Thêm</span>
                 </button>
               </div>
+
+              {colorPickerTag && !isTagEditorOpen && colorPickerPopover}
 
               {/* Inline Tags Editor */}
               {isTagEditorOpen && (
@@ -1286,6 +1434,44 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
                         Thêm
                       </button>
                     </div>
+                    <div className="mt-2 p-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-panel)]">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[10px] font-semibold text-[var(--color-text-muted)]">Màu nhãn mới</span>
+                        <span
+                          className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border"
+                          style={{ backgroundColor: newTagColor.bg, color: newTagColor.text, borderColor: newTagColor.bg }}
+                        >
+                          Xem trước
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 mb-1.5">
+                        {TAG_PALETTE.map((c) => (
+                          <button
+                            key={c}
+                            type="button"
+                            aria-label={'Chọn màu nền ' + c}
+                            onClick={() => setNewTagColor((prev) => ({ ...prev, bg: c }))}
+                            className={`w-5 h-5 rounded-full border-2 cursor-pointer transition-transform hover:scale-110 ${newTagColor.bg === c ? 'border-white ring-1 ring-white/60 scale-110' : 'border-transparent'}`}
+                            style={{ backgroundColor: c }}
+                          />
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-[var(--color-text-muted)]">Màu chữ:</span>
+                        {['#FFFFFF', '#000000'].map((tc) => (
+                          <button
+                            key={tc}
+                            type="button"
+                            aria-label={'Chọn màu chữ ' + (tc === '#FFFFFF' ? 'trắng' : 'đen')}
+                            onClick={() => setNewTagColor((prev) => ({ ...prev, text: tc }))}
+                            className={`w-5 h-5 rounded-full border-2 cursor-pointer ${newTagColor.text === tc ? 'border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]' : 'border-[var(--color-border)]'}`}
+                            style={{ backgroundColor: tc }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+              {isTagEditorOpen && colorPickerPopover}
+
                   </div>
 
                   {/* Error message */}
