@@ -2993,6 +2993,9 @@ wss.on('connection', (ws, req) => {
                       canonicalThreadId,
                       pageName: t.page_name || null
                     }, db);
+                    // Owner vừa được gắn/binding xác nhận -> mở gate READY cho
+                    // lane Page (không phải chờ tab reload để bắn READY lại).
+                    if (threadPageId) InboxSyncScheduler.markPageReady(String(threadPageId), account_id);
                   } catch (psErr) {
                     console.warn('[PAGE_SOURCE] Lỗi bind thread từ sync:', psErr.message);
                   }
@@ -3583,11 +3586,30 @@ wss.on('connection', (ws, req) => {
           if (pageId && pageName) {
             InboxSourceService.updatePageDisplayName({ pageId, pageName }, db);
           }
-          const source = pageId && accountId ? db.prepare(`
+          let source = pageId && accountId ? db.prepare(`
             SELECT id FROM inbox_sources
             WHERE source_type = 'page_messenger' AND status = 'ACTIVE'
               AND external_id = ? AND owner_account_id = ?
           `).get(pageId, accountId) : null;
+          if (!source && pageId && accountId) {
+            // Page source chưa tồn tại hoặc chưa bind owner (row tự tạo bởi
+            // scan Business Suite TRƯỚC khi page được kết nối). Business tab
+            // này nằm trong Chrome của account đã đăng ký (ws.accountId) ->
+            // tự đăng ký/gắn owner thay vì bỏ qua. Bỏ qua step này tạo deadlock:
+            // gate READY chờ PAGE_EXTENSION_READY, mà READY bị từ chối,
+            // owner chỉ được bind sau đó bởi sidebar sync -> không bao giờ mở.
+            try {
+              InboxSourceService.ensurePageSource({ pageId, accountId, pageName }, db);
+              source = db.prepare(`
+                SELECT id FROM inbox_sources
+                WHERE source_type = 'page_messenger' AND status = 'ACTIVE'
+                  AND external_id = ? AND owner_account_id = ?
+              `).get(pageId, accountId);
+              if (source) console.log(`[PageSync] Tự đăng ký/gắn owner page=${pageId} cho account=${accountId} lúc READY.`);
+            } catch (regErr) {
+              console.warn(`[PageSync] Tự đăng ký page=${pageId} thất bại:`, regErr.message);
+            }
+          }
           if (!source) {
             console.warn(`[PageSync] Ignored unregistered Page context account=${accountId} page=${pageId}`);
             break;
@@ -3677,6 +3699,9 @@ wss.on('connection', (ws, req) => {
               if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: ack }));
               break;
             }
+            // Batch hợp lệ từ tab Business của account -> page đang kết nối thật,
+            // mở gate READY (phòng trường hợp READY bị nuốt trước đó).
+            InboxSyncScheduler.markPageReady(pageId, authenticatedAccountId);
             const canonicalThreadId = resolveInternalThreadId(db, authenticatedAccountId, pageThreadId, pageId);
 
             if (envelope.page_name) {
