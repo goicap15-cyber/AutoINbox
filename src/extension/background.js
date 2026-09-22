@@ -3792,8 +3792,13 @@ async function stagePersonalMessengerAttachment(tabId, attachmentOrManifest) {
     for (let attempt = 1; attempt <= 2; attempt++) {
       const point = await findAttachButtonCenter(tabId, 6000, preferredKind);
       try {
+        // Video trước đây bị ép đi đường chặn hộp thoại chọn file - menu
+        // đính kèm của Messenger thường không mở native chooser kịp -> đạn
+        // CAMERA_STAGE chết cả 2 lượt. Đường set file trực tiếp vào input
+        // (đã chứng minh với ảnh) chấp nhận video khi accept cho phép, nên
+        // dùng làm đường chính cho mọi loại; chooser chỉ là fallback.
         await stageAttachmentViaFileChooser(tabId, point, attachmentOrManifest, {
-          preferDirectInput: preferredKind !== 'video'
+          preferDirectInput: true
         });
         return;
       } catch (error) {
