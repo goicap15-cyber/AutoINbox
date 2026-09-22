@@ -555,6 +555,25 @@ export default function App() {
   const loadThreadsRef = useRef(loadThreads);
   useEffect(() => { loadThreadsRef.current = loadThreads; }, [loadThreads]);
 
+  // Ghim / bỏ ghim hội thoại: cập nhật LOCAL ngay, server là nguồn chân lý.
+  const handleToggleThreadPinned = useCallback(async (thread, nextPinned) => {
+    const threadId = String(thread?.id || '');
+    if (!threadId) return;
+    setThreads((prev) => prev.map((t) => (String(t.id) === threadId
+      ? { ...t, pinned: nextPinned ? 1 : 0 }
+      : t)));
+    try {
+      const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pinned: nextPinned })
+      });
+      if (!res.ok) throw new Error('fail');
+    } catch (_) {
+      loadThreadsRef.current();
+    }
+  }, []);
+
   // Đánh dấu chưa đọc/đã đọc: cập nhật LOCAL ngay cho mượt, server là nguồn chân lý.
   const handleToggleThreadUnread = useCallback(async (thread, nextUnread) => {
     const threadId = String(thread?.id || '');
@@ -962,6 +981,16 @@ export default function App() {
       // list when a legacy event lacks the new summary payload.
       if (!newMsg.thread_summary?.id) loadThreadsRef.current();
 
+      // Hội thoại đang mở trong CRM: tin khách đến khi đang xem = đã đọc luôn
+      // (kiểu Messenger) - gỡ nhắc + cờ dính để danh sách không hiện chưa đọc ảo.
+      if (!newMsg.is_outgoing && String(activeThreadIdRef.current) === tidStr) {
+        fetch('/api/threads/' + encodeURIComponent(tidStr) + '/unread', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ unread: 0 })
+        }).catch(() => {});
+      }
+
 
       // Media URLs are already included in NEW_MESSAGE/THREAD_MESSAGES_UPDATED.
       // Do not replace the live state with a delayed REST response: that response
@@ -1360,10 +1389,21 @@ export default function App() {
       setThreads(prev => prev.map(t => String(t.id) === tidStr ? { ...t, ai_paused_until: until } : t));
     });
     socket.on('THREAD_ASSIGNED', () => loadThreadsRef.current());
+    socket.on('THREAD_PIN_CHANGED', (payload) => {
+      const tid = String(payload?.thread_id || '');
+      const next = Number(payload?.pinned) === 1;
+      if (!tid) return;
+      setThreads((prev) => prev.map((t) => (String(t.id) === tid
+        ? { ...t, pinned: next ? 1 : 0 }
+        : t)));
+    });
     socket.on('THREAD_UNREAD_CHANGED', (payload) => {
       const tid = String(payload?.thread_id || '');
       const next = Number(payload?.is_unread) === 1;
       if (!tid) return;
+      // Thread đang mở trong CRM thì không nhảy sang chưa đọc (người dùng
+      // đang nhìn nó rồi); server-side sync sẽ tự hiệu chỉnh về sau.
+      if (next && String(activeThreadIdRef.current) === tid) return;
       setThreads((prev) => prev.map((t) => (String(t.id) === tid
         ? { ...t, is_unread: next ? 1 : 0, unread_manual: next ? 1 : -1 }
         : t)));
@@ -1881,8 +1921,15 @@ export default function App() {
         threads={threads} activeThreadId={activeThreadId}
         onSelectThread={(threadId) => {
           const clickedThread = threads.find((thread) => String(thread.id) === String(threadId));
-          // Chỉ nút phong bì mới đổi trạng thái chưa đọc (yêu cầu 21/09):
-          // mở hội thoại KHÔNG tự đánh dấu đã đọc.
+          // Mở hội thoại = coi như đã đọc: gỡ cờ chưa-đọc để hội thoại hạ về
+          // vị trí theo thời gian như hành vi Messenger.
+          if (clickedThread && (Number(clickedThread.is_unread) === 1 || Number(clickedThread.unread_manual) === 1)) {
+            fetch('/api/threads/' + encodeURIComponent(String(threadId)) + '/unread', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ unread: 0 })
+            }).catch(() => {});
+          }
           requestThreadNavigation(clickedThread);
         }}
         activeTab={activeTab} onTabChange={handleConversationTabChange}
@@ -1903,6 +1950,7 @@ export default function App() {
         onCreateCampaign={() => setActiveModal('campaigns')}
         onBulkHistorySync={handleBulkHistorySync}
         onToggleUnread={handleToggleThreadUnread}
+        onTogglePin={handleToggleThreadPinned}
         bulkHistoryProgress={bulkHistoryProgress}
       />
 

@@ -98,6 +98,9 @@ function isBareVietnamMobileText(text) {
 
     /^Bạn đã phản hồi ghi chú của (?:họ|họ\.|họ\.?)$/i,
     /^Bạn đã trả lời tin của .+\.$/i,
+  // Chip gợi ý trả lời của Messenger (suggested replies hiện dưới ô soạn thảo,
+  // vd 'Trao đổi thêm?') - DOM observer đọc nhầm thành bubble tin của khách.
+  /^Trao đổi thêm\??$/i,
     // Debug trace and junk text patterns (TRACE_ONE_1509, dsdsdsds, numeric debug strings)
     /^TRACE_[A-Z0-9_]+$/i,
     /^(?:ds){2,}$/i,

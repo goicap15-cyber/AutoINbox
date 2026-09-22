@@ -2362,13 +2362,44 @@ async function ensureRoleMessengerTab(accountId, role) {
 }
 
 async function selectAttachmentCapableMessengerTab(accountId, role = 'interaction') {
-  const primary = await ensureRoleMessengerTab(accountId, role);
-  if (!primary?.id) return primary || null;
-  const isDedicated = await isDedicatedMessengerRoleTab(accountId, primary.id);
-  if (isDedicated) {
-    console.warn(`[FB Engine] Warning: Selected tab ${primary.id} is registered as dedicated background tab; ignoring for attachment send.`);
-    return null;
+  let primary = await ensureRoleMessengerTab(accountId, role);
+  if (primary?.id && await isDedicatedMessengerRoleTab(accountId, primary.id)) {
+    if (role === 'campaign') {
+      // Tab campaign là tab riêng ĐỂ GỬI chiến dịch - dùng trực tiếp, không
+      // được loại nó vì "dedicated" (trước đây hàm này tự tạo tab campaign
+      // xong lại từ chối chính tab đó -> FACEBOOK_TAB_NOT_FOUND triệt để).
+      return primary;
+    }
+    // Tab đang chạy role dedicated (history/discovery...) - trả null ngay sẽ
+    // thành FACEBOOK_TAB_NOT_FOUND khi tab duy nhất cũng là tab sync. Thử tìm
+    // tab messenger thường khác trước, chưa có thì tạo tab nền mới để gửi.
+    console.warn(`[FB Engine] Tab ${primary.id} đang giữ role dedicated; tìm/tạo tab thường để gửi đính kèm.`);
+    primary = null;
+    try {
+      const all = await chrome.tabs.query({ url: ['*://www.facebook.com/*'] });
+      for (const t of all) {
+        if (!/\/messages(?:\/|$|\?)/.test(String(t.url || ''))) continue;
+        if (await isDedicatedMessengerRoleTab(accountId, t.id)) continue;
+        primary = t;
+        break;
+      }
+    } catch (e) {}
+    if (!primary?.id) {
+      const created = await new Promise((resolve) => {
+        chrome.tabs.create({ url: 'https://www.facebook.com/messages', active: false }, resolve);
+      });
+      if (created?.id) {
+        await Promise.race([waitForTabComplete(created.id, 12000), delay(4000)]).catch(() => null);
+        await delay(800);
+        try {
+          const settled = await chrome.tabs.get(created.id);
+          // Facebook chuyển identity sang Business -> tab này không dùng được.
+          if (!isBusinessSuiteUrl(settled.url)) primary = settled;
+        } catch (e) {}
+      }
+    }
   }
+  if (!primary?.id) return primary || null;
   const capable = await chrome.scripting.executeScript({
     target: { tabId: primary.id },
     func: () => Boolean(
@@ -2468,12 +2499,18 @@ function resolvePersonalRecipientThreadId(threadId, explicitRecipientThreadId = 
   return parts.length ? parts[parts.length - 1] : '';
 }
 
-function assertCampaignRecipientIdentity(expectedContactName, visibleContactName, strictRecipientIdentity, stage) {
+function assertCampaignRecipientIdentity(expectedContactName, visibleContactName, strictRecipientIdentity, stage, routeVerified = false) {
   if (!strictRecipientIdentity) return true;
   const normalizeIdentity = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
   const isGeneric = (value) => !value || /^(khách hàng|chưa có liên hệ|khach hang|default|customer|user)$/i.test(String(value).trim());
   if (isGeneric(expectedContactName)) return true;
   if (isGeneric(visibleContactName)) {
+    // Route thread id đã xác minh đúng hội thoại thì tên hiển thị không đọc
+    // được chỉ là lỗi trích xuất DOM - cảnh báo, không chặn gửi nhầm ai.
+    if (routeVerified) {
+      console.warn('[CAMPAIGN] Visible contact name unreadable after verified route; allowing:', { expectedContactName, visibleContactName, stage });
+      return true;
+    }
     const error = new Error('Không xác minh được đúng người nhận chiến dịch trên Messenger; đã chặn gửi.');
     error.code = 'CAMPAIGN_RECIPIENT_IDENTITY_UNVERIFIED';
     error.stage = stage;
@@ -2482,6 +2519,13 @@ function assertCampaignRecipientIdentity(expectedContactName, visibleContactName
   const expected = normalizeIdentity(expectedContactName);
   const visible = normalizeIdentity(visibleContactName);
   if (expected === visible || expected.includes(visible) || visible.includes(expected)) return true;
+  // Route thread id đã xác minh đúng hội thoại: tên hiển thị lệch chỉ là do
+  // CRM đặt biệt danh khác tên thật trên Messenger (vd 'thức đơ' vs tên thật)
+  // - cảnh báo rồi gửi, không chặn người nhận đúng.
+  if (routeVerified) {
+    console.warn('[CAMPAIGN] Route verified; nickname differs from Messenger display name, allowing:', { expectedContactName, visibleContactName, stage });
+    return true;
+  }
   const error = new Error('Người nhận đang mở (' + visibleContactName + ') không khớp người đã chọn (' + expectedContactName + '); đã chặn gửi.');
   error.code = 'CAMPAIGN_RECIPIENT_IDENTITY_MISMATCH';
   error.stage = stage;
@@ -2632,7 +2676,7 @@ async function handleSendPersonalMessageWithAttachment({ thread_id, recipient_th
     const isGenericContactName = (n) => !n || /^(khách hàng|chưa có liên hệ|khach hang|default|customer|user)$/i.test(String(n).trim());
     const normalizedExpectedName = String(expected_contact_name || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
     const normalizedVisibleName = String(visibleContactName || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
-    assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_ATTACHMENT_IDENTITY');
+    assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_ATTACHMENT_IDENTITY', true);
     if (!isGenericContactName(normalizedExpectedName) && !isGenericContactName(normalizedVisibleName) && normalizedExpectedName !== normalizedVisibleName) {
       if (!normalizedExpectedName.includes(normalizedVisibleName) && !normalizedVisibleName.includes(normalizedExpectedName)) {
         console.warn('[ATTACHMENT] Contact identity mismatch warning:', { expected_contact_name, visibleContactName });
@@ -2895,7 +2939,7 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
     const visibleContactName = interactionState.visible_contact_name;
     const normalizeIdentity = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
     const isGenericContactName = (n) => !n || /^(khách hàng|chưa có liên hệ|khach hang|default|customer|user)$/i.test(String(n).trim());
-    assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_TEXT_IDENTITY');
+    assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_TEXT_IDENTITY', true);
     if (expected_contact_name && visibleContactName && !isGenericContactName(expected_contact_name) && !isGenericContactName(visibleContactName)) {
       const normExpected = normalizeIdentity(expected_contact_name);
       const normVisible = normalizeIdentity(visibleContactName);

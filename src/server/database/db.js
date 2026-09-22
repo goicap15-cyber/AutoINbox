@@ -306,6 +306,13 @@ const migrations = [
     }
   },
   {
+    version: 20260922001,
+    name: 'add_threads_pinned',
+    up: (db) => {
+      try { db.exec('ALTER TABLE threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;'); } catch (e) { }
+    }
+  },
+  {
     version: 20260921001,
     name: 'add_threads_unread_manual',
     up: (db) => {

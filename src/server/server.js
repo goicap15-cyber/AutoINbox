@@ -2119,12 +2119,17 @@ wss.on('connection', (ws, req) => {
             ? Boolean(db.prepare('SELECT 1 FROM messages WHERE thread_id = ? AND fb_message_id = ?')
               .get(String(canonicalThreadId), String(m.fb_message_id)))
             : false;
-          if (!isReplayedObservation && !isOutgoing) {
-            // Tin mới của khách: bật chưa đọc + GẮN CỜ DÍNH. Chỉ nút phong bì
-            // trong CRM mới được gỡ (yêu cầu sản phẩm 21/09): mở hội thoại,
-            // trả lời tin hay Facebook tự đánh dấu đọc đều KHÔNG tắt nhắc.
-            db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-            io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
+          if (!isReplayedObservation) {
+            if (isOutgoing) {
+              // Operator trả lời = đã đọc hội thoại: gỡ mọi cờ đánh tay.
+              db.prepare('UPDATE threads SET is_unread = 0, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
+            } else {
+              // Tin mới của khách: bật chưa đọc + GẮN CỜ DÍNH, vì tab Facebook
+              // có thể đang đậu đúng thread này nên Facebook tự báo "đã đọc"
+              // vài giây sau qua sync sidebar - không được để nó tắt nhắc.
+              db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
+            }
           }
           ConversationRepository.upsertThread({
             id: m.thread_id,
@@ -3072,6 +3077,10 @@ wss.on('connection', (ws, req) => {
                   source: 'sidebar_preview'
                 }], db);
                 if (previewPersistence.insertedIds.includes(previewId)) {
+                  // CHỈ tin mới thật sự (chưa có trong DB) mới được gắn cờ dính
+                  // chưa đọc + đẩy lên đầu. Tin cũ bị quét lại không được phép.
+                  db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
                   const previewRow = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(previewId);
                   if (previewRow) {
                     io.emit('NEW_MESSAGE', { ...previewRow, account_id: changed.account_id, provisional: true });
@@ -5026,6 +5035,24 @@ app.post('/api/threads/:id/unread', (req, res) => {
     res.json({ success: true, id: String(id), is_unread: next });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Không thể cập nhật trạng thái chưa đọc.' });
+  }
+});
+
+// Ghim / bỏ ghim hội thoại. Không gửi "pinned" trong body = toggle.
+app.post('/api/threads/:id/pin', (req, res) => {
+  try {
+    const id = req.params.id;
+    const row = db.prepare('SELECT pinned FROM threads WHERE id = ?').get(id);
+    if (!row) return res.status(404).json({ error: 'Không tìm thấy hội thoại.' });
+    const desired = req.body && req.body.pinned !== undefined ? Number(req.body.pinned) : null;
+    const next = desired === null ? (Number(row.pinned) ? 0 : 1) : (desired ? 1 : 0);
+    if (next !== Number(row.pinned)) {
+      db.prepare('UPDATE threads SET pinned = ? WHERE id = ?').run(next, id);
+    }
+    io.emit('THREAD_PIN_CHANGED', { thread_id: String(id), pinned: next });
+    res.json({ success: true, id: String(id), pinned: next });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Không thể cập nhật trạng thái ghim.' });
   }
 });
 
