@@ -2362,13 +2362,39 @@ async function ensureRoleMessengerTab(accountId, role) {
 }
 
 async function selectAttachmentCapableMessengerTab(accountId, role = 'interaction') {
-  const primary = await ensureRoleMessengerTab(accountId, role);
-  if (!primary?.id) return primary || null;
-  const isDedicated = await isDedicatedMessengerRoleTab(accountId, primary.id);
-  if (isDedicated) {
-    console.warn(`[FB Engine] Warning: Selected tab ${primary.id} is registered as dedicated background tab; ignoring for attachment send.`);
-    return null;
+  let primary = await ensureRoleMessengerTab(accountId, role);
+  if (primary?.id && await isDedicatedMessengerRoleTab(accountId, primary.id)) {
+    // Tab đang chạy role dedicated (history/discovery/campaign...) - trước đây
+    // trả null ngay -> FACEBOOK_TAB_NOT_FOUND giết chiến dịch khi tab duy nhất
+    // cũng là tab sync. Thử tìm tab messenger thường khác trước, chưa có thì
+    // tạo tab nền mới để gửi.
+    console.warn(`[FB Engine] Tab ${primary.id} đang giữ role dedicated; tìm/tạo tab thường để gửi đính kèm.`);
+    primary = null;
+    try {
+      const all = await chrome.tabs.query({ url: ['*://www.facebook.com/*'] });
+      for (const t of all) {
+        if (!/\/messages(?:\/|$|\?)/.test(String(t.url || ''))) continue;
+        if (await isDedicatedMessengerRoleTab(accountId, t.id)) continue;
+        primary = t;
+        break;
+      }
+    } catch (e) {}
+    if (!primary?.id) {
+      const created = await new Promise((resolve) => {
+        chrome.tabs.create({ url: 'https://www.facebook.com/messages', active: false }, resolve);
+      });
+      if (created?.id) {
+        await Promise.race([waitForTabComplete(created.id, 12000), delay(4000)]).catch(() => null);
+        await delay(800);
+        try {
+          const settled = await chrome.tabs.get(created.id);
+          // Facebook chuyển identity sang Business -> tab này không dùng được.
+          if (!isBusinessSuiteUrl(settled.url)) primary = settled;
+        } catch (e) {}
+      }
+    }
   }
+  if (!primary?.id) return primary || null;
   const capable = await chrome.scripting.executeScript({
     target: { tabId: primary.id },
     func: () => Boolean(
