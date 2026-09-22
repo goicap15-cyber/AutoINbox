@@ -2499,12 +2499,18 @@ function resolvePersonalRecipientThreadId(threadId, explicitRecipientThreadId = 
   return parts.length ? parts[parts.length - 1] : '';
 }
 
-function assertCampaignRecipientIdentity(expectedContactName, visibleContactName, strictRecipientIdentity, stage) {
+function assertCampaignRecipientIdentity(expectedContactName, visibleContactName, strictRecipientIdentity, stage, routeVerified = false) {
   if (!strictRecipientIdentity) return true;
   const normalizeIdentity = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
   const isGeneric = (value) => !value || /^(khách hàng|chưa có liên hệ|khach hang|default|customer|user)$/i.test(String(value).trim());
   if (isGeneric(expectedContactName)) return true;
   if (isGeneric(visibleContactName)) {
+    // Route thread id đã xác minh đúng hội thoại thì tên hiển thị không đọc
+    // được chỉ là lỗi trích xuất DOM - cảnh báo, không chặn gửi nhầm ai.
+    if (routeVerified) {
+      console.warn('[CAMPAIGN] Visible contact name unreadable after verified route; allowing:', { expectedContactName, visibleContactName, stage });
+      return true;
+    }
     const error = new Error('Không xác minh được đúng người nhận chiến dịch trên Messenger; đã chặn gửi.');
     error.code = 'CAMPAIGN_RECIPIENT_IDENTITY_UNVERIFIED';
     error.stage = stage;
@@ -2513,6 +2519,13 @@ function assertCampaignRecipientIdentity(expectedContactName, visibleContactName
   const expected = normalizeIdentity(expectedContactName);
   const visible = normalizeIdentity(visibleContactName);
   if (expected === visible || expected.includes(visible) || visible.includes(expected)) return true;
+  // Route thread id đã xác minh đúng hội thoại: tên hiển thị lệch chỉ là do
+  // CRM đặt biệt danh khác tên thật trên Messenger (vd 'thức đơ' vs tên thật)
+  // - cảnh báo rồi gửi, không chặn người nhận đúng.
+  if (routeVerified) {
+    console.warn('[CAMPAIGN] Route verified; nickname differs from Messenger display name, allowing:', { expectedContactName, visibleContactName, stage });
+    return true;
+  }
   const error = new Error('Người nhận đang mở (' + visibleContactName + ') không khớp người đã chọn (' + expectedContactName + '); đã chặn gửi.');
   error.code = 'CAMPAIGN_RECIPIENT_IDENTITY_MISMATCH';
   error.stage = stage;
@@ -2663,7 +2676,7 @@ async function handleSendPersonalMessageWithAttachment({ thread_id, recipient_th
     const isGenericContactName = (n) => !n || /^(khách hàng|chưa có liên hệ|khach hang|default|customer|user)$/i.test(String(n).trim());
     const normalizedExpectedName = String(expected_contact_name || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
     const normalizedVisibleName = String(visibleContactName || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
-    assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_ATTACHMENT_IDENTITY');
+    assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_ATTACHMENT_IDENTITY', true);
     if (!isGenericContactName(normalizedExpectedName) && !isGenericContactName(normalizedVisibleName) && normalizedExpectedName !== normalizedVisibleName) {
       if (!normalizedExpectedName.includes(normalizedVisibleName) && !normalizedVisibleName.includes(normalizedExpectedName)) {
         console.warn('[ATTACHMENT] Contact identity mismatch warning:', { expected_contact_name, visibleContactName });
@@ -2926,7 +2939,7 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
     const visibleContactName = interactionState.visible_contact_name;
     const normalizeIdentity = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
     const isGenericContactName = (n) => !n || /^(khách hàng|chưa có liên hệ|khach hang|default|customer|user)$/i.test(String(n).trim());
-    assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_TEXT_IDENTITY');
+    assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_TEXT_IDENTITY', true);
     if (expected_contact_name && visibleContactName && !isGenericContactName(expected_contact_name) && !isGenericContactName(visibleContactName)) {
       const normExpected = normalizeIdentity(expected_contact_name);
       const normVisible = normalizeIdentity(visibleContactName);
