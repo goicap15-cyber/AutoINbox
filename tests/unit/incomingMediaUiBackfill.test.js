@@ -30,7 +30,7 @@ test('incoming customer media is never discarded by the outgoing anti-ghost guar
 
 test('realtime customer messages survive extension websocket reconnects', () => {
   const background = fs.readFileSync('src/extension/background.js', 'utf8');
-  assert.match(background, /QUEUED_BACKEND_TYPES = new Set\(\['NEW_MESSAGE_RECEIVED'\]\)/);
+  assert.match(background, /QUEUED_BACKEND_TYPES = new Set\(\[.*'NEW_MESSAGE_RECEIVED'.*\]\)/);
   assert.match(background, /!backendAccountRegistered/);
   assert.match(background, /backendAccountRegistered = true/);
   assert.match(background, /await flushBackendOutbox\(\)/);

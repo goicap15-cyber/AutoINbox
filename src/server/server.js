@@ -4721,7 +4721,8 @@ app.post('/api/accounts/:id/start', async (req, res) => {
   // Tuần tự hóa launch Page: chạy song song từng bị race startAccountProcess
   // (3 Page = 3 lần launch Chrome tranh nhau - reproduced 2026-09-19). Mỗi
   // Page vẫn mở Business Suite tab riêng trong CÙNG Chrome account.
-  for (const source of activePageSourcesForAccount(accountId)) {
+  const pageSources = activePageSourcesForAccount(accountId);
+  for (const source of pageSources) {
     try {
       await processManager.startPageProcess(source.page_id, accountId);
     } catch (error) {
@@ -4729,7 +4730,7 @@ app.post('/api/accounts/:id/start', async (req, res) => {
     }
   }
 
-  res.json({ success: true, page_windows_requested: pageLaunches.length });
+  res.json({ success: true, page_windows_requested: pageSources.length });
 });
 app.post('/api/accounts/:id/stop', (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {

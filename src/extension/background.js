@@ -5664,6 +5664,14 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
   // 2026-09-19: yêu cầu Phạm Hùng, tab đang mở Lê Kim Thanh Ngân).
   const verifyBizIdentity = async () => {
     if (!contactName) return true; // không có tên để đối chiếu -> tin vào ID
+    // URL do Facebook TỰ ghi selected_item_id=<target> là bằng chứng định tuyến
+    // mạnh nhất - override bộ đọc header (bộ này có thể nhặt nhãn nút hành động
+    // kiểu "Chuyển đến thư mục Spam" thay vì tên khách - reproduce 2026-09-21).
+    try {
+      const fresh = await chrome.tabs.get(tab.id).catch(() => null);
+      const urlId = String(fresh?.url || '').match(/[?&](?:selected_item_id|thread_id)=(\d+)/)?.[1];
+      if (urlId && String(urlId) === targetId) return true;
+    } catch (_) {}
     const verdict = await verifyBizHeaderIdentity(tab.id, contactName, 3500);
     return verdict.ok;
   };
@@ -6084,13 +6092,15 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
 
   if (onTargetThread) crmHistoryThreadByTab.set(tab.id, navigationThreadId);
 
-  // Page thread yêu cầu danh tính NGHIÊM NGẶT: URL/aria có thể trả null (URL
-  // thiếu selected_item_id) hoặc stale. Khi ID không đọc được, chấp nhận nếu
-  // tên trên header khung chat khớp contact_name; ngược lại -> mismatch.
+  // Page thread yêu cầu danh tính NGHIÊM NGẶT: URL (Facebook tự ghi
+  // selected_item_id khi mở hội thoại) là bằng chứng chính - khớp là ĐỦ, không
+  // phụ thuộc onTargetThread (verify header có thể nhặt nhầm nhãn nút hành
+  // động kiểu "Chuyển đến thư mục Spam" - reproduce 2026-09-21). Chỉ khi URL
+  // không có ID mới dùng header làm bằng chứng phụ.
   let pageIdentityOk = true;
   let routeDetail = null;
   if (page_id) {
-    if (onTargetThread && currentTabThreadId != null && String(currentTabThreadId) === String(navigationThreadId)) {
+    if (currentTabThreadId != null && String(currentTabThreadId) === String(navigationThreadId)) {
       pageIdentityOk = true;
     } else if (contact_name) {
       const verdict = await verifyBizHeaderIdentity(tab.id, contact_name, 3500);

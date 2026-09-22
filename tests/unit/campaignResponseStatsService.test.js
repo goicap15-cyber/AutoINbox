@@ -12,6 +12,7 @@ function createDb() {
     CREATE TABLE messages (id INTEGER PRIMARY KEY, fb_message_id TEXT, thread_id TEXT, content TEXT, is_outgoing INTEGER, created_at TEXT);
     CREATE TABLE contact_phone_captures (id INTEGER PRIMARY KEY, thread_id TEXT, message_id TEXT, normalized_phone TEXT, selection_state TEXT, message_timestamp_ms INTEGER, detected_at TEXT);
     CREATE TABLE campaign_response_events (id INTEGER PRIMARY KEY, campaign_id TEXT, campaign_recipient_id TEXT, message_id INTEGER UNIQUE, created_at TEXT);
+    CREATE TABLE contacts (thread_id TEXT PRIMARY KEY, phone TEXT, phone_captured_at TEXT);
   `);
   return db;
 }

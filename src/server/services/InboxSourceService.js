@@ -195,7 +195,7 @@ class InboxSourceService {
     // namespaced (page_<pageId>:<psid>) - một thread cá nhân (id thường)
     // không bao giờ bị chuyển sang nguồn Page nữa, tránh sidebar/metadata
     // của Page "chiếm" hội thoại cá nhân cùng psid.
-    if (targetThreadId && String(targetThreadId).startsWith(`page_${pageId}:`)) {
+    if (targetThreadId && (String(targetThreadId).startsWith(`page:${pageId}:`) || String(targetThreadId).startsWith(`page_${pageId}:`))) {
       const thread = database.prepare('SELECT source_id FROM threads WHERE id = ?').get(String(targetThreadId));
       if (thread && thread.source_id !== sourceId) {
         database.prepare('UPDATE threads SET source_id = ? WHERE id = ?').run(sourceId, String(targetThreadId));
