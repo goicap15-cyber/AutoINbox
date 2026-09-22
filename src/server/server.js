@@ -3028,6 +3028,12 @@ wss.on('connection', (ws, req) => {
             for (const changed of changedUnreadThreads) {
               const previewContent = cleanMessageText(changed.preview_content);
               const canonicalThreadId = resolveInternalThreadId(db, changed.account_id, changed.thread_id, changed.page_id || null) || changed.thread_id;
+              // Tin mới của khách phát hiện qua sidebar scan: gắn cờ dính NGAY
+              // tại đây. Tab Facebook có thể đang đậu đúng thread này nên FB
+              // tự báo "đã đọc" trong chính lượt scan kế tiếp - không được để
+              // trạng thái chưa đọc (và việc đẩy lên đầu) bị tắt ngay sau đó.
+              db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
               if (previewContent) {
                 const previewTimestamp = Date.now();
                 const previewHash = crypto.createHash('sha1')
