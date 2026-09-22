@@ -5284,7 +5284,8 @@ function scrapeBusinessSuiteSidebar() {
       let last_message = '';
       row.querySelectorAll('span, div, p').forEach(el => {
         const txt = el.textContent.trim();
-        if (txt && txt !== name && !txt.includes(name) && !isSystemText(txt) && txt.length > 2 && txt.length < 200 && !/^\d+\s*(?:ngày|giờ|phút|năm|s|m|h|d|y)$/i.test(txt) && !/^\d{1,2}:\d{2}$/.test(txt)) {
+        const isSeparatorJunk = /^[\s\u00b7\u2022.\-|•·]+$/.test(txt);
+        if (txt && !isSeparatorJunk && txt !== name && !txt.includes(name) && !isSystemText(txt) && txt.length > 2 && txt.length < 200 && !/^\d+\s*(?:ngày|giờ|phút|năm|s|m|h|d|y)$/i.test(txt) && !/^\d{1,2}:\d{2}$/.test(txt)) {
           if (!last_message || txt.length < last_message.length) last_message = txt;
         }
       });
@@ -5371,7 +5372,8 @@ function scrapeFacebookSidebar() {
       let last_message = '';
       for (const span of spans) {
         const txt = span.textContent.trim();
-        if (txt && txt !== name && !txt.includes(name) && txt.length > 2 && txt.length < 200 && !/^\d+\s*(?:ngày|giờ|phút|năm|s|m|h|d|y)$/i.test(txt)) last_message = txt;
+        const isSeparatorJunk = /^[\s\u00b7\u2022.\-|•·]+$/.test(txt);
+        if (txt && !isSeparatorJunk && txt !== name && !txt.includes(name) && !isSystemText(txt) && txt.length > 2 && txt.length < 200 && !/^\d+\s*(?:ngày|giờ|phút|năm|s|m|h|d|y)$/i.test(txt)) last_message = txt;
       }
 
       // Icon-only Like has no text preview and Facebook may omit the unread dot.

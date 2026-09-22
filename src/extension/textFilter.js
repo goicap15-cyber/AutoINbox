@@ -130,12 +130,15 @@ function isBareVietnamMobileText(text) {
     /^(?:Tất cả(?: các)? công cụ|All tools)$/i
   ];
 
+  const SEPARATOR_ONLY_REGEX = /^[\s\u00b7\u2022.\-|•·]+$/;
+
   function isSystemOrMetadataText(text) {
     if (isBareVietnamMobileText(text)) return false; // SĐT VN: không phải junk
     if (/^d{9,}$/.test(String(text || '').trim())) return true; // chuỗi số rác dài (đã loại SĐT VN)
     if (!text || typeof text !== 'string') return true;
     const trimmed = text.trim();
     if (!trimmed) return true;
+    if (SEPARATOR_ONLY_REGEX.test(trimmed)) return true;
     if (/(?:Chưa\s*có\s*tin\s*nhắn|ChÃ|tin\s*nh[áÃaàáảãạâầấẩẫậăằắẳẵặ]*[n]|No\s*messages?)/i.test(trimmed)) return true;
     if (RELATIVE_TIME_METADATA_RE.test(trimmed)) return true;
 
@@ -189,7 +192,7 @@ function isBareVietnamMobileText(text) {
       return '👍';
     }
 
-    if (!text) return '';
+    if (!text || SEPARATOR_ONLY_REGEX.test(text)) return '';
 
     if (isSystemOrMetadataText(text)) return '';
 

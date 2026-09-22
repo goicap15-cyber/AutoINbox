@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, ExternalLink, ShieldAlert, RefreshCw, PlusCircle, Trash2, Monitor } from 'lucide-react';
+import ConfirmModal from './ConfirmModal';
 
 export default function AccountManagerModal({ onClose, onSourcesChanged, onFacebookSyncStart, socket, sessionUser }) {
   const isCompanyAdmin = sessionUser?.company_role === 'ADMIN';
@@ -9,6 +10,7 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
   const [startingId, setStartingId] = useState(null);
   const [displayActionId, setDisplayActionId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const [accountToDelete, setAccountToDelete] = useState(null);
   const [accountActionError, setAccountActionError] = useState('');
   const [addingSession, setAddingSession] = useState(false);
   const [pendingKey, setPendingKey] = useState(null);
@@ -231,15 +233,13 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
       setDisplayActionId(null);
     }
   };
-  const handleDeleteAccount = async (account) => {
-    const accountName = account.name || account.id;
-    const confirmed = window.confirm(
-      `Xóa tài khoản "${accountName}" khỏi CRM?\n\n` +
-      'Hội thoại, tin nhắn và cấu hình riêng của tài khoản này sẽ bị xóa. ' +
-      'Thư mục Chrome profile của tài khoản cũng sẽ bị xóa khỏi máy.'
-    );
-    if (!confirmed) return;
+  const handleDeleteAccount = (account) => {
+    setAccountToDelete(account);
+  };
 
+  const executeDeleteAccount = async () => {
+    if (!accountToDelete) return;
+    const account = accountToDelete;
     setAccountActionError('');
     setDeletingId(account.id);
     try {
@@ -253,6 +253,7 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
       ));
       await loadInboxSources();
       onSourcesChanged?.();
+      setAccountToDelete(null);
     } catch (error) {
       setAccountActionError(error.message || 'Không thể xóa tài khoản');
     } finally {
@@ -535,6 +536,24 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
           </button>
         </div>
       </div>
+
+      <ConfirmModal
+        isOpen={Boolean(accountToDelete)}
+        title="Xóa tài khoản Facebook"
+        message={
+          accountToDelete
+            ? `Bạn có chắc chắn muốn xóa tài khoản "${accountToDelete.name || accountToDelete.id}" khỏi CRM?\n\n` +
+              '• Hội thoại, tin nhắn và cấu hình riêng của tài khoản này sẽ bị xóa vĩnh viễn.\n' +
+              '• Thư mục Chrome profile của tài khoản cũng sẽ được dọn dẹp khỏi máy tính.'
+            : ''
+        }
+        confirmText="Xóa tài khoản"
+        cancelText="Hủy"
+        variant="danger"
+        isLoading={Boolean(deletingId)}
+        onConfirm={executeDeleteAccount}
+        onClose={() => !deletingId && setAccountToDelete(null)}
+      />
     </div>
   );
 }

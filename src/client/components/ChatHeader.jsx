@@ -63,7 +63,9 @@ export default function ChatHeader({
   const customerName = activeThread.nickname || activeThread.contact_name || activeThread.name || 'Khách hàng';
   const avatarColor = pickAvatarColor(activeThread.id || customerName);
   const showAccountPill = accounts.length > 1;
-  const messengerUrl = sourceType === 'page_messenger' ? null : (activeThread.thread_url || `https://facebook.com/messages/t/${activeThread.external_thread_id || activeThread.id}`);
+  const messengerUrl = sourceType === 'page_messenger'
+    ? (activeThread.profile_url || (activeThread.external_thread_id && /^\d{10,18}$/.test(String(activeThread.external_thread_id)) ? `https://facebook.com/${activeThread.external_thread_id}` : null))
+    : (activeThread.thread_url || `https://facebook.com/messages/t/${activeThread.external_thread_id || activeThread.id}`);
   const [chromeToggling, setChromeToggling] = React.useState(false);
   const isChromeRunning = account?.is_chrome_running === true;
   const isChromeHidden = account?.chrome_display_mode === 'BACKGROUND';
@@ -162,7 +164,11 @@ export default function ChatHeader({
           <Search size={19} strokeWidth={1.75} />
         </HeaderIconButton>
         {messengerUrl && (
-          <HeaderIconButton title="Mở Messenger" href={messengerUrl} className="text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]">
+          <HeaderIconButton
+            title={sourceType === 'page_messenger' ? "Mở Facebook khách hàng" : "Mở Messenger"}
+            href={messengerUrl}
+            className="text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]"
+          >
             <ExternalLink size={18} strokeWidth={1.75} />
           </HeaderIconButton>
         )}

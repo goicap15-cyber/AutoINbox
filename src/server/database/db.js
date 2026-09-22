@@ -1145,6 +1145,18 @@ const migrations = [
       }
       console.log(`[DB] Migration v62: Merged ${merged} namespaced page thread(s) into bare ids (skipped ${skipped} genuine cross-page collisions).`);
     }
+  },
+  {
+    version: 63,
+    name: 'add_profile_url_to_contacts',
+    up: (db) => {
+      try {
+        db.exec('ALTER TABLE contacts ADD COLUMN profile_url TEXT;');
+        console.log('[DB] Migration v63: Added contacts.profile_url column.');
+      } catch (e) {
+        console.log('[DB] Migration v63: contacts.profile_url already exists, skipped.');
+      }
+    }
   }
 ];
 

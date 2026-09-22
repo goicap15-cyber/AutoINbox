@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Check, CheckSquare, ChevronRight, Eye, Plus, RefreshCw, Square, Trash2, UserPlus, Users, X } from 'lucide-react';
+import ConfirmModal from './ConfirmModal';
 
 // Module-level cache: giữ data giữa các lần mount/unmount
 let _cachedData = null;
@@ -18,6 +19,7 @@ export default function EmployeeManagementModal() {
   // Multi-select state
   const [selected, setSelected] = useState(new Set());
   const [deletingBulk, setDeletingBulk] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
 
   const load = async () => {
     const response = await fetch('/api/company/employees');
@@ -63,28 +65,18 @@ export default function EmployeeManagementModal() {
   };
 
   // --- Bulk delete ---
-  const removeSelected = async () => {
+  const removeSelected = () => {
     if (selected.size === 0) return;
     const names = data.employees
       .filter((e) => selected.has(e.id))
       .map((e) => e.username)
       .join(', ');
-    if (!window.confirm(`Xóa ${selected.size} nhân viên: ${names}?`)) return;
-
-    setDeletingBulk(true);
-    setError('');
-    try {
-      await Promise.all(
-        [...selected].map((id) =>
-          fetch(`/api/company/employees/${id}`, { method: 'DELETE' }).then((r) => r.json())
-        )
-      );
-      await load();
-    } catch (bulkError) {
-      setError(bulkError.message);
-    } finally {
-      setDeletingBulk(false);
-    }
+    setDeleteConfirm({
+      type: 'bulk',
+      title: 'Xóa nhiều nhân viên',
+      message: `Bạn có chắc chắn muốn xóa ${selected.size} nhân viên đã chọn?\n\nDanh sách: ${names}`,
+      confirmText: `Xóa ${selected.size} nhân viên`,
+    });
   };
 
   const create = async (event) => {
@@ -136,21 +128,52 @@ export default function EmployeeManagementModal() {
     }
   };
 
-  const remove = async (employee) => {
-    if (!window.confirm(`Xóa nhân viên ${employee.username}?`)) return;
-    setBusy(true);
-    setError('');
-    try {
-      const response = await fetch(`/api/company/employees/${employee.id}`, { method: 'DELETE' });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.success) {
-        throw new Error(payload.error || 'Không xóa được nhân viên.');
+  const remove = (employee) => {
+    setDeleteConfirm({
+      type: 'single',
+      employee,
+      title: 'Xóa tài khoản nhân viên',
+      message: `Bạn có chắc chắn muốn xóa nhân viên "${employee.username}" khỏi hệ thống?\nThao tác này sẽ gỡ bỏ quyền truy cập vào tất cả tài khoản Facebook đã gán.`,
+      confirmText: 'Xóa nhân viên',
+    });
+  };
+
+  const executeDelete = async () => {
+    if (!deleteConfirm) return;
+    if (deleteConfirm.type === 'single') {
+      const { employee } = deleteConfirm;
+      setBusy(true);
+      setError('');
+      try {
+        const response = await fetch(`/api/company/employees/${employee.id}`, { method: 'DELETE' });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.success) {
+          throw new Error(payload.error || 'Không xóa được nhân viên.');
+        }
+        setDeleteConfirm(null);
+        await load();
+      } catch (removeError) {
+        setError(removeError.message);
+      } finally {
+        setBusy(false);
       }
-      await load();
-    } catch (removeError) {
-      setError(removeError.message);
-    } finally {
-      setBusy(false);
+    } else if (deleteConfirm.type === 'bulk') {
+      setDeletingBulk(true);
+      setError('');
+      try {
+        await Promise.all(
+          [...selected].map((id) =>
+            fetch(`/api/company/employees/${id}`, { method: 'DELETE' }).then((r) => r.json())
+          )
+        );
+        setSelected(new Set());
+        setDeleteConfirm(null);
+        await load();
+      } catch (bulkError) {
+        setError(bulkError.message);
+      } finally {
+        setDeletingBulk(false);
+      }
     }
   };
 
@@ -372,6 +395,17 @@ export default function EmployeeManagementModal() {
           </section>
         </div>
       )}
+
+      <ConfirmModal
+        isOpen={Boolean(deleteConfirm)}
+        title={deleteConfirm?.title || 'Xác nhận xóa'}
+        message={deleteConfirm?.message || ''}
+        confirmText={deleteConfirm?.confirmText || 'Xóa'}
+        variant="danger"
+        isLoading={busy || deletingBulk}
+        onConfirm={executeDelete}
+        onClose={() => !(busy || deletingBulk) && setDeleteConfirm(null)}
+      />
     </main>
   );
 }

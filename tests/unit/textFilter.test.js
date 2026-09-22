@@ -96,4 +96,20 @@ test('rejects standalone and trailing time/date noise fragments', () => {
   assert.equal(clean('Hello world\n20ch'), 'Hello world');
 });
 
+test('rejects standalone middle dots, bullets, and separator noise leaking in from Messenger sidebar', () => {
+  assert.equal(clean('·'), '');
+  assert.equal(clean('•'), '');
+  assert.equal(clean('.'), '');
+  assert.equal(clean(' · '), '');
+  assert.equal(clean(' - '), '');
+  assert.equal(clean(' | '), '');
+  assert.equal(clean('\u00b7'), '');
+  assert.equal(clean('\u2022'), '');
+  assert.equal(clean('...'), '');
+  // Legitimate short messages must not be touched
+  assert.equal(clean('Ok'), 'Ok');
+  assert.equal(clean('Hi'), 'Hi');
+  assert.equal(clean('A.'), 'A.');
+});
+
 

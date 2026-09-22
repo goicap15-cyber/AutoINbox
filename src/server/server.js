@@ -1658,7 +1658,7 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'THREAD_METADATA_UPDATED': {
-          const { account_id, thread_id, contact_name, avatar_url, page_id } = msg.data || {};
+          const { account_id, thread_id, contact_name, avatar_url, page_id, profile_url } = msg.data || {};
           const tidStr = String(thread_id || '');
           if (!tidStr) break;
 
@@ -1672,6 +1672,7 @@ wss.on('connection', (ws, req) => {
 
           let updatedName = null;
           let localAvatarPath = null;
+          let updatedProfileUrl = null;
 
           if (contact_name && !isInvalidContactName(contact_name)) {
             const existingThread = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(tidStr);
@@ -1688,6 +1689,16 @@ wss.on('connection', (ws, req) => {
                   name = excluded.name
               `).run(tidStr, updatedName);
             }
+          }
+
+          if (profile_url && typeof profile_url === 'string' && profile_url.startsWith('http')) {
+            updatedProfileUrl = profile_url.trim();
+            db.prepare(`
+              INSERT INTO contacts (thread_id, name, profile_url)
+              VALUES (?, ?, ?)
+              ON CONFLICT(thread_id) DO UPDATE SET
+                profile_url = excluded.profile_url
+            `).run(tidStr, updatedName || 'Khách hàng', updatedProfileUrl);
           }
 
           if (avatar_url && avatar_url.startsWith('http')) {
@@ -1743,7 +1754,8 @@ wss.on('connection', (ws, req) => {
           io.emit('CONTACT_UPDATED', {
             thread_id: tidStr,
             ...(updatedName ? { name: updatedName } : {}),
-            ...(localAvatarPath ? { avatar_url: localAvatarPath } : {})
+            ...(localAvatarPath ? { avatar_url: localAvatarPath } : {}),
+            ...(updatedProfileUrl ? { profile_url: updatedProfileUrl } : {})
           });
           break;
         }
@@ -3023,7 +3035,7 @@ wss.on('connection', (ws, req) => {
             for (const changed of changedUnreadThreads) {
               const previewContent = cleanMessageText(changed.preview_content);
               const canonicalThreadId = resolveInternalThreadId(db, changed.account_id, changed.thread_id, changed.page_id || null) || changed.thread_id;
-              if (previewContent) {
+              if (previewContent && !/^[\s\u00b7\u2022.\-|•·]+$/.test(previewContent)) {
                 const previewTimestamp = Date.now();
                 const previewHash = crypto.createHash('sha1')
                   .update(String(changed.account_id) + '|' + String(canonicalThreadId) + '|' + previewContent)

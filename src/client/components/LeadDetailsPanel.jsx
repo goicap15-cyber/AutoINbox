@@ -20,7 +20,8 @@ import {
   FileText,
   Clock,
   Plus,
-  Check
+  Check,
+  ExternalLink
 } from 'lucide-react';
 import EmptyState from './EmptyState.jsx';
 import LeadStatusColorPicker from './LeadStatusColorPicker.jsx';
@@ -839,24 +840,38 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
           const segments = String(contactInfo?.thread_id || '').split(':').filter(Boolean);
           const fbId = segments.length ? segments[segments.length - 1] : '';
           const isPage = contactInfo?.source_type === 'page_messenger';
-          const profileUrl = !isPage && /^\d+$/.test(fbId) ? 'https://www.facebook.com/profile.php?id=' + fbId : null;
+          const explicitUrl = contactInfo?.profile_url;
+          const isNumericUid = /^\d{10,18}$/.test(fbId);
+          const fallbackUidUrl = isNumericUid ? 'https://www.facebook.com/profile.php?id=' + fbId : null;
+          const profileUrl = explicitUrl || (isPage ? fallbackUidUrl : (/^\d+$/.test(fbId) ? 'https://www.facebook.com/profile.php?id=' + fbId : null));
           if (!profileUrl) return null;
           return (
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(profileUrl);
-                  setProfileCopied(true);
-                  setTimeout(() => setProfileCopied(false), 1800);
-                } catch (_) {}
-              }}
-              className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-[var(--color-accent-subtle)] text-[var(--color-accent)] hover:opacity-80 transition-opacity border border-[var(--color-accent)]/30"
-              title={profileUrl}
-            >
-              {profileCopied ? <Check size={12} strokeWidth={2} /> : <Copy size={12} strokeWidth={1.75} />}
-              {profileCopied ? 'Đã copy link profile!' : 'Copy link profile Facebook'}
-            </button>
+            <div className="mt-2 flex items-center justify-center gap-1.5 flex-wrap">
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(profileUrl);
+                    setProfileCopied(true);
+                    setTimeout(() => setProfileCopied(false), 1800);
+                  } catch (_) {}
+                }}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-[var(--color-accent-subtle)] text-[var(--color-accent)] hover:opacity-80 transition-opacity border border-[var(--color-accent)]/30"
+                title={profileUrl}
+              >
+                {profileCopied ? <Check size={12} strokeWidth={2} /> : <Copy size={12} strokeWidth={1.75} />}
+                {profileCopied ? 'Đã copy link profile!' : 'Copy link profile Facebook'}
+              </button>
+              <a
+                href={profileUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center p-1.5 rounded-lg text-[var(--color-accent)] hover:bg-[var(--color-accent-subtle)] border border-[var(--color-accent)]/30 transition-colors"
+                title="Mở trang cá nhân trên tab mới"
+              >
+                <ExternalLink size={13} strokeWidth={1.75} />
+              </a>
+            </div>
           );
         })()}
       </div>

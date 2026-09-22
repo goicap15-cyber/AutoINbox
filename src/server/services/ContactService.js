@@ -19,7 +19,7 @@ function sourceCapturedAt(capture) {
 }
 
 function update(threadId, payload = {}, database) {
-  const { name, email, address, notes, tags, lead_captured, avatar_url, status_id, custom_fields, phone_capture_id } = payload;
+  const { name, email, address, notes, tags, lead_captured, avatar_url, status_id, custom_fields, phone_capture_id, profile_url } = payload;
   const hasNickname = Object.prototype.hasOwnProperty.call(payload, 'nickname');
   const nickname = hasNickname ? String(payload.nickname || '').trim() : undefined;
   if (nickname !== undefined && nickname.length > 80) {
@@ -61,8 +61,8 @@ function update(threadId, payload = {}, database) {
   database.prepare(`
     INSERT INTO contacts
       (thread_id, name, nickname, phone, email, address, notes, tags, lead_captured, avatar_url, status_id,
-       custom_fields, phone_source, phone_capture_id, phone_captured_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       custom_fields, phone_source, phone_capture_id, phone_captured_at, profile_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET
       name = COALESCE(excluded.name, contacts.name),
       nickname = CASE WHEN ? THEN excluded.nickname ELSE contacts.nickname END,
@@ -76,7 +76,8 @@ function update(threadId, payload = {}, database) {
       custom_fields = excluded.custom_fields,
       phone_source = excluded.phone_source,
       phone_capture_id = excluded.phone_capture_id,
-      phone_captured_at = excluded.phone_captured_at
+      phone_captured_at = excluded.phone_captured_at,
+      profile_url = COALESCE(excluded.profile_url, contacts.profile_url)
   `).run(
     threadId,
     name || null,
@@ -93,6 +94,7 @@ function update(threadId, payload = {}, database) {
     phoneSource,
     phoneCaptureId,
     phoneCapturedAt,
+    profile_url || null,
     hasNickname ? 1 : 0
   );
 

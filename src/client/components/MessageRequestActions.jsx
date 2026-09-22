@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, LoaderCircle, RefreshCw, ShieldBan, Trash2, X } from 'lucide-react';
+import ConfirmModal from './ConfirmModal';
 
 const ACTION_META = {
   continue: { label: 'Tiếp tục', icon: Check, className: 'bg-[var(--color-accent)] text-white hover:brightness-95' },
@@ -15,6 +16,7 @@ export default function MessageRequestActions({ thread, socket, isConnected }) {
   const [availableActions, setAvailableActions] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [pendingAction, setPendingAction] = useState(null);
+  const [confirmDialog, setConfirmDialog] = useState(null);
   const [error, setError] = useState('');
   const [contactUnavailable, setContactUnavailable] = useState(false);
   const requestIdRef = useRef(null);
@@ -66,9 +68,43 @@ export default function MessageRequestActions({ thread, socket, isConnected }) {
 
   const handleAction = (action) => {
     const contactName = thread?.contact_name || thread?.name || 'khách này';
-    if (action === 'delete' && !window.confirm(`Xóa tin nhắn đang chờ của ${contactName} trên Messenger?`)) return;
-    if (action === 'decline' && !window.confirm(`Từ chối tin nhắn của ${contactName} trên Messenger?`)) return;
-    if (action === 'block' && !window.confirm(`Chặn ${contactName} trên Messenger? Người này sẽ không thể nhắn cho bạn.`)) return;
+    if (action === 'delete') {
+      setConfirmDialog({
+        action,
+        title: 'Xóa tin nhắn đang chờ',
+        message: `Bạn có chắc muốn xóa tin nhắn đang chờ của "${contactName}" trên Messenger không?`,
+        confirmText: 'Xóa tin nhắn',
+        variant: 'danger',
+      });
+      return;
+    }
+    if (action === 'decline') {
+      setConfirmDialog({
+        action,
+        title: 'Từ chối tin nhắn',
+        message: `Bạn có chắc muốn từ chối tin nhắn của "${contactName}" trên Messenger không?`,
+        confirmText: 'Từ chối',
+        variant: 'warning',
+      });
+      return;
+    }
+    if (action === 'block') {
+      setConfirmDialog({
+        action,
+        title: 'Chặn người dùng',
+        message: `Bạn có chắc muốn chặn "${contactName}" trên Messenger không? Người này sẽ không thể gửi tin nhắn cho bạn nữa.`,
+        confirmText: 'Chặn',
+        variant: 'danger',
+      });
+      return;
+    }
+    sendCommand(action);
+  };
+
+  const handleConfirmModalAction = () => {
+    if (!confirmDialog) return;
+    const action = confirmDialog.action;
+    setConfirmDialog(null);
     sendCommand(action);
   };
 
@@ -134,6 +170,16 @@ export default function MessageRequestActions({ thread, socket, isConnected }) {
       )}
         </>
       )}
+
+      <ConfirmModal
+        isOpen={Boolean(confirmDialog)}
+        title={confirmDialog?.title || ''}
+        message={confirmDialog?.message || ''}
+        confirmText={confirmDialog?.confirmText || 'Xác nhận'}
+        variant={confirmDialog?.variant || 'danger'}
+        onConfirm={handleConfirmModalAction}
+        onClose={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }

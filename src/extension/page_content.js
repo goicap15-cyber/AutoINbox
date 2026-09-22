@@ -172,6 +172,7 @@ if (isBusiness) {
     const MAX_UNRESOLVED_DIRECTION_TICKS = 5;
     let lastReportedContactName = null;
     let lastReportedAvatarUrl = null;
+    let lastReportedProfileUrl = null;
 
     // Verified via live DevTools inspection: Business Suite never exposes a real
     // per-message clock time (no data-timestamp/title/hover label). What DOM order
@@ -197,6 +198,7 @@ if (isBusiness) {
     let lastThreadSwitchAt = Date.now();
     let currentContactName = null;
     let currentAvatarUrl = null;
+    let currentProfileUrl = null;
     let currentAvatarSourceTier = 0; // 0: none, 1: sidebar/header, 2: right details pane
 
 
@@ -422,6 +424,7 @@ if (isBusiness) {
             lastThreadSwitchAt = Date.now();
             currentContactName = null;
             currentAvatarUrl = null;
+            currentProfileUrl = null;
             currentAvatarSourceTier = 0;
             return true; // just switched/opened this thread; whatever is already mounted is backlog
         }
@@ -537,6 +540,29 @@ if (isBusiness) {
                 }
             }
         } catch (_) {}
+        return null;
+    }
+
+    // Trích xuất Profile URL: ưu tiên module FbPageProfileUrlExtractor
+    function extractProfileUrlFromElement(container, fallbackThreadId) {
+        const extractor = globalThis.FbPageProfileUrlExtractor || (typeof window !== 'undefined' && window.FbPageProfileUrlExtractor);
+        if (extractor && typeof extractor.extractProfileUrlFromElement === 'function') {
+            return extractor.extractProfileUrlFromElement(container, fallbackThreadId);
+        }
+        if (container) {
+            try {
+                const links = Array.from(container.querySelectorAll('a[href*="facebook.com"], a[href^="/"]'));
+                for (const a of links) {
+                    const href = a.getAttribute('href') || a.href || '';
+                    if (!href || href.includes('business.facebook.com') || href.includes('/help/') || href.includes('/policies/')) continue;
+                    const m = href.match(/(?:profile\.php\?id=|facebook\.com\/)(\d{10,18})/i);
+                    if (m) return `https://www.facebook.com/profile.php?id=${m[1]}`;
+                }
+            } catch (_) {}
+        }
+        if (fallbackThreadId && /^\d{10,18}$/.test(String(fallbackThreadId))) {
+            return `https://www.facebook.com/profile.php?id=${String(fallbackThreadId)}`;
+        }
         return null;
     }
 
@@ -1145,9 +1171,11 @@ if (isBusiness) {
                 lastThreadSwitchAt = Date.now();
                 currentContactName = null;
                 currentAvatarUrl = null;
+                currentProfileUrl = null;
                 currentAvatarSourceTier = 0;
                 lastReportedContactName = null;
                 lastReportedAvatarUrl = null;
+                lastReportedProfileUrl = null;
                 lastSyncedMountedSignature = '';
                 seedTimestampAnchorsForThread(currentThreadId);
             }
@@ -1350,6 +1378,14 @@ if (isBusiness) {
                     candidateAvatarUrl = rightAvatar;
                     candidateTier = 2;
                 }
+                const rightProfile = extractProfileUrlFromElement(rightPane, currentThreadId);
+                if (rightProfile) {
+                    currentProfileUrl = rightProfile;
+                }
+            } else if (currentThreadId && /^\d{10,18}$/.test(String(currentThreadId))) {
+                if (!currentProfileUrl) {
+                    currentProfileUrl = `https://www.facebook.com/profile.php?id=${String(currentThreadId)}`;
+                }
             }
 
             // Tier 1: Nếu chưa có Tier 2 hợp lệ, lấy từ chính dòng (row) của threadId này trong Sidebar hoặc Header
@@ -1388,18 +1424,20 @@ if (isBusiness) {
             }
 
             // Phát hiện metadata mới -> gửi ngay sang background (chỉ gửi khi có thay đổi, khớp ID và qua grace period 1.5s)
-            if (currentThreadId && ((currentContactName && !isInvalidName(currentContactName)) || currentAvatarUrl)) {
+            if (currentThreadId && ((currentContactName && !isInvalidName(currentContactName)) || currentAvatarUrl || currentProfileUrl)) {
                 const activeIdNow = resolveCurrentThreadId();
                 if (String(activeIdNow) === String(currentThreadId) && (Date.now() - lastThreadSwitchAt >= 1500)) {
-                    if (lastReportedContactName !== currentContactName || lastReportedAvatarUrl !== currentAvatarUrl) {
+                    if (lastReportedContactName !== currentContactName || lastReportedAvatarUrl !== currentAvatarUrl || lastReportedProfileUrl !== currentProfileUrl) {
                         lastReportedContactName = currentContactName;
                         lastReportedAvatarUrl = currentAvatarUrl;
+                        lastReportedProfileUrl = currentProfileUrl;
                         chrome.runtime.sendMessage({
                             type: 'UPDATE_THREAD_METADATA',
                             data: {
                                 thread_id: currentThreadId,
                                 contact_name: currentContactName,
                                 avatar_url: currentAvatarUrl,
+                                profile_url: currentProfileUrl,
                                 page_id: assetId
                             }
                         });

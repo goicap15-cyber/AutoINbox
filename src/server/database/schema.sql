@@ -193,6 +193,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     phone_source TEXT,
     phone_capture_id INTEGER REFERENCES contact_phone_captures(id),
     phone_captured_at DATETIME,
+    profile_url TEXT,
     FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
 );
 
