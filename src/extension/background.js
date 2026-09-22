@@ -2364,10 +2364,15 @@ async function ensureRoleMessengerTab(accountId, role) {
 async function selectAttachmentCapableMessengerTab(accountId, role = 'interaction') {
   let primary = await ensureRoleMessengerTab(accountId, role);
   if (primary?.id && await isDedicatedMessengerRoleTab(accountId, primary.id)) {
-    // Tab đang chạy role dedicated (history/discovery/campaign...) - trước đây
-    // trả null ngay -> FACEBOOK_TAB_NOT_FOUND giết chiến dịch khi tab duy nhất
-    // cũng là tab sync. Thử tìm tab messenger thường khác trước, chưa có thì
-    // tạo tab nền mới để gửi.
+    if (role === 'campaign') {
+      // Tab campaign là tab riêng ĐỂ GỬI chiến dịch - dùng trực tiếp, không
+      // được loại nó vì "dedicated" (trước đây hàm này tự tạo tab campaign
+      // xong lại từ chối chính tab đó -> FACEBOOK_TAB_NOT_FOUND triệt để).
+      return primary;
+    }
+    // Tab đang chạy role dedicated (history/discovery...) - trả null ngay sẽ
+    // thành FACEBOOK_TAB_NOT_FOUND khi tab duy nhất cũng là tab sync. Thử tìm
+    // tab messenger thường khác trước, chưa có thì tạo tab nền mới để gửi.
     console.warn(`[FB Engine] Tab ${primary.id} đang giữ role dedicated; tìm/tạo tab thường để gửi đính kèm.`);
     primary = null;
     try {
