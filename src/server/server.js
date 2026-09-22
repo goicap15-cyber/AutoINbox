@@ -5027,6 +5027,24 @@ app.post('/api/threads/:id/unread', (req, res) => {
   }
 });
 
+// Ghim / bỏ ghim hội thoại. Không gửi "pinned" trong body = toggle.
+app.post('/api/threads/:id/pin', (req, res) => {
+  try {
+    const id = req.params.id;
+    const row = db.prepare('SELECT pinned FROM threads WHERE id = ?').get(id);
+    if (!row) return res.status(404).json({ error: 'Không tìm thấy hội thoại.' });
+    const desired = req.body && req.body.pinned !== undefined ? Number(req.body.pinned) : null;
+    const next = desired === null ? (Number(row.pinned) ? 0 : 1) : (desired ? 1 : 0);
+    if (next !== Number(row.pinned)) {
+      db.prepare('UPDATE threads SET pinned = ? WHERE id = ?').run(next, id);
+    }
+    io.emit('THREAD_PIN_CHANGED', { thread_id: String(id), pinned: next });
+    res.json({ success: true, id: String(id), pinned: next });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Không thể cập nhật trạng thái ghim.' });
+  }
+});
+
 app.post('/api/threads/:id/assign', (req, res) => {
   const user_id = req.user.id;
   const result = assignmentManager.assignThread(req.params.id, user_id);

@@ -555,6 +555,25 @@ export default function App() {
   const loadThreadsRef = useRef(loadThreads);
   useEffect(() => { loadThreadsRef.current = loadThreads; }, [loadThreads]);
 
+  // Ghim / bỏ ghim hội thoại: cập nhật LOCAL ngay, server là nguồn chân lý.
+  const handleToggleThreadPinned = useCallback(async (thread, nextPinned) => {
+    const threadId = String(thread?.id || '');
+    if (!threadId) return;
+    setThreads((prev) => prev.map((t) => (String(t.id) === threadId
+      ? { ...t, pinned: nextPinned ? 1 : 0 }
+      : t)));
+    try {
+      const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pinned: nextPinned })
+      });
+      if (!res.ok) throw new Error('fail');
+    } catch (_) {
+      loadThreadsRef.current();
+    }
+  }, []);
+
   // Đánh dấu chưa đọc/đã đọc: cập nhật LOCAL ngay cho mượt, server là nguồn chân lý.
   const handleToggleThreadUnread = useCallback(async (thread, nextUnread) => {
     const threadId = String(thread?.id || '');
@@ -1370,6 +1389,14 @@ export default function App() {
       setThreads(prev => prev.map(t => String(t.id) === tidStr ? { ...t, ai_paused_until: until } : t));
     });
     socket.on('THREAD_ASSIGNED', () => loadThreadsRef.current());
+    socket.on('THREAD_PIN_CHANGED', (payload) => {
+      const tid = String(payload?.thread_id || '');
+      const next = Number(payload?.pinned) === 1;
+      if (!tid) return;
+      setThreads((prev) => prev.map((t) => (String(t.id) === tid
+        ? { ...t, pinned: next ? 1 : 0 }
+        : t)));
+    });
     socket.on('THREAD_UNREAD_CHANGED', (payload) => {
       const tid = String(payload?.thread_id || '');
       const next = Number(payload?.is_unread) === 1;
@@ -1923,6 +1950,7 @@ export default function App() {
         onCreateCampaign={() => setActiveModal('campaigns')}
         onBulkHistorySync={handleBulkHistorySync}
         onToggleUnread={handleToggleThreadUnread}
+        onTogglePin={handleToggleThreadPinned}
         bulkHistoryProgress={bulkHistoryProgress}
       />
 

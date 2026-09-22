@@ -100,7 +100,7 @@ class AssignmentManager {
     // julianday normalizes both instead of comparing their string shapes.
     // Chưa đọc luôn nổi đầu danh sách (mới nhất trước); đọc rồi thì quay về
     // đúng vị trí theo thời gian như cũ.
-    query += ' ORDER BY CASE WHEN COALESCE(t.is_unread, 0) = 1 OR COALESCE(t.unread_manual, 0) = 1 THEN 0 ELSE 1 END ASC, julianday(t.last_activity) DESC, t.id DESC';
+    query += ' ORDER BY CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 ELSE 1 END ASC, CASE WHEN COALESCE(t.is_unread, 0) = 1 OR COALESCE(t.unread_manual, 0) = 1 THEN 0 ELSE 1 END ASC, julianday(t.last_activity) DESC, t.id DESC';
     const rows = this.db.prepare(query).all(...params);
 
     // Preview kiểu Messenger: khi last_message là placeholder (sidebar sync

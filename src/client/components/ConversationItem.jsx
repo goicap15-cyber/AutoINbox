@@ -1,5 +1,5 @@
-import React from 'react';
-import { BellRing, Clock3, Archive, Mail, MailOpen } from 'lucide-react';
+import React, { useState } from 'react';
+import { BellRing, Clock3, Archive, Mail, MailOpen, Pin, PinOff } from 'lucide-react';
 import { getStatusBadgeStyle } from '../utils/color.js';
 import { getReminderDueAriaLabel, getReminderDueState } from '../utils/reminderPresentation.js';
 import { normalizeThreadTimestamp } from '../utils/threadActivity.js';
@@ -19,12 +19,25 @@ function formatTime(value) {
   return parsed.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
 }
 
-export default function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSources = [], selectionMode = false, isChecked = false, onToggle, onToggleUnread }) {
+export default function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSources = [], selectionMode = false, isChecked = false, onToggle, onToggleUnread, onTogglePin }) {
   const account = accounts.find((item) => String(item.id) === String(thread.account_id));
   const source = inboxSources.find((item) => String(item.id) === String(thread.source_id));
   const isOnline = account ? account.is_extension_connected !== false : true;
   const unreadCount = Number(thread.unread_count || (thread.is_unread ? 1 : 0));
   const isThreadUnreadRow = unreadCount > 0 || Number(thread.unread_manual) === 1;
+  const isPinned = Number(thread.pinned) === 1;
+  const [ctxMenu, setCtxMenu] = useState(null);
+  const handleContextMenu = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setCtxMenu({ x: Math.min(event.clientX, window.innerWidth - 190), y: Math.min(event.clientY, window.innerHeight - 90) });
+  };
+  const handlePinFromMenu = (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    setCtxMenu(null);
+    if (onTogglePin) onTogglePin(thread, !isPinned);
+  };
   const handleToggleUnread = (event) => {
     if (!onToggleUnread) return;
     event.stopPropagation();
@@ -73,6 +86,7 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
     <button
       type="button"
       onClick={selectionMode ? onToggle : onSelect}
+      onContextMenu={handleContextMenu}
       aria-pressed={selectionMode ? isChecked : undefined}
       aria-label={isReminderDue ? title + '. ' + reminderAriaLabel : title}
       className={rowClassName}
@@ -105,7 +119,14 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2 mb-0.5">
           <span className={'text-sm truncate ' + (unreadCount > 0 ? 'font-bold' : 'font-semibold') + ' text-[var(--color-text-primary)]'}>{title}</span>
-          <span className="text-xs text-[var(--color-text-muted)] flex-shrink-0 font-mono">{formatTime(thread.last_activity)}</span>
+          <span className="flex items-center gap-1 flex-shrink-0">
+            {isPinned && (
+              <span title="Đã ghim hội thoại" aria-label="Đã ghim hội thoại" className="text-[var(--color-accent)]">
+                <Pin size={11} strokeWidth={2.4} className="rotate-45" />
+              </span>
+            )}
+            <span className="text-xs text-[var(--color-text-muted)] font-mono">{formatTime(thread.last_activity)}</span>
+          </span>
         </div>
         <p className={'text-xs truncate mb-1.5 ' + (unreadCount > 0 ? 'text-[var(--color-text-primary)] font-semibold' : 'text-[var(--color-text-muted)]')}>{preview}</p>
         <div className="flex items-center justify-between gap-2">
@@ -155,6 +176,35 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
           </span>
         </div>
       </div>
+
+      {ctxMenu && (
+        <React.Fragment>
+          <span
+            aria-hidden="true"
+            className="fixed inset-0"
+            style={{ zIndex: 9998 }}
+            onMouseDown={() => setCtxMenu(null)}
+            onContextMenu={(event) => { event.preventDefault(); setCtxMenu(null); }}
+          />
+          <span
+            role="menu"
+            aria-label="Menu hội thoại"
+            className="fixed w-44 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] shadow-lg"
+            style={{ left: ctxMenu.x, top: ctxMenu.y, zIndex: 9999 }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={handlePinFromMenu}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-left text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] cursor-pointer"
+            >
+              {isPinned ? <PinOff size={13} strokeWidth={2.2} /> : <Pin size={13} strokeWidth={2.2} className="rotate-45" />}
+              {isPinned ? 'Bỏ ghim hội thoại' : 'Ghim hội thoại'}
+            </button>
+          </span>
+        </React.Fragment>
+      )}
     </button>
   );
 }
