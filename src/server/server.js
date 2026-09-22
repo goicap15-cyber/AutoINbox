@@ -3028,12 +3028,6 @@ wss.on('connection', (ws, req) => {
             for (const changed of changedUnreadThreads) {
               const previewContent = cleanMessageText(changed.preview_content);
               const canonicalThreadId = resolveInternalThreadId(db, changed.account_id, changed.thread_id, changed.page_id || null) || changed.thread_id;
-              // Tin mới của khách phát hiện qua sidebar scan: gắn cờ dính NGAY
-              // tại đây. Tab Facebook có thể đang đậu đúng thread này nên FB
-              // tự báo "đã đọc" trong chính lượt scan kế tiếp - không được để
-              // trạng thái chưa đọc (và việc đẩy lên đầu) bị tắt ngay sau đó.
-              db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
               if (previewContent) {
                 const previewTimestamp = Date.now();
                 const previewHash = crypto.createHash('sha1')
@@ -3071,6 +3065,10 @@ wss.on('connection', (ws, req) => {
                   source: 'sidebar_preview'
                 }], db);
                 if (previewPersistence.insertedIds.includes(previewId)) {
+                  // CHỈ tin mới thật sự (chưa có trong DB) mới được gắn cờ dính
+                  // chưa đọc + đẩy lên đầu. Tin cũ bị quét lại không được phép.
+                  db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
                   const previewRow = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(previewId);
                   if (previewRow) {
                     io.emit('NEW_MESSAGE', { ...previewRow, account_id: changed.account_id, provisional: true });
