@@ -470,14 +470,17 @@ async function waitForMessengerAttachmentReady(tabId, attachmentOrManifest) {
   const items = Array.isArray(attachmentOrManifest) ? attachmentOrManifest : [attachmentOrManifest];
   const hasVideo = items.some((item) => item?.media_type === 'video' || String(item?.mime_type || '').startsWith('video/'));
   const byteSize = items.reduce((sum, item) => sum + Number(item?.byte_size || 0), 0);
-  const timeoutMs = hasVideo
-    ? Math.min(120000, Math.max(20000, 12000 + Math.ceil(byteSize / (256 * 1024)) * 1000))
-    : 30000;
+  // Ảnh trước đây cứng 30s - upload xong nhưng DOM ready chưa thỏa trong khung
+  // này là văng ATTACHMENT_UPLOAD_TIMEOUT dù file đã nằm trong composer. Giờ ảnh
+  // cũng được co giãn theo dung lượng: tối thiểu 45s, trần 120s như video.
+  const timeoutMs = Math.min(
+    120000,
+    Math.max(hasVideo ? 20000 : 45000, 12000 + Math.ceil(byteSize / (256 * 1024)) * 1000)
+  );
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   let readyStreak = 0;
-  while (Date.now() < deadline) {
-    lastState = await chrome.scripting.executeScript({
+  const probeReady = () => chrome.scripting.executeScript({
       target: { tabId },
       func: (expectVideo) => {
         const visible = (element) => {
@@ -539,6 +542,9 @@ async function waitForMessengerAttachmentReady(tabId, attachmentOrManifest) {
       },
       args: [hasVideo]
     }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+
+  while (Date.now() < deadline) {
+    lastState = await probeReady();
     readyStreak = lastState?.ready ? readyStreak + 1 : 0;
     // Video controls can become enabled briefly while Facebook is still
     // processing the upload. Require a stable ready state before submitting.
@@ -548,6 +554,21 @@ async function waitForMessengerAttachmentReady(tabId, attachmentOrManifest) {
     }
     await delay(hasVideo ? 150 : 100);
   }
+
+  // Hết hạn lần 1: thăm dò lại một nhịp 10s với điều kiện nới lỏng. Nút Gửi
+  // đã bật là tín hiệu sẵn sàng chính thức của Facebook; các indicator
+  // "đang tải" có thể bị treo cũ trên DOM nên không chặn thêm nữa.
+  sendToBackend('COMPOSER_DEBUG', { stage: 'attachment_ready_first_timeout', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...(lastState || {}) });
+  const reprobeDeadline = Date.now() + 10000;
+  while (Date.now() < reprobeDeadline) {
+    lastState = await probeReady();
+    if (lastState?.send_found) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'attachment_ready_after_reprobe', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
+      return lastState;
+    }
+    await delay(200);
+  }
+
   const error = new Error('Messenger chưa tải xong file đính kèm để gửi');
   error.code = 'ATTACHMENT_UPLOAD_TIMEOUT';
   sendToBackend('COMPOSER_DEBUG', { stage: 'attachment_ready_timeout', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...(lastState || {}) });
@@ -559,9 +580,12 @@ async function waitForBusinessSuiteAttachmentReady(tabId, attachmentOrManifest) 
   const items = Array.isArray(attachmentOrManifest) ? attachmentOrManifest : [attachmentOrManifest];
   const hasVideo = items.some((item) => item?.media_type === 'video' || String(item?.mime_type || '').toLowerCase().startsWith('video/'));
   const byteSize = items.reduce((sum, item) => sum + Number(item?.byte_size || 0), 0);
-  const timeoutMs = hasVideo
-    ? Math.min(120000, Math.max(25000, 15000 + Math.ceil(byteSize / (256 * 1024)) * 1000))
-    : 35000;
+  // Ảnh cũng co giãn theo dung lượng (tối thiểu 45s, trần 120s) - lý do như
+  // bản Messenger tab: 35s cứng từng văng timeout dù upload đã xong.
+  const timeoutMs = Math.min(
+    120000,
+    Math.max(hasVideo ? 25000 : 45000, 15000 + Math.ceil(byteSize / (256 * 1024)) * 1000)
+  );
   const deadline = Date.now() + timeoutMs;
   const basenames = items.map((i) => (i?.local_path || i?.name || '').split(/[\\/]/).pop()).filter(Boolean);
   let lastState = null;
@@ -658,6 +682,45 @@ async function waitForBusinessSuiteAttachmentReady(tabId, attachmentOrManifest) 
       return lastState;
     }
     await delay(hasVideo ? 250 : 150);
+  }
+
+  // Thăm dò lại một nhịp 10s với điều kiện nới lỏng (nút Gửi đã bật là đủ) -
+  // indicator busy trên Business Suite hay treo cũ sau khi upload hoàn tất.
+  sendToBackend('COMPOSER_DEBUG', { stage: 'page_attachment_ready_first_timeout', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...(lastState || {}) });
+  const bsReprobeDeadline = Date.now() + 10000;
+  while (Date.now() < bsReprobeDeadline) {
+    lastState = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (searchNames, expectVideo) => {
+        const visible = (element) => {
+          const rect = element?.getBoundingClientRect?.();
+          return Boolean(rect && rect.width > 0 && rect.height > 0);
+        };
+        const composer = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
+          .filter(visible)
+          .sort((left, right) => {
+            const a = left.getBoundingClientRect();
+            const b = right.getBoundingClientRect();
+            return b.width * b.height - a.width * a.height;
+          })[0] || null;
+        const nearComposer = (element) => {
+          if (!composer || !element) return true;
+          const a = composer.getBoundingClientRect();
+          const b = element.getBoundingClientRect();
+          return Math.abs(a.bottom - b.bottom) < 260;
+        };
+        const sendButton = [...document.querySelectorAll('[role="button"], button')]
+          .filter(nearComposer)
+          .find((element) => /^(Gửi|Send)$/i.test(String(element.getAttribute('aria-label') || element.textContent || '').trim()));
+        return { send_found: Boolean(sendButton) };
+      },
+      args: [basenames, hasVideo]
+    }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+    if (lastState?.send_found) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'page_attachment_ready_after_reprobe', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
+      return lastState;
+    }
+    await delay(250);
   }
 
   const error = new Error('Business Suite chưa tải xong file đính kèm để gửi');
