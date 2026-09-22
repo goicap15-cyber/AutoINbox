@@ -962,6 +962,16 @@ export default function App() {
       // list when a legacy event lacks the new summary payload.
       if (!newMsg.thread_summary?.id) loadThreadsRef.current();
 
+      // Hội thoại đang mở trong CRM: tin khách đến khi đang xem = đã đọc luôn
+      // (kiểu Messenger) - gỡ nhắc + cờ dính để danh sách không hiện chưa đọc ảo.
+      if (!newMsg.is_outgoing && String(activeThreadIdRef.current) === tidStr) {
+        fetch('/api/threads/' + encodeURIComponent(tidStr) + '/unread', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ unread: 0 })
+        }).catch(() => {});
+      }
+
 
       // Media URLs are already included in NEW_MESSAGE/THREAD_MESSAGES_UPDATED.
       // Do not replace the live state with a delayed REST response: that response
@@ -1364,6 +1374,9 @@ export default function App() {
       const tid = String(payload?.thread_id || '');
       const next = Number(payload?.is_unread) === 1;
       if (!tid) return;
+      // Thread đang mở trong CRM thì không nhảy sang chưa đọc (người dùng
+      // đang nhìn nó rồi); server-side sync sẽ tự hiệu chỉnh về sau.
+      if (next && String(activeThreadIdRef.current) === tid) return;
       setThreads((prev) => prev.map((t) => (String(t.id) === tid
         ? { ...t, is_unread: next ? 1 : 0, unread_manual: next ? 1 : -1 }
         : t)));
@@ -1881,8 +1894,15 @@ export default function App() {
         threads={threads} activeThreadId={activeThreadId}
         onSelectThread={(threadId) => {
           const clickedThread = threads.find((thread) => String(thread.id) === String(threadId));
-          // Chỉ nút phong bì mới đổi trạng thái chưa đọc (yêu cầu 21/09):
-          // mở hội thoại KHÔNG tự đánh dấu đã đọc.
+          // Mở hội thoại = coi như đã đọc: gỡ cờ chưa-đọc để hội thoại hạ về
+          // vị trí theo thời gian như hành vi Messenger.
+          if (clickedThread && (Number(clickedThread.is_unread) === 1 || Number(clickedThread.unread_manual) === 1)) {
+            fetch('/api/threads/' + encodeURIComponent(String(threadId)) + '/unread', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ unread: 0 })
+            }).catch(() => {});
+          }
           requestThreadNavigation(clickedThread);
         }}
         activeTab={activeTab} onTabChange={handleConversationTabChange}

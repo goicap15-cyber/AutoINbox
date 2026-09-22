@@ -2107,12 +2107,17 @@ wss.on('connection', (ws, req) => {
             ? Boolean(db.prepare('SELECT 1 FROM messages WHERE thread_id = ? AND fb_message_id = ?')
               .get(String(canonicalThreadId), String(m.fb_message_id)))
             : false;
-          if (!isReplayedObservation && !isOutgoing) {
-            // Tin mới của khách: bật chưa đọc + GẮN CỜ DÍNH. Chỉ nút phong bì
-            // trong CRM mới được gỡ (yêu cầu sản phẩm 21/09): mở hội thoại,
-            // trả lời tin hay Facebook tự đánh dấu đọc đều KHÔNG tắt nhắc.
-            db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-            io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
+          if (!isReplayedObservation) {
+            if (isOutgoing) {
+              // Operator trả lời = đã đọc hội thoại: gỡ mọi cờ đánh tay.
+              db.prepare('UPDATE threads SET is_unread = 0, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
+            } else {
+              // Tin mới của khách: bật chưa đọc + GẮN CỜ DÍNH, vì tab Facebook
+              // có thể đang đậu đúng thread này nên Facebook tự báo "đã đọc"
+              // vài giây sau qua sync sidebar - không được để nó tắt nhắc.
+              db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
+            }
           }
           ConversationRepository.upsertThread({
             id: m.thread_id,
