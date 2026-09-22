@@ -472,11 +472,12 @@ async function waitForMessengerAttachmentReady(tabId, attachmentOrManifest) {
   const byteSize = items.reduce((sum, item) => sum + Number(item?.byte_size || 0), 0);
   // Ảnh trước đây cứng 30s - upload xong nhưng DOM ready chưa thỏa trong khung
   // này là văng ATTACHMENT_UPLOAD_TIMEOUT dù file đã nằm trong composer. Giờ ảnh
-  // cũng được co giãn theo dung lượng: tối thiểu 45s, trần 120s như video.
-  const timeoutMs = Math.min(
-    120000,
-    Math.max(hasVideo ? 20000 : 45000, 12000 + Math.ceil(byteSize / (256 * 1024)) * 1000)
-  );
+  // co giãn theo dung lượng (min 45s, trần 120s).
+  // Video: Facebook xử lý phía server rất lâu (bandicam 9MB thực tế vượt
+  // trần 120s cũ) - co giãn chậm hơn theo dung lượng, tối đa 5 phút.
+  const timeoutMs = hasVideo
+    ? Math.min(300000, Math.max(60000, 30000 + Math.ceil(byteSize / (100 * 1024)) * 1000))
+    : Math.min(120000, Math.max(45000, 12000 + Math.ceil(byteSize / (256 * 1024)) * 1000));
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   let readyStreak = 0;
@@ -555,9 +556,10 @@ async function waitForMessengerAttachmentReady(tabId, attachmentOrManifest) {
     await delay(hasVideo ? 150 : 100);
   }
 
-  // Hết hạn lần 1: thăm dò lại một nhịp 10s với điều kiện nới lỏng. Nút Gửi
-  // đã bật là tín hiệu sẵn sàng chính thức của Facebook; các indicator
-  // "đang tải" có thể bị treo cũ trên DOM nên không chặn thêm nữa.
+  // Hết hạn lần 1: thăm dò lại một nhịp 10s với điều kiện nới lỏng - CHỈ cho
+  // ảnh. Nút Gửi của video có lúc bật sớm trong lúc Facebook còn xử lý, submit
+  // lúc đó là mất tin; video phải chờ đủ chỉ báo sẵn sàng trong ngân sách dài.
+  if (!hasVideo) {
   sendToBackend('COMPOSER_DEBUG', { stage: 'attachment_ready_first_timeout', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...(lastState || {}) });
   const reprobeDeadline = Date.now() + 10000;
   while (Date.now() < reprobeDeadline) {
@@ -567,6 +569,7 @@ async function waitForMessengerAttachmentReady(tabId, attachmentOrManifest) {
       return lastState;
     }
     await delay(200);
+  }
   }
 
   const error = new Error('Messenger chưa tải xong file đính kèm để gửi');
@@ -580,12 +583,12 @@ async function waitForBusinessSuiteAttachmentReady(tabId, attachmentOrManifest) 
   const items = Array.isArray(attachmentOrManifest) ? attachmentOrManifest : [attachmentOrManifest];
   const hasVideo = items.some((item) => item?.media_type === 'video' || String(item?.mime_type || '').toLowerCase().startsWith('video/'));
   const byteSize = items.reduce((sum, item) => sum + Number(item?.byte_size || 0), 0);
-  // Ảnh cũng co giãn theo dung lượng (tối thiểu 45s, trần 120s) - lý do như
-  // bản Messenger tab: 35s cứng từng văng timeout dù upload đã xong.
-  const timeoutMs = Math.min(
-    120000,
-    Math.max(hasVideo ? 25000 : 45000, 15000 + Math.ceil(byteSize / (256 * 1024)) * 1000)
-  );
+  // Ảnh co giãn theo dung lượng (min 45s, trần 120s); video chậm hơn và tối
+  // đa 5 phút - Facebook xử lý video phía server lâu (thực tế bandicam 9MB
+  // vượt trần 120s cũ).
+  const timeoutMs = hasVideo
+    ? Math.min(300000, Math.max(60000, 30000 + Math.ceil(byteSize / (100 * 1024)) * 1000))
+    : Math.min(120000, Math.max(45000, 15000 + Math.ceil(byteSize / (256 * 1024)) * 1000));
   const deadline = Date.now() + timeoutMs;
   const basenames = items.map((i) => (i?.local_path || i?.name || '').split(/[\\/]/).pop()).filter(Boolean);
   let lastState = null;
@@ -685,7 +688,8 @@ async function waitForBusinessSuiteAttachmentReady(tabId, attachmentOrManifest) 
   }
 
   // Thăm dò lại một nhịp 10s với điều kiện nới lỏng (nút Gửi đã bật là đủ) -
-  // indicator busy trên Business Suite hay treo cũ sau khi upload hoàn tất.
+  // CHỈ cho ảnh: nút Gửi của video bật sớm khi Facebook còn xử lý.
+  if (!hasVideo) {
   sendToBackend('COMPOSER_DEBUG', { stage: 'page_attachment_ready_first_timeout', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...(lastState || {}) });
   const bsReprobeDeadline = Date.now() + 10000;
   while (Date.now() < bsReprobeDeadline) {
@@ -721,6 +725,7 @@ async function waitForBusinessSuiteAttachmentReady(tabId, attachmentOrManifest) 
       return lastState;
     }
     await delay(250);
+  }
   }
 
   const error = new Error('Business Suite chưa tải xong file đính kèm để gửi');
