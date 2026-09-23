@@ -1232,10 +1232,10 @@ db.exec(`
 // Thêm Admin mặc định nếu CSDL chưa có user
 const adminCheck = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'ADMIN'").get();
 if (adminCheck.count === 0) {
-  const defaultPassword = 'admin';
+  const defaultPassword = 'admin123';
   const passwordHash = bcrypt.hashSync(defaultPassword, 10);
   db.prepare("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'ADMIN')").run('admin', passwordHash);
-  console.log('[DB] Khởi tạo tài khoản Admin mặc định thành công (username: admin / pass: admin)');
+  console.log('[DB] Khởi tạo tài khoản Admin mặc định thành công (username: admin / pass: admin123)');
 }
 
 try {

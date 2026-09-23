@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { X, ExternalLink, ShieldAlert, RefreshCw, PlusCircle, Trash2, Monitor } from 'lucide-react';
+import { X, ExternalLink, ShieldAlert, RefreshCw, PlusCircle, Trash2, Monitor, Layers } from 'lucide-react';
 import ConfirmModal from './ConfirmModal';
+import PageSelectorModal from './PageSelectorModal';
 
 export default function AccountManagerModal({ onClose, onSourcesChanged, onFacebookSyncStart, socket, sessionUser }) {
   const isCompanyAdmin = sessionUser?.company_role === 'ADMIN';
@@ -15,6 +16,7 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
   const [addingSession, setAddingSession] = useState(false);
   const [pendingKey, setPendingKey] = useState(null);
   const [inboxSources, setInboxSources] = useState([]);
+  const [selectedAccountForPages, setSelectedAccountForPages] = useState(null);
   const [pageToken, setPageToken] = useState('');
   const [pageOwnerAccountId, setPageOwnerAccountId] = useState('');
   const [pageConnectError, setPageConnectError] = useState('');
@@ -352,55 +354,42 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
             </div>
           )}
 
-          {/* Kết nối Page Messenger */}
+          {/* Danh sách Fanpage Messenger đang kết nối */}
           <div className={'border-t border-slate-800 pt-4 space-y-3 ' + (!isCompanyAdmin ? 'hidden' : '')}>
-            <div>
-              <h4 className="text-xs font-semibold text-slate-100 uppercase tracking-wider">Kết nối Page Messenger</h4>
-              <p className="text-[11px] text-slate-500 mt-1">Dán Link Page, ID Page, hoặc Page Access Token để kết nối. Không cần API token vì Extension sẽ lo việc gửi/nhận.</p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-xs font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-1.5">
+                  <Layers size={14} className="text-sky-400" />
+                  <span>Fanpage Messenger Đang Kết Nối</span>
+                </h4>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Hệ thống tự động phát hiện Fanpage khi đăng nhập Facebook. Bấm nút <strong>"Quản lý Fanpage"</strong> ở từng tài khoản bên dưới để chọn mở thêm trang.
+                </p>
+              </div>
             </div>
-            <div className="grid gap-2">
-              <select
-                value={pageOwnerAccountId}
-                onChange={(event) => setPageOwnerAccountId(event.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-sky-500/60"
-              >
-                <option value="">Không gắn owner account</option>
-                {accounts.map((acc) => <option key={acc.id} value={acc.id}>{acc.name || acc.id}</option>)}
-              </select>
-              <textarea
-                value={pageToken}
-                onChange={(event) => setPageToken(event.target.value)}
-                rows={2}
-                placeholder="Ví dụ: https://www.facebook.com/profile.php?id=123456789 hoặc 123456789"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-sky-500/60 resize-none"
-              />
-              {pageConnectError && <div className="text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{pageConnectError}</div>}
-              <button
-                type="button"
-                onClick={handleConnectPage}
-                disabled={pageConnectLoading}
-                className="px-3 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors"
-              >
-                {pageConnectLoading ? <RefreshCw size={14} className="animate-spin" /> : <PlusCircle size={15} />}
-                <span>Kết nối Page</span>
-              </button>
-            </div>
+            
             <div className="space-y-2">
-              {inboxSources.filter((source) => source.source_type === 'page_messenger').map((source) => (
-                <div key={source.id} className="p-3 rounded-lg border border-violet-500/20 bg-violet-500/5 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span className="relative w-9 h-9 shrink-0 overflow-hidden rounded-full bg-violet-500/20 text-violet-200 font-bold text-xs flex items-center justify-center border border-violet-500/30">
-                      {(source.display_name || 'P').replace(/^Page\s*/i, '').charAt(0).toUpperCase()}
-                      {source.avatar_url && <img src={source.avatar_url} alt="" className="absolute inset-0 h-full w-full object-cover" onError={(event) => { event.currentTarget.style.display = 'none'; }} />}
-                    </span>
-                    <div className="min-w-0">
-                    <div className="text-xs font-semibold text-slate-100 truncate">{source.display_name && !genericPageName.test(source.display_name) ? source.display_name : 'Page · ' + (source.display_name || source.external_id)}</div>
-                    <div className="text-[10px] text-slate-500 font-mono truncate">{source.external_id} · {source.status}</div>
-                    </div>
-                  </div>
-                  <button type="button" onClick={() => handleDisconnectSource(source.id)} className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 border border-slate-700/60">Ngắt</button>
+              {inboxSources.filter((source) => source.source_type === 'page_messenger').length === 0 ? (
+                <div className="p-3.5 rounded-lg border border-slate-800/80 bg-slate-950/40 text-center text-xs text-slate-500">
+                  Chưa có Fanpage nào được mở. Bấm "Quản lý Fanpage" ở tài khoản Facebook bên dưới để chọn các trang cần trực.
                 </div>
-              ))}
+              ) : (
+                inboxSources.filter((source) => source.source_type === 'page_messenger').map((source) => (
+                  <div key={source.id} className="p-3 rounded-lg border border-sky-500/20 bg-sky-500/5 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="relative w-9 h-9 shrink-0 overflow-hidden rounded-full bg-sky-500/20 text-sky-200 font-bold text-xs flex items-center justify-center border border-sky-500/30">
+                        {(source.display_name || 'P').replace(/^Page\s*/i, '').charAt(0).toUpperCase()}
+                        {source.avatar_url && <img src={source.avatar_url} alt="" className="absolute inset-0 h-full w-full object-cover" onError={(event) => { event.currentTarget.style.display = 'none'; }} />}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-slate-100 truncate">{source.display_name && !genericPageName.test(source.display_name) ? source.display_name : 'Page · ' + (source.display_name || source.external_id)}</div>
+                        <div className="text-[10px] text-slate-500 font-mono truncate">ID: {source.external_id} · {source.status === 'ACTIVE' ? '🟢 Hoạt động' : source.status}</div>
+                      </div>
+                    </div>
+                    <button type="button" onClick={() => handleDisconnectSource(source.id)} className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 border border-slate-700/60 transition-colors">Ngắt</button>
+                  </div>
+                ))
+              )}
             </div>
           </div>
 
@@ -494,6 +483,21 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
                       <div className="flex items-center gap-1.5 shrink-0 ml-auto">
                         <button
                           type="button"
+                          onClick={() => setSelectedAccountForPages(acc)}
+                          className="px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors border bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border-sky-500/30"
+                          title="Quản lý và mở các Fanpage của tài khoản này"
+                        >
+                          <Layers size={13} />
+                          <span>Fanpage</span>
+                          {inboxSources.filter((s) => s.source_type === 'page_messenger' && String(s.owner_account_id) === String(acc.id)).length > 0 && (
+                            <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-sky-500/25 text-sky-200">
+                              {inboxSources.filter((s) => s.source_type === 'page_messenger' && String(s.owner_account_id) === String(acc.id)).length}
+                            </span>
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
                           onClick={() => handleStartChrome(acc.id)}
                           disabled={startingId === acc.id || deletingId === acc.id || isChangingDisplay}
                           className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors border disabled:opacity-50 ${
@@ -554,6 +558,19 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
         onConfirm={executeDeleteAccount}
         onClose={() => !deletingId && setAccountToDelete(null)}
       />
+
+      {selectedAccountForPages && (
+        <PageSelectorModal
+          account={selectedAccountForPages}
+          onClose={() => {
+            setSelectedAccountForPages(null);
+            loadInboxSources();
+            loadAccounts();
+          }}
+          onSourcesChanged={onSourcesChanged}
+          socket={socket}
+        />
+      )}
     </div>
   );
 }

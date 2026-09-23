@@ -514,6 +514,10 @@ const extensionConnections = new Map();
 // c_user as Personal Messenger. Keep its WebSocket separate so Page startup
 // never replaces the personal connection used for Inbox and Requests.
 const pageExtensionConnections = new Map();
+// Cache danh sách Fanpage phát hiện qua Auto-Discovery (In-memory)
+// Key: accountId -> Value: { pages: Array, updatedAt: number }
+const discoveredPagesByAccount = new Map();
+const lastPageRefreshRequestedAt = new Map();
 function pageConnectionKey(accountId, pageId) {
   return `${String(accountId || '')}:${String(pageId || '')}`;
 }
@@ -3647,6 +3651,48 @@ wss.on('connection', (ws, req) => {
           }
           break;
         }
+        case 'ACCOUNT_PAGES_DISCOVERED': {
+          const accountId = String(msg.data?.account_id || ws.accountId || '');
+          const pages = Array.isArray(msg.data?.pages) ? msg.data.pages : [];
+          if (!accountId) break;
+
+          // Lọc bỏ tài khoản cá nhân
+          const filteredPages = pages.filter(p => String(p.page_id) !== accountId);
+
+          console.log(`[WS] 📄 Nhận ACCOUNT_PAGES_DISCOVERED cho account=${accountId}, số trang=${filteredPages.length}`);
+          discoveredPagesByAccount.set(accountId, {
+            pages: filteredPages,
+            updatedAt: Date.now()
+          });
+
+          // Tự động gắn owner cho các source NULL trùng page_id hoặc trùng display_name (tận dụng auto-bind)
+          try {
+            for (const p of filteredPages) {
+              const pid = String(p.page_id || '');
+              const pname = (p.name || '').trim();
+              if (pid) {
+                const updated = db.prepare(`
+                  UPDATE inbox_sources
+                  SET owner_account_id = ?
+                  WHERE (external_id = ? OR (display_name = ? AND display_name != ''))
+                    AND source_type = 'page_messenger' AND owner_account_id IS NULL
+                `).run(accountId, pid, pname);
+                if (updated.changes > 0) {
+                  console.log(`[WS] 🔗 Đã tự động gắn owner=${accountId} cho page_source=${pid} (${pname})`);
+                }
+              }
+            }
+          } catch (bindErr) {
+            console.warn('[WS] Lỗi khi auto-bind owner cho pages discovered:', bindErr.message);
+          }
+
+          io.emit('PAGES_DISCOVERED', {
+            account_id: accountId,
+            pages: filteredPages,
+            updated_at: Date.now()
+          });
+          break;
+        }
         case 'UPDATE_LINK_PREVIEW_IMAGE': {
           try {
             const { url_hash, image_url, title } = msg.data || {};
@@ -4829,6 +4875,196 @@ app.post('/api/accounts/:id/background', async (req, res) => {
   }
   res.json({ success: !!result?.success, error: result?.error });
 });
+
+// ────────────────────────────────────────────────
+// Fanpage Auto-Discovery & Batch-Open Endpoints
+// ────────────────────────────────────────────────
+app.get('/api/accounts/:id/pages', (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  const accountId = String(req.params.id);
+  const cached = discoveredPagesByAccount.get(accountId);
+  // Loại bỏ tài khoản cá nhân ra khỏi danh sách quét được
+  const rawPages = (cached?.pages || []).filter(p => String(p.page_id) !== accountId);
+
+  // Lấy các source Page đã ACTIVE của account này trong database (bỏ qua personal profile)
+  const activeSources = db.prepare(`
+    SELECT external_id, display_name, avatar_url, status
+    FROM inbox_sources
+    WHERE source_type = 'page_messenger' AND owner_account_id = ? AND status = 'ACTIVE'
+  `).all(accountId).filter(s => String(s.external_id) !== accountId);
+
+  const activeById = new Map();
+  const activeByName = new Map();
+  for (const s of activeSources) {
+    const extId = String(s.external_id);
+    activeById.set(extId, s);
+    const norm = (s.display_name || '').trim().toLowerCase();
+    if (norm) {
+      activeByName.set(norm, s);
+    }
+  }
+
+  // Kết hợp danh sách:
+  // Dùng normalizedName làm khóa để đảm bảo không bao giờ bị nhân đôi 2 Page cùng tên
+  const combinedByName = new Map();
+
+  for (const p of rawPages) {
+    const pid = String(p.page_id);
+    const norm = (p.name || '').trim().toLowerCase();
+    const matchedSource = activeById.get(pid) || (norm ? activeByName.get(norm) : null);
+    const isConn = !!matchedSource;
+    // Ưu tiên dùng ID từ database nếu đã kết nối (ID legacy 16 số chuẩn), nếu chưa có thì dùng pid quét được
+    const effectiveId = matchedSource ? String(matchedSource.external_id) : pid;
+    const effectiveName = matchedSource?.display_name || p.name || ('Page ' + effectiveId);
+    const key = norm || effectiveId;
+
+    if (!combinedByName.has(key)) {
+      combinedByName.set(key, {
+        page_id: effectiveId,
+        name: effectiveName,
+        avatar_url: p.avatar_url || matchedSource?.avatar_url || `https://graph.facebook.com/${effectiveId}/picture?type=normal`,
+        category: p.category || 'Trang Facebook',
+        is_connected: isConn
+      });
+    }
+  }
+
+  // Bổ sung các page trong CSDL mà discovery chưa quét ra
+  for (const s of activeSources) {
+    const extId = String(s.external_id);
+    const norm = (s.display_name || '').trim().toLowerCase();
+    const key = norm || extId;
+    if (!combinedByName.has(key)) {
+      combinedByName.set(key, {
+        page_id: extId,
+        name: s.display_name || ('Page ' + extId),
+        avatar_url: s.avatar_url || `https://graph.facebook.com/${extId}/picture?type=normal`,
+        category: 'Trang Facebook',
+        is_connected: true
+      });
+    }
+  }
+
+  const pages = Array.from(combinedByName.values());
+  res.json({
+    success: true,
+    account_id: accountId,
+    pages,
+    updated_at: cached?.updatedAt || null
+  });
+});
+
+app.post('/api/accounts/:id/pages/refresh', (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  const accountId = String(req.params.id);
+
+  // Rate-limiting / Throttle: 10 giây/lần
+  const lastReq = lastPageRefreshRequestedAt.get(accountId) || 0;
+  const now = Date.now();
+  if (now - lastReq < 10000) {
+    const waitSeconds = Math.ceil((10000 - (now - lastReq)) / 1000);
+    return res.status(429).json({
+      success: false,
+      error: `Vui lòng đợi ${waitSeconds} giây trước khi quét lại.`
+    });
+  }
+  lastPageRefreshRequestedAt.set(accountId, now);
+
+  const personalWs = extensionConnections.get(accountId);
+  if (!personalWs || personalWs.readyState !== WebSocket.OPEN) {
+    return res.status(409).json({
+      success: false,
+      error: 'Chrome của tài khoản Facebook này chưa kết nối. Hãy khởi động Chrome trước.'
+    });
+  }
+
+  personalWs.send(JSON.stringify({ type: 'REQ_REFRESH_PAGES' }));
+  console.log(`[WS] 🔄 Đã gửi REQ_REFRESH_PAGES tới extension của account=${accountId}`);
+  res.json({ success: true, message: 'Đã gửi yêu cầu quét lại Fanpage.' });
+});
+
+app.post('/api/accounts/:id/pages/batch-open', async (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  const accountId = String(req.params.id);
+  const pageIds = Array.isArray(req.body?.page_ids) ? req.body.page_ids.map(String).filter(Boolean) : [];
+
+  if (pageIds.length === 0) {
+    return res.status(400).json({ success: false, error: 'Vui lòng chọn ít nhất 1 Page để mở.' });
+  }
+
+  const cached = discoveredPagesByAccount.get(accountId);
+  const cachedPages = cached?.pages || [];
+  const cachedPageMap = new Map(cachedPages.map(p => [String(p.page_id), p]));
+
+  // Lấy các source hiện tại để kiểm tra trùng tên trước khi tạo mới (tránh tạo 2 source kép cho 1 Page)
+  const existingSources = db.prepare(`
+    SELECT id, external_id, display_name
+    FROM inbox_sources
+    WHERE source_type = 'page_messenger' AND owner_account_id = ?
+  `).all(accountId);
+
+  const existingByName = new Map();
+  for (const s of existingSources) {
+    const norm = (s.display_name || '').trim().toLowerCase();
+    if (norm) existingByName.set(norm, s);
+  }
+
+  const openedPages = [];
+  const errors = [];
+
+  for (const rawPageId of pageIds) {
+    try {
+      const pageInfo = cachedPageMap.get(rawPageId);
+      const pageName = pageInfo?.name || ('Page ' + rawPageId);
+      const norm = pageName.trim().toLowerCase();
+
+      // Nếu đã có source cùng tên trong DB, ưu tiên dùng external_id sẵn có
+      const existingMatch = norm ? existingByName.get(norm) : null;
+      const pageId = existingMatch ? String(existingMatch.external_id) : rawPageId;
+
+      // 1. Đảm bảo inbox source tồn tại và đã gắn owner_account_id (không cần token)
+      const source = InboxSourceService.ensurePageSource({
+        pageId,
+        accountId,
+        pageName: existingMatch?.display_name || pageName
+      }, db);
+
+      // 2. Mở tab Meta Business Suite trong Chrome của account này
+      const ok = await processManager.openBusinessTabForPage(pageId, accountId);
+      if (ok) {
+        openedPages.push(pageId);
+        if (source) {
+          io.emit('INBOX_SOURCE_ADDED', {
+            id: source.id,
+            source_type: 'page_messenger',
+            display_name: source.display_name,
+            owner_account_id: accountId
+          });
+        }
+      } else {
+        errors.push(`Không thể mở tab cho Page ${pageId}`);
+      }
+    } catch (err) {
+      console.warn(`[BatchOpen] Lỗi khi mở Page ${rawPageId}:`, err.message);
+      errors.push(err.message);
+    }
+  }
+
+  io.emit('THREAD_LIST_UPDATED');
+  res.json({
+    success: openedPages.length > 0,
+    opened_count: openedPages.length,
+    opened_page_ids: openedPages,
+    errors: errors.length > 0 ? errors : undefined
+  });
+});
+
 app.post('/api/accounts/new-session', async (req, res) => {
   if (!enterpriseAccess.isCompanyAdmin(req.user) && !(req.user.role === 'ADMIN' && req.user.username === 'admin')) {
     return res.status(403).json({ success: false, error: 'Chỉ Admin doanh nghiệp được thêm tài khoản Facebook.' });

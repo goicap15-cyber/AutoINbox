@@ -1,5 +1,5 @@
 // AutoChatbot FB Engine - Service Worker Background Script
-importScripts('tabCreationCoordinator.js', 'queueEnvelopeValidation.js', 'callTabDeduplicator.js', 'messengerTabDeduplicator.js', 'messengerTabRoles.js', 'pageVideoUploader.js', 'pageNameExtractor.js');
+importScripts('tabCreationCoordinator.js', 'queueEnvelopeValidation.js', 'callTabDeduplicator.js', 'messengerTabDeduplicator.js', 'messengerTabRoles.js', 'pageVideoUploader.js', 'pageNameExtractor.js', 'pageDiscovery.js');
 const tabCreationCoordinator = self.FbCrmTabCreationCoordinator.createTabCreationCoordinator();
 
 async function blockFacebookNativeNotifications() {
@@ -859,6 +859,43 @@ async function fetchPageProfileViaTab(pageId) {
     openMarkerTabInMessengerWindow('https://www.facebook.com/profile.php?id=' + encodeURIComponent(String(pageId)) + '&crm_page_profile=' + encodeURIComponent(String(pageId)));
   } catch (_) {}
 }
+
+let isPageDiscoveryRunning = false;
+let lastPageDiscoveryAt = 0;
+
+async function triggerPageDiscovery(accountId, force = false) {
+  if (!accountId) return;
+  const now = Date.now();
+  if (!force && now - lastPageDiscoveryAt < 60000) {
+    console.log('[FB Engine] ⏱️ Bỏ qua auto-discovery vì vừa quét trong vòng 60s');
+    return;
+  }
+  if (isPageDiscoveryRunning) {
+    console.log('[FB Engine] ⏳ Quá trình discovery đang chạy, bỏ qua request trùng');
+    return;
+  }
+  isPageDiscoveryRunning = true;
+  lastPageDiscoveryAt = now;
+  try {
+    console.log('[FB Engine] 🔍 Bắt đầu quét danh sách Fanpage cho account:', accountId);
+    const discovery = self.FbPageDiscovery || (typeof require !== 'undefined' ? require('./pageDiscovery') : null);
+    if (!discovery || typeof discovery.discoverPages !== 'function') {
+      console.warn('[FB Engine] Không tìm thấy helper FbPageDiscovery.discoverPages');
+      return;
+    }
+    const pages = await discovery.discoverPages(accountId);
+    console.log(`[FB Engine] 📄 Đã phát hiện ${pages.length} Fanpage cho account ${accountId}`);
+    sendToBackend('ACCOUNT_PAGES_DISCOVERED', {
+      account_id: String(accountId),
+      pages: pages
+    });
+  } catch (err) {
+    console.warn('[FB Engine] Lỗi khi quét Fanpage:', err?.message || err);
+  } finally {
+    isPageDiscoveryRunning = false;
+  }
+}
+
 closeOrphanMarkerTabs();
 chrome.runtime.onMessage.addListener((msg, sender) => {
   try {
@@ -1242,6 +1279,16 @@ function connectWebSocket() {
             }).catch((error) => {
               console.warn('[FB Engine] Không thể khởi tạo tab nhận realtime:', error.message);
             });
+          }
+          if (user_id) {
+            triggerPageDiscovery(user_id, false);
+          }
+          break;
+        }
+        case 'REQ_REFRESH_PAGES': {
+          console.log('[FB Engine] 🔄 Nhận lệnh REQ_REFRESH_PAGES từ backend cho account:', user_id);
+          if (user_id) {
+            triggerPageDiscovery(user_id, true);
           }
           break;
         }
