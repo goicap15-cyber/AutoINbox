@@ -2705,6 +2705,40 @@ async function prepareCampaignRecipientComposer(tabId, targetThreadId, timeoutMs
   throw error;
 }
 
+// Sau khi submit video, Messenger vẫn xử lý phía server ("Đang xử lý").
+// Điều hướng tab sang thread khác trong lúc đó làm hủy xử lý - video không
+// bao giờ lên. Chờ spinner/progressbar quanh bubble biến mất rồi mới cho
+// runner chuyển người nhận kế tiếp. Timeout chỉ ghi log, không coi là lỗi
+// (video thường vẫn đăng thành công sau khi hết chờ).
+async function waitPersonalVideoSettled(tabId, timeoutMs = 90000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const main = document.querySelector('div[role="main"]');
+        if (!main) return { settled: true, reason: 'no_main' };
+        const tail = (main.innerText || '').slice(-2000);
+        const processing = /đang xử lý|xử lý video|processing video|đang tải lên|uploading/i.test(tail);
+        const busy = [...main.querySelectorAll('[aria-busy="true"], [role="progressbar"]')]
+          .filter((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          }).length;
+        return { settled: !processing && busy === 0, processing, busy };
+      }
+    }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+    if (lastState?.settled) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'video_settled', waited_ms: timeoutMs - (deadline - Date.now()), ...lastState });
+      return true;
+    }
+    await delay(1000);
+  }
+  sendToBackend('COMPOSER_DEBUG', { stage: 'video_settle_timeout', timeout_ms: timeoutMs, ...(lastState || {}) });
+  return false;
+}
+
 async function handleSendPersonalMessageWithAttachment({ thread_id, recipient_thread_id = null, thread_url = null, expected_contact_name = null, strict_recipient_identity = false, content, attachment, attachmentManifest = null, client_message_id, account_id = user_id, tab_role = 'interaction' }) {
   const trace = (stage, extra = {}) => console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage, thread_id: String(thread_id), client_message_id, at: new Date().toISOString(), ...extra }));
   trace('EXTENSION_SEND_RECEIVED', { text_length: String(content || '').length, has_attachment: true });
@@ -2785,6 +2819,14 @@ async function handleSendPersonalMessageWithAttachment({ thread_id, recipient_th
       mediaType,
       idsBefore: outgoingMediaIdsBefore
     }).catch(() => null);
+
+    // Video: submit chỉ đưa bubble vào thread - Facebook vẫn xử lý phía server
+    // ("Đang xử lý"). Nếu chuyển sang người nhận kế tiếp ngay, tab điều hướng
+    // đi mất làm hủy xử lý -> video không bao giờ lên. Chờ bubble video hoàn
+    // tất (spinner/progressbar biến mất, tối đa 90s) trước khi báo hoàn tất.
+    if (mediaType === 'video') {
+      await waitPersonalVideoSettled(tab.id, 90000);
+    }
 
     console.log('[FB Engine] ✅ Đã dispatch tin nhắn (có đính kèm) qua Messenger cá nhân');
     sendToBackend('SEND_MESSAGE_RESULT', {
