@@ -544,13 +544,19 @@ async function waitForMessengerAttachmentReady(tabId, attachmentOrManifest) {
       args: [hasVideo]
     }).then((rows) => rows?.[0]?.result || null).catch(() => null);
 
+  let firstReadyAt = 0;
   while (Date.now() < deadline) {
     lastState = await probeReady();
     readyStreak = lastState?.ready ? readyStreak + 1 : 0;
-    // Video controls can become enabled briefly while Facebook is still
-    // processing the upload. Require a stable ready state before submitting.
-    if (readyStreak >= (hasVideo ? 2 : 1)) {
-      sendToBackend('COMPOSER_DEBUG', { stage: 'attachment_ready', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
+    if (lastState?.ready && !firstReadyAt) firstReadyAt = Date.now();
+    if (!lastState?.ready) firstReadyAt = 0;
+    // Video: nút Gửi bật SỚM ngay khi file vừa staged, trong khi Facebook còn
+    // xử lý phía server (thanh tiến trình mount trễ hơn ~1-2s). Submit lúc đó
+    // là mất video. Yêu cầu trạng thái sẵn sàng TRỤ ĐỨNG 8s liên tục: đủ lâu
+    // để progressbar kịp hiện rồi biến mất = upload thật sự hoàn tất.
+    const dwellOk = !hasVideo || (firstReadyAt && Date.now() - firstReadyAt >= 8000);
+    if (readyStreak >= (hasVideo ? 2 : 1) && dwellOk) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'attachment_ready', dwell_ms: firstReadyAt ? Date.now() - firstReadyAt : 0, timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
       return lastState;
     }
     await delay(hasVideo ? 150 : 100);
@@ -593,6 +599,7 @@ async function waitForBusinessSuiteAttachmentReady(tabId, attachmentOrManifest) 
   const basenames = items.map((i) => (i?.local_path || i?.name || '').split(/[\\/]/).pop()).filter(Boolean);
   let lastState = null;
   let readyStreak = 0;
+  let firstReadyAt = 0;
 
   while (Date.now() < deadline) {
     lastState = await chrome.scripting.executeScript({
@@ -680,8 +687,12 @@ async function waitForBusinessSuiteAttachmentReady(tabId, attachmentOrManifest) 
     }).then((rows) => rows?.[0]?.result || null).catch(() => null);
 
     readyStreak = lastState?.ready ? readyStreak + 1 : 0;
-    if (readyStreak >= (hasVideo ? 2 : 1)) {
-      sendToBackend('COMPOSER_DEBUG', { stage: 'page_attachment_ready', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
+    if (lastState?.ready && !firstReadyAt) firstReadyAt = Date.now();
+    if (!lastState?.ready) firstReadyAt = 0;
+    // Video: chờ trụ 8s liên tục như bản Messenger tab (nút Gửi bật sớm).
+    const dwellOk = !hasVideo || (firstReadyAt && Date.now() - firstReadyAt >= 8000);
+    if (readyStreak >= (hasVideo ? 2 : 1) && dwellOk) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'page_attachment_ready', dwell_ms: firstReadyAt ? Date.now() - firstReadyAt : 0, timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
       return lastState;
     }
     await delay(hasVideo ? 250 : 150);
