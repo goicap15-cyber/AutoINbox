@@ -2719,19 +2719,27 @@ async function waitPersonalVideoSettled(tabId, timeoutMs = 90000) {
       func: () => {
         const main = document.querySelector('div[role="main"]');
         if (!main) return { settled: true, reason: 'no_main' };
-        const tail = (main.innerText || '').slice(-2000);
-        const processing = /đang xử lý|xử lý video|processing video|đang tải lên|uploading/i.test(tail);
+        const tail = (main.innerText || '').slice(-2500);
+        // Spinner / tiến trình upload còn chạy?
+        const processing = /đang xử lý|xử lý video|processing video|đang tải lên|uploading|đang gửi|sending/i.test(tail);
         const busy = [...main.querySelectorAll('[aria-busy="true"], [role="progressbar"]')]
           .filter((element) => {
             const rect = element.getBoundingClientRect();
             return rect.width > 0 && rect.height > 0;
           }).length;
-        return { settled: !processing && busy === 0, processing, busy };
+        // Tín hiệu giao hàng chính thức của Messenger: dòng 'Đã gửi'/'Đã xem'
+        // (hoặc tiếng Anh) dưới bubble - video chưa hiện dòng này là chưa xong.
+        const sentMarker = /(đã gửi|đã xem|đã thấy|sent|seen|delivered)/i.test(tail);
+        return { settled: !processing && busy === 0 && sentMarker, processing, busy, sent_marker: sentMarker };
       }
     }).then((rows) => rows?.[0]?.result || null).catch(() => null);
     if (lastState?.settled) {
       sendToBackend('COMPOSER_DEBUG', { stage: 'video_settled', waited_ms: timeoutMs - (deadline - Date.now()), ...lastState });
       return true;
+    }
+    // Log nhịp thăm dò mỗi 5s để nhìn thấy nó đang chờ điều kiện nào.
+    if (Math.floor((timeoutMs - (deadline - Date.now())) / 5000) !== Math.floor((timeoutMs - (deadline - Date.now()) + 1000) / 5000)) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'video_settle_poll', ...lastState });
     }
     await delay(1000);
   }
