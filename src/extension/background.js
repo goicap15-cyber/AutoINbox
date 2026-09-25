@@ -941,6 +941,12 @@ async function fetchPageProfileViaTab(pageId) {
 closeOrphanMarkerTabs();
 chrome.runtime.onMessage.addListener((msg, sender) => {
   try {
+    if (msg && msg.type === 'CRM_THREAD_SEEN' && msg.thread_id) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        sendToBackend('THREAD_SEEN', { thread_id: String(msg.thread_id), account_id: user_id || null });
+      }
+      return;
+    }
     if (msg && msg.type === 'CRM_LINK_IMAGE' && msg.hash && /^[0-9a-f]{40}$/.test(String(msg.hash))) {
       if (msg.image && /^https?:\/\//.test(String(msg.image)) && ws && ws.readyState === WebSocket.OPEN) {
         sendToBackend('UPDATE_LINK_PREVIEW_IMAGE', { url_hash: msg.hash, image_url: msg.image });

@@ -2120,6 +2120,16 @@ wss.on('connection', (ws, req) => {
               .get(String(canonicalThreadId), String(m.fb_message_id)))
             : false;
           if (!isReplayedObservation) {
+            if (!isOutgoing) {
+              // Khách nhắn tin mới = khách đang trong hội thoại = mọi tin
+              // operator trước đó đã xem. Tín hiệu miễn phí, không cần DOM.
+              const prevSeen = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(String(canonicalThreadId));
+              const lastOut = db.prepare("SELECT id FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1").get(String(canonicalThreadId));
+              if (lastOut && String(prevSeen?.last_seen_message_id || '') !== String(lastOut.id)) {
+                db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(lastOut.id), String(canonicalThreadId));
+                io.emit('THREAD_SEEN', { thread_id: String(canonicalThreadId), last_seen_message_id: String(lastOut.id) });
+              }
+            }
             if (isOutgoing) {
               // Operator trả lời = đã đọc hội thoại: gỡ mọi cờ đánh tay.
               db.prepare('UPDATE threads SET is_unread = 0, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
@@ -5035,6 +5045,26 @@ app.post('/api/threads/:id/unread', (req, res) => {
     res.json({ success: true, id: String(id), is_unread: next });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Không thể cập nhật trạng thái chưa đọc.' });
+  }
+});
+
+// Đánh dấu khách đã đọc: content script bắt 'Đã xem' trong DOM hội thoại
+// đang mở trên tab Facebook rồi relay về đây.
+app.post('/api/threads/:id/seen', (req, res) => {
+  try {
+    const id = req.params.id;
+    const last = db.prepare(
+      'SELECT id FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1'
+    ).get(id);
+    if (!last) return res.json({ success: true, last_seen_message_id: null });
+    const prev = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(id);
+    if (String(prev?.last_seen_message_id || '') !== String(last.id)) {
+      db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(last.id), id);
+      io.emit('THREAD_SEEN', { thread_id: String(id), last_seen_message_id: String(last.id) });
+    }
+    res.json({ success: true, last_seen_message_id: String(last.id) });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Không thể ghi nhận đã xem.' });
   }
 });
 

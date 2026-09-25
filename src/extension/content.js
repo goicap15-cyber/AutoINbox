@@ -2298,3 +2298,33 @@ try {
 } catch (_) {}
 
 })();
+
+// ── Seen watcher: bắt dấu hiệu 'Đã xem' dưới tin nhắn của operator ──
+// Facebook chỉ hiện marker này trong DOM của hội thoại ĐANG mở trên tab,
+// nên watcher quét thread hiện tại; hội thoại khác sẽ được ghi nhận khi
+// tab có cơ hội đậu trên đó.
+(function () {
+  const lastReportedAt = new Map();
+  setInterval(() => {
+    try {
+      const m = location.pathname.match(/\/messages\/t\/([^\/?#]+)/);
+      if (!m) return;
+      const threadId = decodeURIComponent(m[1]);
+      const main = document.querySelector('div[role="main"]');
+      if (!main) return;
+      const tail = (main.innerText || '').slice(-1500);
+      // Chỉ tin khi TRẠNG THÁI CUỐI CÙNG trong hội thoại là 'Đã xem': hội
+      // thoại có thể lẫn marker cũ ('Đã xem' của tin đọc rồi) đứng TRƯỚC
+      // 'Đã gửi' của tin mới nhất chưa đọc - nếu chỉ tìm 'có Đã xem' là
+      // đánh dấu nhầm tin mới nhất đã xem.
+      const markers = [...tail.matchAll(/đã xem|đã gửi|seen|sent/gi)];
+      if (!markers.length) return;
+      const lastMarker = markers[markers.length - 1][0].toLowerCase();
+      if (!lastMarker.includes('xem') && !lastMarker.includes('seen')) return;
+      const now = Date.now();
+      if ((lastReportedAt.get(threadId) || 0) > now - 30000) return;
+      lastReportedAt.set(threadId, now);
+      chrome.runtime.sendMessage({ type: 'CRM_THREAD_SEEN', thread_id: threadId });
+    } catch (_) {}
+  }, 3000);
+})();

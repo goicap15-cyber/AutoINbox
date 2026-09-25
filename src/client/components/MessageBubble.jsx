@@ -98,6 +98,14 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   // Persisted delivery_status is authoritative. A stale optimistic status can
   // remain 'pending' after the backend has confirmed the Messenger media.
   const status = msg.delivery_status || msg.status || (msg.is_failed ? 'failed' : msg.is_sending ? 'sending' : 'sent');
+  // 'Đã xem': tin đi của operator có id <= mốc last_seen_message_id mà
+  // extension bắt được từ DOM hội thoại đang mở trên tab Facebook.
+  const seenUpTo = Number(activeThread?.last_seen_message_id || 0);
+  const isSeenByCustomer = isOutgoing
+    && seenUpTo > 0
+    && Number(msg.id) > 0
+    && Number(msg.id) <= seenUpTo
+    && status !== 'sending' && status !== 'pending' && status !== 'failed';
   const displayTime = getMessageDisplayTime(msg);
   const avatarUrl = activeThread?.avatar_url || msg.sender_avatar_url || msg.sender_avatar || msg.avatar_url;
   const avatarSeed = String(senderName || activeThread?.contact_name || '').trim();
@@ -278,10 +286,16 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
             </button>
           )}
           {isOutgoing && status !== 'sending' && status !== 'pending' && status !== 'failed' && (
-            status === 'read' || status === 'delivered' ? (
-              <CheckCheck size={13} className="text-[var(--color-accent)]" strokeWidth={1.75} />
+            isSeenByCustomer || status === 'read' || status === 'delivered' ? (
+              <span className="inline-flex items-center gap-1 text-[var(--color-accent)] font-medium">
+                <CheckCheck size={13} strokeWidth={1.75} />
+                Đã xem
+              </span>
             ) : (
-              <Check size={13} className="text-[var(--color-text-muted)]" strokeWidth={1.75} />
+              <span className="inline-flex items-center gap-1">
+                <Check size={13} className="text-[var(--color-text-muted)]" strokeWidth={1.75} />
+                Đã gửi
+              </span>
             )
           )}
         </div>

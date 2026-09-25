@@ -306,6 +306,13 @@ const migrations = [
     }
   },
   {
+    version: 20260924002,
+    name: 'add_threads_last_seen_message',
+    up: (db) => {
+      try { db.exec('ALTER TABLE threads ADD COLUMN last_seen_message_id TEXT;'); } catch (e) { }
+    }
+  },
+  {
     version: 20260922001,
     name: 'add_threads_pinned',
     up: (db) => {
