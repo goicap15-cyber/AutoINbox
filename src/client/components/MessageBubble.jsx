@@ -11,9 +11,13 @@ function pickAvatarColor(value) {
   return AVATAR_COLORS[total % AVATAR_COLORS.length];
 }
 
-function IncomingAvatar({ url, initial, color, threadId }) {
+function IncomingAvatar({ url, initial, color, threadId, size = 'md' }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [url, threadId]);
+
+  const sizeClass = size === 'sm'
+    ? 'w-4 h-4 text-[7px]'
+    : 'w-8 h-8 text-xs';
 
   if (url && !failed) {
     const source = String(url).startsWith('/api/') || /^https?:/i.test(String(url))
@@ -24,7 +28,7 @@ function IncomingAvatar({ url, initial, color, threadId }) {
         key={`${threadId || ''}:${source}`}
         src={source}
         alt=""
-        className="w-8 h-8 rounded-full object-cover border border-[var(--color-border)] shadow-sm"
+        className={`${sizeClass} rounded-full object-cover border border-[var(--color-border)] shadow-sm`}
         onError={() => setFailed(true)}
       />
     );
@@ -32,7 +36,7 @@ function IncomingAvatar({ url, initial, color, threadId }) {
 
   return (
     <div
-      className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--color-text-on-accent)] text-xs font-semibold shadow-sm"
+      className={`${sizeClass} rounded-full flex items-center justify-center text-[var(--color-text-on-accent)] font-semibold shadow-sm`}
       style={{ backgroundColor: color }}
     >
       {initial}
@@ -87,7 +91,7 @@ function renderRichContent(text) {
   return parts;
 }
 
-export default function MessageBubble({ msg, activeThread, onRetry }) {
+export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenByCustomer = false }) {
   const [isTimePinned, setIsTimePinned] = useState(false);
   const isPendingDirection = msg.direction_status === 'pending';
   const isBoolOutgoing = (msg.is_outgoing === true || msg.is_outgoing === 1 || String(msg.is_outgoing || '').toLowerCase() === 'true' || String(msg.is_outgoing || '') === '1') || msg.from === 'me' || msg.sender_type === 'staff' || msg.sender_type === 'ai';
@@ -299,6 +303,23 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
             )
           )}
         </div>
+
+        {/* Seen receipt avatar - hiện avatar nhỏ của khách dưới tin nhắn cuối họ đã đọc */}
+        {isLastSeenByCustomer && isOutgoing && (
+          <div
+            className="flex justify-end mt-0.5 pr-0.5"
+            title={`${activeThread?.contact_name || 'Khách hàng'} đã xem`}
+            style={{ animation: 'seenAvatarFadeIn 0.35s ease-out both' }}
+          >
+            <IncomingAvatar
+              url={avatarUrl}
+              initial={avatarInitial}
+              color={avatarColor}
+              threadId={activeThread?.id || msg.thread_id}
+              size="sm"
+            />
+          </div>
+        )}
       </div>
     </div>
   );

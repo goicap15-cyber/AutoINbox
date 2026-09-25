@@ -129,6 +129,73 @@
     }
   }
 
+  // ── MQTT binary frame parsing (Messenger realtime 'msgr' channel) ──
+  // Facebook MQTT dùng header MQIsdp 0x82 (PUBLISH QoS1): [header][remaining
+  // length varint][2B topic len][topic][2B packet id][payload]. Payload là
+  // zlib/deflate chứa JSON có deltas - trong đó deltaReadReceipt mang
+  // watermarkTimestampMs: chính là dữ liệu Facebook dùng để vẽ 'Đã xem'.
+  function extractMqttPayload(buffer) {
+    try {
+      const bytes = new Uint8Array(buffer);
+      if (!bytes || bytes.length < 6) return null;
+      const first = bytes[0];
+      const type = first & 0xF0;
+      const isPublish = type === 0x30 || type === 0x80; // MQTT v3.1.1 / MQIsdp
+      if (!isPublish) return null;
+      let pos = 1;
+      let remaining = 0;
+      let mult = 1;
+      for (let i = 0; i < 4 && pos < bytes.length; i++) {
+        const b = bytes[pos++];
+        remaining += (b & 0x7F) * mult;
+        mult *= 128;
+        if ((b & 0x80) === 0) break;
+      }
+      if (remaining <= 0 || pos + remaining > bytes.length) return null;
+      const topicLen = (bytes[pos] << 8) | bytes[pos + 1];
+      if (topicLen <= 0 || pos + 2 + topicLen > bytes.length) return null;
+      let p = pos + 2 + topicLen;
+      const qos = (first >> 1) & 0x03;
+      if (qos > 0) p += 2; // packet identifier
+      if (p >= bytes.length) return null;
+      return bytes.slice(p);
+    } catch (_) { return null; }
+  }
+
+  async function inflateMqttPayload(payload) {
+    for (const format of ['deflate', 'deflate-raw']) {
+      try {
+        const ds = new DecompressionStream(format);
+        const stream = new Blob([payload]).stream().pipeThrough(ds);
+        const out = await new Response(stream).arrayBuffer();
+        return new TextDecoder('utf-8').decode(out);
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  async function handleBinaryFrame(buffer) {
+    try {
+      const mqttPayload = extractMqttPayload(buffer);
+      if (mqttPayload && mqttPayload.length) {
+        const inflated = await inflateMqttPayload(mqttPayload);
+        if (inflated && inflated.length > 2) {
+          try {
+            const json = JSON.parse(inflated);
+            extractMessagesFromJSON(json);
+            return;
+          } catch (_) {}
+        }
+      }
+      // Fallback: frame không phải MQTT/nén - decode thẳng như text.
+      const text = new TextDecoder('utf-8').decode(buffer);
+      if (text && text[0] === '{') {
+        try { extractMessagesFromJSON(JSON.parse(text)); return; } catch (_) {}
+      }
+      extractMessagesFromRawText(text);
+    } catch (_) {}
+  }
+
   // Parser function for WebSocket frames
   function parseWebSocketData(data) {
     if (!data) return;
@@ -141,28 +208,71 @@
         extractMessagesFromRawText(data);
       }
     } else if (data instanceof ArrayBuffer) {
-      try {
-        const decoder = new TextDecoder('utf-8');
-        const text = decoder.decode(data);
-        extractMessagesFromRawText(text);
-      } catch (e) {}
+      handleBinaryFrame(data);
     } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
       // Chrome delivers Facebook/Messenger realtime frames as Blob by
       // default. The old interceptor handled only string/ArrayBuffer, so
       // genuine customer messages on an already-open socket were silently
       // ignored until another action caused a HTTP/DOM refresh.
-      data.arrayBuffer().then((buffer) => {
-        try {
-          const text = new TextDecoder('utf-8').decode(buffer);
-          parseWebSocketData(text);
-        } catch (_) {}
-      }).catch(() => {});
+      data.arrayBuffer().then((buffer) => handleBinaryFrame(buffer)).catch(() => {});
     }
+  }
+
+  // ── Read receipt ('Đã xem') từ MQTT delta chính chủ của Facebook ──
+  // deltaReadReceipt/tamReadReceipt mang watermarkTimestampMs = mốc khách đã
+  // đọc tới. Bắt từ đây là bắt 'đã xem' chuẩn như Messenger, không phụ thuộc
+  // DOM hay việc thread có đang mở không.
+  const lastReadReceiptWatermark = new Map();
+  function emitReadReceipt(threadId, watermarkMs, actor) {
+    try {
+      if (!threadId || !(watermarkMs > 0)) return;
+      const uid = getCurrentUserId();
+      // Operator tự đọc tin của khách cũng sinh read receipt - bỏ qua,
+      // chỉ quan tâm KHÁCH đọc tin của mình.
+      if (uid && actor && String(actor) === String(uid)) return;
+      const prev = lastReadReceiptWatermark.get(String(threadId)) || 0;
+      if (watermarkMs <= prev) return;
+      lastReadReceiptWatermark.set(String(threadId), watermarkMs);
+      console.log('[FB ReadReceipt] khách đã xem:', { thread: String(threadId), watermark: watermarkMs, actor: String(actor || '') });
+      window.postMessage({
+        type: 'FB_READ_RECEIPT',
+        data: { thread_id: String(threadId), watermark_ms: watermarkMs, actor: actor ? String(actor) : '' }
+      }, '*');
+    } catch (_) {}
+  }
+
+  function extractThreadIdFromReceipt(receipt) {
+    try {
+      const keys = receipt && receipt.threadKeys;
+      if (Array.isArray(keys)) {
+        for (const k of keys) {
+          if (!k || typeof k !== 'object') continue;
+          const id = k.otherUserFbId || k.threadFbId || k.thread_fbid || k.threadId;
+          if (id) return String(id);
+        }
+      }
+      const tk = receipt && receipt.threadKey;
+      if (tk && typeof tk === 'object') {
+        const id = tk.otherUserFbId || tk.threadFbId || tk.thread_fbid || tk.threadId;
+        if (id) return String(id);
+      }
+      const direct = receipt && (receipt.otherUserFbId || receipt.threadFbId || receipt.thread_fbid || receipt.threadId);
+      return direct ? String(direct) : null;
+    } catch (_) { return null; }
   }
 
   // Recursive extractor for JSON payloads
   function extractMessagesFromJSON(obj, depth = 0) {
     if (!obj || typeof obj !== 'object' || depth > 8) return;
+
+    // Read receipt: watermark + thread key -> 'Đã xem' chuẩn của Facebook.
+    if (obj.watermarkTimestampMs !== undefined || obj.watermark_ms !== undefined) {
+      const wm = Number(obj.watermarkTimestampMs) || Number(obj.watermark_ms) || 0;
+      if (wm > 0) {
+        const tid = extractThreadIdFromReceipt(obj);
+        if (tid) emitReadReceipt(tid, wm, obj.actor || obj.actorFbId || '');
+      }
+    }
 
     // Direct message node matching Facebook GraphQL schema
     const msgId = obj.message_id || obj.offline_threading_id || obj.messageId ||

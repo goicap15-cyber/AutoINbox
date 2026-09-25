@@ -941,9 +941,29 @@ async function fetchPageProfileViaTab(pageId) {
 closeOrphanMarkerTabs();
 chrome.runtime.onMessage.addListener((msg, sender) => {
   try {
+    if (msg && msg.type === 'CRM_READ_RECEIPT' && msg.thread_id && msg.watermark_ms > 0) {
+      // Read receipt MQTT (deltaReadReceipt) - 'Đã xem' chuẩn của Facebook.
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        sendToBackend('THREAD_SEEN', {
+          thread_id: String(msg.thread_id),
+          account_id: user_id || null,
+          watermark_ms: Number(msg.watermark_ms) || 0,
+          actor: msg.actor || '',
+          alt: '',
+          bubble_text: '',
+          source: 'mqtt_read_receipt',
+        });
+      }
+      return;
+    }
     if (msg && msg.type === 'CRM_THREAD_SEEN' && msg.thread_id) {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        sendToBackend('THREAD_SEEN', { thread_id: String(msg.thread_id), account_id: user_id || null });
+        sendToBackend('THREAD_SEEN', {
+          thread_id: String(msg.thread_id),
+          account_id: user_id || null,
+          alt: msg.alt || '',
+          bubble_text: msg.bubble_text || '',
+        });
       }
       return;
     }

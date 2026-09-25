@@ -2872,33 +2872,51 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'THREAD_SEEN': {
-          // Extension bắt được 'Đã xem' trong DOM hội thoại đang mở và relay
-          // về đây. Phân giải bare psid -> id ghép rồi ghi mốc đã-xem.
+          // Extension bắt được 'Đã xem' từ 2 nguồn:
+          // - DOM watcher (alt avatar + bubble text) khi thread đang mở.
+          // - MQTT read receipt (watermark_ms) - dữ liệu chuẩn của Facebook,
+          //   về realtime kể cả khi thread không mở. Watermark khớp theo
+          //   messages.timestamp_ms (đã xác nhận từ FB) nên không cần đoán.
           try {
             const seenAltRaw = String(msg.data?.alt || '');
             const seenBubbleRaw = String(msg.data?.bubble_text || '');
-            if (!seenAltRaw && !seenBubbleRaw) {
+            const seenWatermarkMs = Number(msg.data?.watermark_ms) || 0;
+            if (!seenAltRaw && !seenBubbleRaw && !(seenWatermarkMs > 0)) {
               // Bản content script cũ (chỉ gửi thread_id) - dữ liệu không đủ
               // để xác định tin, chấm mù sẽ gây false positive.
               break;
             }
-            console.log(`[SEEN] Nhận: alt="${seenAltRaw.slice(0, 60)}" bubble="${seenBubbleRaw.slice(0, 60)}"`);
+            console.log(`[SEEN] Nhận: alt="${seenAltRaw.slice(0, 60)}" bubble="${seenBubbleRaw.slice(0, 60)}" watermark=${seenWatermarkMs} source=${msg.data?.source || 'dom'}`);
             const rawSeenId = String(msg.data?.thread_id || '');
             const seenAccountId = msg.data?.account_id ? String(msg.data.account_id) : String(ws.accountId || '');
+            // Operator tự đọc tin của khách cũng sinh read receipt: actor
+            // trùng tài khoản đang chạy thì bỏ qua, không đánh 'đã xem'.
+            if (seenWatermarkMs > 0 && String(msg.data?.actor || '') && seenAccountId && String(msg.data.actor) === String(seenAccountId)) {
+              console.log(`[SEEN] Bỏ qua: receipt của chính operator (actor=${msg.data.actor})`);
+              break;
+            }
             if (rawSeenId) {
               const canonicalSeenId = resolveInternalThreadId(db, seenAccountId, rawSeenId) || rawSeenId;
               const lastSeenOut = db.prepare(
                 'SELECT id, created_at FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1'
               ).get(canonicalSeenId);
               if (!lastSeenOut) break;
-              // Ưu tiên 1: khớp NỘI DUNG bubble nằm ngay trên avatar seen -
-              // xác định chính xác khách đọc tới tin nào (không đoán giờ).
               const altText = String(msg.data?.alt || '');
               const bubbleText = String(msg.data?.bubble_text || '');
               const normSeen = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
               const nb = normSeen(bubbleText);
               let targetSeen = null;
-              if (nb && nb !== 'đã gửi') {
+              // Ưu tiên 0 (MQTT): watermark từ read receipt chính chủ - tin
+              // outgoing cuối có timestamp_ms (giờ FB) ≤ watermark + dung sai
+              // 5s. Đây là mốc khách đã đọc tới, chính xác nhất.
+              if (seenWatermarkMs > 0) {
+                targetSeen = db.prepare(
+                  'SELECT id, content FROM messages WHERE thread_id = ? AND is_outgoing = 1 AND timestamp_ms > 0 AND timestamp_ms <= ? ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1'
+                ).get(canonicalSeenId, seenWatermarkMs + 5000) || null;
+              }
+              // Ưu tiên 1: khớp NỘI DUNG bubble nằm ngay trên avatar seen -
+              // xác định chính xác khách đọc tới tin nào (không đoán giờ).
+              if (!targetSeen && nb && nb !== 'đã gửi') {
                 const recentOut = db.prepare(
                   'SELECT id, content FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 30'
                 ).all(canonicalSeenId);
