@@ -2121,10 +2121,18 @@ wss.on('connection', (ws, req) => {
             : false;
           if (!isReplayedObservation) {
             if (!isOutgoing) {
-              // Khách nhắn tin mới = khách đang trong hội thoại = mọi tin
-              // operator trước đó đã xem. Tín hiệu miễn phí, không cần DOM.
+              // Khách nhắn = khách đang trong hội thoại = mọi tin operator
+              // GỬI TRƯỚC tin này đã xem. Phải so thời gian: chỉ lấy tin đi
+              // cũ hơn tin khách vừa gửi - tin operator gửi SAU (khách chưa
+              // kịp đọc) tuyệt đối không được dán 'Đã xem'.
+              const incomingAt = Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now();
               const prevSeen = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(String(canonicalThreadId));
-              const lastOut = db.prepare("SELECT id FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1").get(String(canonicalThreadId));
+              const lastOut = db.prepare(`
+                SELECT id FROM messages
+                WHERE thread_id = ? AND is_outgoing = 1
+                  AND COALESCE(timestamp_ms, 0) <= ?
+                ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1
+              `).get(String(canonicalThreadId), incomingAt);
               if (lastOut && String(prevSeen?.last_seen_message_id || '') !== String(lastOut.id)) {
                 db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(lastOut.id), String(canonicalThreadId));
                 io.emit('THREAD_SEEN', { thread_id: String(canonicalThreadId), last_seen_message_id: String(lastOut.id) });

@@ -2312,15 +2312,26 @@ try {
       const threadId = decodeURIComponent(m[1]);
       const main = document.querySelector('div[role="main"]');
       if (!main) return;
+      const mainRect = main.getBoundingClientRect();
+      // Tín hiệu 1 (mạnh nhất): Messenger hiện AVATAR NHỎ của khách dưới góc
+      // phải bubble tin cuối khi khách xem - chỉ render ở trạng thái seen,
+      // gắn đúng bubble cuối nên không lẫn marker cũ.
+      const miniAvatars = [...main.querySelectorAll('img')].filter((img) => {
+        const r = img.getBoundingClientRect();
+        if (r.width < 10 || r.width > 32 || r.height < 10 || r.height > 32) return false;
+        return /fbcdn|scontent|lookup\.fbsbx/.test(String(img.src || ''));
+      });
+      const seenAvatar = miniAvatars.some((img) => {
+        const r = img.getBoundingClientRect();
+        return r.left > mainRect.left + mainRect.width * 0.55;
+      });
+      // Tín hiệu 2: chữ 'Đã xem' là trạng thái CUỐI CÙNG trong hội thoại
+      // (marker 'Đã xem' cũ đứng TRƯỚC 'Đã gửi' của tin mới chưa đọc không tính).
       const tail = (main.innerText || '').slice(-1500);
-      // Chỉ tin khi TRẠNG THÁI CUỐI CÙNG trong hội thoại là 'Đã xem': hội
-      // thoại có thể lẫn marker cũ ('Đã xem' của tin đọc rồi) đứng TRƯỚC
-      // 'Đã gửi' của tin mới nhất chưa đọc - nếu chỉ tìm 'có Đã xem' là
-      // đánh dấu nhầm tin mới nhất đã xem.
       const markers = [...tail.matchAll(/đã xem|đã gửi|seen|sent/gi)];
-      if (!markers.length) return;
-      const lastMarker = markers[markers.length - 1][0].toLowerCase();
-      if (!lastMarker.includes('xem') && !lastMarker.includes('seen')) return;
+      const lastMarker = markers.length ? markers[markers.length - 1][0].toLowerCase() : '';
+      const lastMarkerIsSeen = lastMarker.includes('xem') || lastMarker.includes('seen');
+      if (!seenAvatar && !lastMarkerIsSeen) return;
       const now = Date.now();
       if ((lastReportedAt.get(threadId) || 0) > now - 30000) return;
       lastReportedAt.set(threadId, now);
