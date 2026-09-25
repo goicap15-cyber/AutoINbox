@@ -107,7 +107,9 @@ function isBareVietnamMobileText(text) {
     /^\d{9,}$/,
 
     // Media label placeholders (e.g. [Ảnh], [Video], [File], [Attachment])
-    /^\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment)\]?$/i,
+    // Bracket BẮT BUỘC: chữ "ảnh"/"video" trần là caption/message thật của
+    // người dùng (bị nuốt mất 2026-09-24 khi bracket tùy chọn).
+    /^\[(?:Ảnh|Photo|Image|Video|Tệp|File|Sticker|Nhãn dán|Attachment)\]$/i,
 
     // Full date/time separator header Business Suite renders between message
     // groups (e.g. "13:52 6 Tháng 8, 2026") - mirrors the same addition in

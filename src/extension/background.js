@@ -1856,7 +1856,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendToBackend('PAGE_THREAD_MESSAGES_SYNCED_V1', {
       ...msgData,
       account_id: user_id || msgData.account_id,
-      source_type: 'page_messenger'
+      source_type: 'page_messenger',
+      reached_top: Boolean(msgData.reached_top)
     });
   }
 

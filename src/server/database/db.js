@@ -100,6 +100,12 @@ if (!accountColumns.includes('company_id')) {
   console.log('[DB] Added missing accounts.company_id column.');
 }
 
+const threadColumns = db.prepare('PRAGMA table_info(threads)').all().map((column) => column.name);
+if (!threadColumns.includes('history_completed')) {
+  try { db.exec('ALTER TABLE threads ADD COLUMN history_completed INTEGER NOT NULL DEFAULT 0;'); } catch (_) {}
+  console.log('[DB] Added missing threads.history_completed column.');
+}
+
 // Initialize migrations table
 db.exec(`
   CREATE TABLE IF NOT EXISTS migrations (
@@ -317,6 +323,7 @@ const migrations = [
     name: 'add_threads_unread_manual',
     up: (db) => {
       try { db.exec('ALTER TABLE threads ADD COLUMN unread_manual INTEGER NOT NULL DEFAULT 0;'); } catch (e) { }
+      try { db.exec('ALTER TABLE threads ADD COLUMN history_completed INTEGER NOT NULL DEFAULT 0;'); } catch (e) { }
     }
   },
   {
@@ -341,6 +348,7 @@ const migrations = [
     }
   },
   {
+    version: 12,
     name: 'add_lead_statuses',
     up: (db) => {
       db.exec(`
@@ -1162,6 +1170,18 @@ const migrations = [
         console.log('[DB] Migration v63: Added contacts.profile_url column.');
       } catch (e) {
         console.log('[DB] Migration v63: contacts.profile_url already exists, skipped.');
+      }
+    }
+  },
+  {
+    version: 64,
+    name: 'add_threads_history_completed',
+    up: (db) => {
+      try {
+        db.exec('ALTER TABLE threads ADD COLUMN history_completed INTEGER NOT NULL DEFAULT 0;');
+        console.log('[DB] Migration v64: Added threads.history_completed column.');
+      } catch (e) {
+        console.log('[DB] Migration v64: threads.history_completed already exists, skipped.');
       }
     }
   }

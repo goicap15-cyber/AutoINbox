@@ -34,6 +34,7 @@ class InboxSyncScheduler {
     this.pendingThreadSyncs = new Map();
     this.threadQueues = new Map();
     this.accountThreadBusy = new Set();
+    this.historyCompletedThreads = new Set();
     // Page lane chỉ được dispatch khi tab Business Suite của page đó đã báo
     // PAGE_EXTENSION_READY - chống dispatch lệch sang extension Chrome cá nhân
     // khi Chrome page còn đang khởi động (reproduce 2026-09-19: job initial
@@ -42,6 +43,30 @@ class InboxSyncScheduler {
     this.pageGateTimers = new Map();
     this.getConnection = null;
     this.dispatchThreadMessagesSync = null;
+  }
+
+  resetThreadHistoryCompleted(threadId, accountId = null) {
+    const tid = String(threadId || '');
+    if (!tid) return;
+    for (const key of [...this.historyCompletedThreads]) {
+      if (key.endsWith(`:${tid}`) || key === tid) {
+        this.historyCompletedThreads.delete(key);
+      }
+    }
+    for (const [key] of [...this.threadCooldownUntil]) {
+      if (key.endsWith(`:${tid}`) || key === tid) {
+        this.threadCooldownUntil.delete(key);
+      }
+    }
+  }
+
+  isThreadHistoryCompleted(threadId, accountId = null) {
+    const tid = String(threadId || '');
+    if (!tid) return false;
+    for (const key of this.historyCompletedThreads) {
+      if (key.endsWith(`:${tid}`) || key === tid) return true;
+    }
+    return false;
   }
 
   markPageReady(pageId, accountId = null) {
@@ -417,6 +442,13 @@ class InboxSyncScheduler {
 
     const resolvedLane = this.getLaneKey({ account_id: accId, page_id, lane_key });
     const key = `${accId}:${threadId}`;
+
+    const isScrollOlder = String(reason || '').includes('scroll_older') || sync_mode === 'ondemand_older' || sync_mode === 'page_scroll_older';
+    if (isScrollOlder && this.isThreadHistoryCompleted(threadId, accId)) {
+      console.log(`[INBOX_SYNC_MESSAGES_SKIP] account=${accId} lane=${resolvedLane} thread=${threadId} reason=${reason} skip=history_completed`);
+      return false;
+    }
+
     const now = Date.now();
     const jobData = { account_id: accId, thread_id: threadId, external_thread_id, thread_url, page_id, lane_key: resolvedLane, contact_name, reason, allow_navigation: allow_navigation === true, priority, sync_mode, scroll_delta: Number(scroll_delta) || 0, key };
     const cooldownUntil = this.threadCooldownUntil.get(key) || 0;
@@ -633,6 +665,18 @@ class InboxSyncScheduler {
     const laneKey = job ? this.getLaneKey(job) : this.getLaneKey(accountId, pageId);
     this.threadJobsInFlight.delete(key);
 
+    const isLoopTerminator = reason === 'reached_top' || reason === 'duplicate';
+    if (isLoopTerminator) {
+      this.historyCompletedThreads.add(key);
+      this.historyCompletedThreads.add(`${accId}:${threadId}`);
+      if (threadId) this.historyCompletedThreads.add(String(threadId));
+      this.pendingThreadSyncs.delete(key);
+      this.pendingThreadSyncs.delete(`${accId}:${threadId}`);
+      this.threadCooldownUntil.set(key, Date.now() + 4000);
+      this.threadCooldownUntil.set(`${accId}:${threadId}`, Date.now() + 4000);
+      console.log(`[INBOX_SYNC_HISTORY_COMPLETED] thread=${key} reason=${reason} loop_terminated=true`);
+    }
+
     if (this.threadInFlight.delete(key)) {
       const timeout = this.threadTimeouts.get(key);
       if (timeout) clearTimeout(timeout);
@@ -640,7 +684,9 @@ class InboxSyncScheduler {
       this.accountThreadBusy.delete(laneKey);
       this.accountThreadBusy.delete(accId);
       console.log(`[INBOX_SYNC_MESSAGES_RESULT] lane=${laneKey} account=${accountId} thread=${threadId}${reason ? ` reason=${reason}` : ''}`);
-      this.replayPendingThread(key);
+      if (!isLoopTerminator) {
+        this.replayPendingThread(key);
+      }
       const timer = setTimeout(() => {
         this.drainThreadQueue(laneKey);
         const sidebarState = this.accounts.get(accId);

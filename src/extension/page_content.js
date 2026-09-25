@@ -1757,6 +1757,33 @@ if (isBusiness) {
         return false;
     }
 
+    // Caption của media trong Business Suite đôi khi render NGOÀI container
+    // [data-message-id] (sibling ngay dưới media, không có message-id riêng)
+    // — innerText của container không bao gồm nó nên caption bị mất (content
+    // rỗng, reproduce 2026-09-24: caption "ảnh"/"video" biến mất). Tìm tối đa
+    // 2 sibling kế tiếp: bỏ qua phần tử có message-id riêng; text ngắn đi qua
+    // cleanVideoCaption (loại duration, GIỮ chữ người dùng gõ).
+    function findAdjacentCaptionBubble(messageIdNode) {
+        try {
+            let node = messageIdNode.nextElementSibling;
+            let hops = 0;
+            const videoDetector = globalThis.FbPageVideoDetector || (typeof window !== 'undefined' && window.FbPageVideoDetector);
+            while (node && hops < 2) {
+                if (node.getAttribute && node.getAttribute('data-message-id')) return null;
+                const txt = (node.innerText || node.textContent || '').trim();
+                if (txt && txt.length <= 200) {
+                    const cleaned = (videoDetector && typeof videoDetector.cleanVideoCaption === 'function')
+                        ? videoDetector.cleanVideoCaption(txt)
+                        : txt;
+                    if (cleaned) return cleaned;
+                }
+                node = node.nextElementSibling;
+                hops++;
+            }
+        } catch (_) {}
+        return null;
+    }
+
     function resolveMessageContent(messageIdNode) {
         const rawText = (messageIdNode.innerText || messageIdNode.textContent || '').trim();
         const textFilter = globalThis.FbCrmTextFilter || (typeof window !== 'undefined' && window.FbCrmTextFilter);
@@ -1781,7 +1808,7 @@ if (isBusiness) {
                     kind: 'media',
                     mediaType: 'video',
                     mediaUrl: videoResult.mediaUrl || domVid || domPoster || null,
-                    caption: videoResult.caption || null
+                    caption: videoResult.caption || findAdjacentCaptionBubble(messageIdNode) || null
                 };
             }
         }
@@ -1803,7 +1830,7 @@ if (isBusiness) {
             if (isAvatar) continue;
             if ((img.width > 0 && img.width <= 36) || (img.height > 0 && img.height <= 36)) continue;
 
-            return { kind: 'media', mediaUrl: src, caption: (cleanedText || rawText) || null };
+            return { kind: 'media', mediaUrl: src, caption: (cleanedText || rawText) || findAdjacentCaptionBubble(messageIdNode) || null };
         }
 
         const bgEls = messageIdNode.querySelectorAll('[role="img"]');
@@ -2208,6 +2235,7 @@ if (isBusiness) {
                             } catch (e) {}
 
                             const maxRounds = 4;
+                            let isReachedTop = false;
                             for (let round = 0; round < maxRounds; round++) {
                                 // Kiểm tra khẩn cấp: nếu người dùng đã đổi thread hoặc iframe reload -> hủy crawler ngay
                                 // (ID tạm thời không đọc được coi như "vẫn thread cũ" - verifyThreadRoute lo phần đúng/sai)
@@ -2283,10 +2311,13 @@ if (isBusiness) {
                                     break;
                                 }
 
-                                // 2. Nếu đã qua ít nhất 2 vòng và không phát hiện tăng trưởng DOM (đã chờ đủ timeout) -> dừng
-                                if (round >= 2 && !settleRes.hasGrowth && newlyAdded === 0) {
-                                    console.log(`[PageContent] Không phát hiện tăng trưởng DOM sau ${round + 1} vòng. Dừng crawler.`);
-                                    break;
+                                // 2. Nếu không phát hiện tăng trưởng DOM (đã chạm đỉnh) -> dừng
+                                if (!settleRes.hasGrowth && newlyAdded === 0) {
+                                    if (round >= 1 || (isOlderMode && scroller.scrollTop <= 20)) {
+                                        console.log(`[PageContent] Không phát hiện tăng trưởng DOM tại vòng ${round + 1} (top=${scroller.scrollTop}). Đã chạm nóc (reached_top). Dừng crawler.`);
+                                        isReachedTop = true;
+                                        break;
+                                    }
                                 }
                             }
 
@@ -2359,6 +2390,7 @@ if (isBusiness) {
                             mode: req.mode || (isOlderMode ? 'page_scroll_older' : 'page_initial'),
                             contact_name: (String(threadId) === String(resolveCurrentThreadId()) ? (currentContactName || null) : null),
                             boundary_evidence: boundaryEvidence,
+                            reached_top: Boolean(isReachedTop),
                             messages: batchMessages
                         }
                     });

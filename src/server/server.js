@@ -3859,12 +3859,25 @@ wss.on('connection', (ws, req) => {
             if (pageBatchStats.total % 100 === 0) {
               console.log(`[PAGE_BATCH_STATS] total=${pageBatchStats.total} committed=${pageBatchStats.committed} duplicate=${pageBatchStats.duplicate} stale=${pageBatchStats.stale_generation} other=${pageBatchStats.other}`);
             }
-            InboxSyncScheduler.markThreadSyncResult(authenticatedAccountId, canonicalThreadId, ack.status === 'committed' ? null : (ack.reason || 'page_batch_rejected'), pageId);
+            const syncReason = ack.reached_top ? 'reached_top' : (ack.status === 'committed' ? null : (ack.reason || 'page_batch_rejected'));
+            InboxSyncScheduler.markThreadSyncResult(authenticatedAccountId, canonicalThreadId, syncReason, pageId);
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: 'PAGE_BATCH_ACK', data: { ...ack, thread_id: pageThreadId } }));
             }
+            if (ack.reached_top) {
+              io.emit('THREAD_HISTORY_COMPLETED', { thread_id: canonicalThreadId, account_id: authenticatedAccountId });
+            }
             const persistedRows = db.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY COALESCE(sequence_order, id) ASC, id ASC').all(canonicalThreadId);
-            io.emit('THREAD_MESSAGES_UPDATED', { thread_id: canonicalThreadId, account_id: authenticatedAccountId, messages: prepareMessagesForClient(persistedRows), authoritative: true, sync_status: ack.status === 'committed' || ack.status === 'duplicate' ? 'SYNCED' : 'FAILED', sync_error: ack.reason || null });
+            const threadRow = db.prepare('SELECT history_completed FROM threads WHERE id = ?').get(canonicalThreadId);
+            io.emit('THREAD_MESSAGES_UPDATED', {
+              thread_id: canonicalThreadId,
+              account_id: authenticatedAccountId,
+              messages: prepareMessagesForClient(persistedRows),
+              authoritative: true,
+              sync_status: ack.status === 'committed' || ack.status === 'duplicate' ? 'SYNCED' : 'FAILED',
+              sync_error: ack.reason || null,
+              history_completed: threadRow?.history_completed || (ack.reached_top ? 1 : 0)
+            });
           } catch (error) {
             console.error('[PAGE_BATCH] ingest failed:', error.message);
             const ack = { ...ackBase, status: 'retry_required', reason: 'page_batch_ingest_failed' };
@@ -4405,12 +4418,17 @@ io.on('connection', (socket) => {
     if (!threadId || !enterpriseAccess.canAccessThread(socket.user, threadId)) return;
     const thread = db.prepare(`
       SELECT t.id, t.external_thread_id, t.account_id, t.thread_url, t.contact_name,
-             t.sync_status, t.sync_cursor,
+             t.sync_status, t.sync_cursor, t.history_completed,
              s.source_type, s.external_id AS page_id
       FROM threads t LEFT JOIN inbox_sources s ON s.id = t.source_id
       WHERE t.id = ?
     `).get(threadId);
     if (!thread?.account_id) return;
+
+    if ((direction === 'older' || (direction === 'viewport' && Number(scroll_delta) < 0)) && Number(thread.history_completed) === 1) {
+      console.log(`[REQUEST_SYNC_THREAD_MESSAGES] thread=${threadId} skip=history_completed`);
+      return;
+    }
 
     const interactionExtension = extensionConnections.get(String(thread.account_id));
     if (interactionExtension?.readyState === WebSocket.OPEN && thread.source_type !== 'page_messenger') {
@@ -5303,6 +5321,26 @@ app.post('/api/threads/:id/complete', (req, res) => {
   const result = assignmentManager.completeThread(req.params.id);
   io.emit('THREAD_COMPLETED', { thread_id: req.params.id });
   res.json(result);
+});
+
+// Đặt lại trạng thái hoàn thành lịch sử và cho phép cào lại lịch sử
+app.post('/api/threads/:id/resync', (req, res) => {
+  try {
+    const id = req.params.id;
+    if (req.user && !enterpriseAccess.canAccessThread(req.user, id)) {
+      return res.status(403).json({ error: 'Không có quyền truy cập hội thoại này.' });
+    }
+    const thread = db.prepare('SELECT id, account_id, history_completed FROM threads WHERE id = ?').get(id);
+    if (!thread) return res.status(404).json({ error: 'Không tìm thấy hội thoại.' });
+
+    db.prepare('UPDATE threads SET history_completed = 0 WHERE id = ?').run(id);
+    InboxSyncScheduler.resetThreadHistoryCompleted(id, thread.account_id);
+    io.emit('THREAD_HISTORY_RESET', { thread_id: String(id), account_id: thread.account_id });
+
+    res.json({ success: true, id: String(id), history_completed: 0 });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Không thể đặt lại trạng thái đồng bộ.' });
+  }
 });
 
 

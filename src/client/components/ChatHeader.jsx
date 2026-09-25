@@ -42,6 +42,7 @@ export default function ChatHeader({
   onOpenSearch,
   onShowLeadPanel,
   onStartCall,
+  onResyncThread,
   showBackButton = false,
   onGoBack
 }) {
@@ -187,6 +188,9 @@ export default function ChatHeader({
             )}
           </HeaderIconButton>
         )}
+        <HeaderIconButton title="Đồng bộ lại lịch sử" onClick={() => onResyncThread?.(activeThread.id)} className="text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]">
+          <RefreshCw size={18} strokeWidth={1.75} />
+        </HeaderIconButton>
         <HeaderIconButton title="Thông tin khách hàng" onClick={() => onShowLeadPanel?.()}>
           <Info size={19} strokeWidth={1.9} />
         </HeaderIconButton>

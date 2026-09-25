@@ -618,21 +618,6 @@ class ConversationRepository {
     return res;
   }
 
-  static extractFbMessageSequence(fbMessageId) {
-    if (!fbMessageId || typeof fbMessageId !== 'string' || !fbMessageId.startsWith('mid.$')) {
-      return null;
-    }
-    try {
-      const payload = fbMessageId.slice(5);
-      const b64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-      const buf = Buffer.from(b64, 'base64');
-      if (buf.length >= 15) {
-        return buf.subarray(9, 15).toString('hex');
-      }
-    } catch (_) {}
-    return null;
-  }
-
   static normalizeMessageSequence(threadId, database = getDefaultDb()) {
     const rows = database.prepare(`
       SELECT id, fb_message_id, timestamp_ms, created_at, sequence_order
@@ -652,13 +637,9 @@ class ConversationRepository {
     }
 
     rows.sort((a, b) => {
-      const seqA = ConversationRepository.extractFbMessageSequence(a.fb_message_id);
-      const seqB = ConversationRepository.extractFbMessageSequence(b.fb_message_id);
-      if (seqA && seqB) {
-        const cmp = seqA.localeCompare(seqB);
-        if (cmp !== 0) return cmp;
-      }
-
+      // 6 byte giữa của mid.$ là entropy ngẫu nhiên của Facebook, KHÔNG tăng
+      // dần theo thời gian - so hash trước đây là nguyên nhân chính khiến tin
+      // 23/09 nhảy lên trước tin 22/09. Timestamp là tiêu chí chính.
       const tsA = parseSafeUtcTimestamp(a);
       const tsB = parseSafeUtcTimestamp(b);
       const minuteA = Math.floor(tsA / 60000);
@@ -872,6 +853,12 @@ class ConversationRepository {
     // Never allow realtime_fallback or realtime_delta (volatile Date.now()) to drift timestamps on repeated rescans
     const s = String(newSource || '').trim().toLowerCase();
     if (s === 'realtime_fallback' || s === 'realtime_delta') return false;
+    // dom_order cũng là stamp Date.now() lúc CÀO - mỗi lần crawler quét lại
+    // các tin cũ vẫn mount trong DOM sẽ ghi đè giờ thật/giờ cũ bằng giờ cào
+    // mới và sort đẩy tin cũ xuống cuối thread (reproduce 2026-09-24: tin
+    // 19/09 biến thành 02:21 24/09). dom_order chỉ được dùng khi existing
+    // chưa có giờ (unknown/0), không bao giờ ghi đè.
+    if (s === 'dom_order') return false;
     // Allow upgrade if the new timestamp is valid (>0) and significantly different (>= 30s or across days)
     if (newTs > 0 && oldTs > 0 && Math.abs(Number(newTs) - Number(oldTs)) >= 30000) {
       return true;
@@ -996,11 +983,17 @@ class ConversationRepository {
         pushMsg(exRow);
       }
 
+      const isReachedTop = mode === 'page_scroll_older' && olderIncoming.length === 0;
+
       mergedList.forEach((msg, idx) => {
         msg.sequence_order = idx + 1;
       });
 
-      return { status: 'committed', mergedList };
+      return {
+        status: isReachedTop ? 'reached_top' : 'committed',
+        reached_top: isReachedTop,
+        mergedList
+      };
     }
 
     if (mode === 'page_scroll_older') {
@@ -1037,12 +1030,8 @@ class ConversationRepository {
 
     const mergedList = Array.from(mergedMap.values());
     mergedList.sort((a, b) => {
-      const seqA = ConversationRepository.extractFbMessageSequence(a.fb_message_id);
-      const seqB = ConversationRepository.extractFbMessageSequence(b.fb_message_id);
-      if (seqA && seqB) {
-        const cmp = seqA.localeCompare(seqB);
-        if (cmp !== 0) return cmp;
-      }
+      // Timestamp là tiêu chí chính - bỏ so hash mid.$ (entropy ngẫu nhiên,
+      // nguyên nhân đẩy tin hôm nay lên trước tin hôm qua).
       const tsA = Number(a.timestamp_ms || (a.created_at ? new Date(a.created_at).getTime() : 0));
       const tsB = Number(b.timestamp_ms || (b.created_at ? new Date(b.created_at).getTime() : 0));
       if (tsA !== tsB && tsA > 0 && tsB > 0) return tsA - tsB;
@@ -1110,7 +1099,7 @@ class ConversationRepository {
     `).all(thread_id);
 
     const reconcileRes = ConversationRepository.reconcileBatchWithAnchors(existingRows, messages, envelope);
-    if (reconcileRes.status !== 'committed') {
+    if (reconcileRes.status !== 'committed' && reconcileRes.status !== 'reached_top') {
       return {
         status: reconcileRes.status,
         reason: reconcileRes.reason,
@@ -1166,7 +1155,10 @@ class ConversationRepository {
         timestamp_source = CASE WHEN ? = 1 THEN excluded.timestamp_source ELSE messages.timestamp_source END,
         is_outgoing = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.is_outgoing ELSE messages.is_outgoing END,
         sender_role = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.sender_role ELSE messages.sender_role END,
-        sequence_order = excluded.sequence_order,
+        -- Giữ chỗ cũ khi timestamp không được phép upgrade: vị trí của tin đã
+        -- biết phải bám theo giờ thật của nó, không bám theo giờ cào của batch
+        -- (normalizeMessageSequence sẽ sắp lại theo timestamp sau vòng này).
+        sequence_order = CASE WHEN ? = 1 THEN excluded.sequence_order ELSE messages.sequence_order END,
         direction_status = CASE WHEN excluded.direction_status = 'confirmed' THEN 'confirmed' ELSE messages.direction_status END
     `);
 
@@ -1185,9 +1177,10 @@ class ConversationRepository {
 
         let content = msg.content || null;
         if (msg.media_type === 'video' && content) {
+          // Chỉ lọc duration rác ("0:00 / 0:19") - KHÔNG lọc chữ người dùng gõ
+          // kiểu "video"/"ảnh" (caption hợp lệ, bị mất trước đây 2026-09-24).
           if (/^\s*\d{1,2}(?::\d{2}){1,2}\s*\/\s*\d{1,2}(?::\d{2}){1,2}\s*$/i.test(content) ||
-              /^\s*\d{1,2}:\d{2}\s*$/i.test(content) ||
-              content.trim().toLowerCase() === 'video') {
+              /^\s*\d{1,2}:\d{2}\s*$/i.test(content)) {
             content = null;
           }
         }
@@ -1208,6 +1201,7 @@ class ConversationRepository {
           directionStatus,
           createdAt,
           canUpgrade ? 1 : 0,
+          canUpgrade ? 1 : 0,
           canUpgrade ? 1 : 0
         );
       }
@@ -1217,8 +1211,16 @@ class ConversationRepository {
     ConversationRepository.normalizeMessageSequence(thread_id, database);
     scanIdCache.set(scan_id, Date.now());
 
+    const isReachedTop = Boolean(envelope.reached_top || reconcileRes.reached_top || reconcileRes.status === 'reached_top');
+    if (isReachedTop) {
+      try {
+        database.prepare('UPDATE threads SET history_completed = 1 WHERE id = ?').run(thread_id);
+      } catch (_) {}
+    }
+
     return {
       status: 'committed',
+      reached_top: isReachedTop,
       thread_id,
       session_epoch,
       generation,

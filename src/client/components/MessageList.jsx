@@ -183,6 +183,7 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
 
   const queueViewportDelta = (delta) => {
     if (!delta || !onViewportScroll) return;
+    if (delta < 0 && activeThread?.history_completed === 1) return;
     // History synchronization is one-way: only an upward gesture can reveal
     // rows older than the current CRM snapshot. A downward sync used to let
     // Messenger's newer viewport overwrite the persisted oldest cursor.
@@ -260,6 +261,7 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
   const handleWheel = (event) => {
     const container = containerRef.current;
     if (!container || suppressScrollRef.current) return;
+    if (event.deltaY < 0 && activeThread?.history_completed === 1) return;
     // At scrollTop=0 another upward wheel does not change scrollTop, therefore
     // React's onScroll never fires. Forward that boundary gesture explicitly
     // so each additional wheel requests the next Messenger history page.
@@ -271,7 +273,12 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
   return (
     <div ref={containerRef} onScroll={handleScroll} onWheel={handleWheel} className="chat-messages bg-[var(--color-bg-app)] flex-1 overflow-y-auto px-4 py-5">
       <div className="chat-content-wrapper relative max-w-3xl mx-auto">
-        {(historySyncing || localHistorySyncing) && (
+        {activeThread?.history_completed === 1 && displayMessages.length > 0 && (
+          <div className="flex items-center justify-center gap-2 text-xs text-[var(--color-text-muted)] bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded-full px-3 py-1.5 mx-auto mb-3 w-fit select-none">
+            <span>Đã tải hết toàn bộ lịch sử</span>
+          </div>
+        )}
+        {(historySyncing || localHistorySyncing) && activeThread?.history_completed !== 1 && (
           <div className="flex items-center justify-center gap-2 text-xs text-[var(--color-text-muted)] bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded-full px-3 py-1.5 mx-auto mb-3 w-fit">
             <RefreshCw size={12} strokeWidth={1.75} className="animate-spin" />
             <span>Đang tải thêm lịch sử cũ hơn…</span>

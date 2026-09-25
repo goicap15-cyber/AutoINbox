@@ -1154,13 +1154,17 @@ export default function App() {
       });
     });
 
-    socket.on('THREAD_MESSAGES_UPDATED', ({ thread_id, thread_key, account_id, messages: syncedMsgs, authoritative = false }) => {
+    socket.on('THREAD_MESSAGES_UPDATED', ({ thread_id, thread_key, account_id, messages: syncedMsgs, authoritative = false, history_completed }) => {
       const tidStr = String(thread_id);
       if (historySyncTimeoutRef.current) {
         clearTimeout(historySyncTimeoutRef.current);
         historySyncTimeoutRef.current = null;
       }
       setHistorySyncingThreadId((current) => String(current || '') === tidStr ? null : current);
+      if (history_completed !== undefined) {
+        setSelectedThread((prev) => prev && String(prev.id) === tidStr ? { ...prev, history_completed } : prev);
+        setThreads((prev) => prev.map((t) => String(t.id) === tidStr ? { ...t, history_completed } : t));
+      }
       setMessages(prev => {
         const existing = prev[tidStr] || [];
         const mergedMap = new Map();
@@ -1474,6 +1478,18 @@ export default function App() {
       });
     });
 
+    socket.on('THREAD_HISTORY_COMPLETED', ({ thread_id }) => {
+      const tid = String(thread_id || '');
+      setSelectedThread((prev) => prev && String(prev.id) === tid ? { ...prev, history_completed: 1 } : prev);
+      setThreads((prev) => prev.map((t) => String(t.id) === tid ? { ...t, history_completed: 1 } : t));
+    });
+
+    socket.on('THREAD_HISTORY_RESET', ({ thread_id }) => {
+      const tid = String(thread_id || '');
+      setSelectedThread((prev) => prev && String(prev.id) === tid ? { ...prev, history_completed: 0 } : prev);
+      setThreads((prev) => prev.map((t) => String(t.id) === tid ? { ...t, history_completed: 0 } : t));
+    });
+
     return () => {
       socket.off('NEW_MESSAGE');
       socket.off('MESSAGE_SENT');
@@ -1484,6 +1500,8 @@ export default function App() {
       socket.off('MESSAGE_SEND_STATUS');
       socket.off('SEND_ERROR');
       socket.off('THREAD_MESSAGES_UPDATED');
+      socket.off('THREAD_HISTORY_COMPLETED');
+      socket.off('THREAD_HISTORY_RESET');
       socket.off('BULK_HISTORY_SYNC_PROGRESS');
       socket.off('EXTENSION_CONNECTION_CHANGED');
       socket.off('MESSAGE_UNSENT');
@@ -1678,6 +1696,22 @@ export default function App() {
     const threadIdStr = String(threadId);
     await fetch(`/api/threads/${threadIdStr}/ai/resume`, { method: 'POST' });
     setThreads(prev => prev.map(t => String(t.id) === threadIdStr ? { ...t, ai_paused_until: null } : t));
+  };
+
+  const handleResyncThread = async (threadId) => {
+    if (!threadId) return;
+    const threadIdStr = String(threadId);
+    try {
+      const res = await fetch(`/api/threads/${encodeURIComponent(threadIdStr)}/resync`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.success) {
+        setSelectedThread((prev) => prev && String(prev.id) === threadIdStr ? { ...prev, history_completed: 0 } : prev);
+        setThreads((prev) => prev.map((t) => String(t.id) === threadIdStr ? { ...t, history_completed: 0 } : t));
+        requestThreadMessageSync(threadIdStr, 'older', -500);
+      }
+    } catch (e) {
+      console.error('Lỗi khi đồng bộ lại hội thoại:', e);
+    }
   };
 
   const handleSetReminder = async (threadId, dueAt, note) => {
@@ -1971,6 +2005,7 @@ export default function App() {
               onOpenSearch={() => setActiveModal('search')}
               onShowLeadPanel={() => setShowLeadDrawer(true)}
               onStartCall={handleStartCall}
+              onResyncThread={handleResyncThread}
               showBackButton={isMobile}
               onGoBack={() => { setActiveThreadId(null); }}
             />

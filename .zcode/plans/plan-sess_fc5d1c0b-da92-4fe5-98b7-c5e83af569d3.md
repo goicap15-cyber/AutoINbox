@@ -1,18 +1,43 @@
-## Kế hoạch: Hoàn tất nốt phần kiểm thử (code đã sửa xong ~95%)
+## Kế hoạch sửa: Re-stamp giờ cào lên tin cũ + mất caption media Page
 
-### Đã hoàn thành (đã verify syntax OK)
-1. ✅ `threadIdResolver.js` — bare-first policy (bare = chuẩn; `page:P:bare` chỉ khi collision thật với src_* khác) — **7/7 test pass**
-2. ✅ `ConversationRepository.upsertThread` — adopt row bare chưa bind source thay vì mint namespaced
-3. ✅ Migration v62 trong `database/db.js` — gộp row namespaced về bare (messages + mọi bảng có thread_id + contacts), có nhánh skip cho collision thật
-4. ✅ `background.js` — `getVisibleBizContactName` + `looseBizNameMatch`; `ensureTabOnThread` verify header trước mỗi return-true; `handleSyncThreadMessages` identity nghiêm ngặt (null ID → đối chiếu header, sai → abort `thread_route_mismatch`); payload `REQUEST_PAGE_BATCH_SYNC` thêm `expected_bare_id` + `contact_name`; relay `PAGE_THREAD_ROUTE_MISMATCH`
-5. ✅ `page_content.js` — `resolveCurrentThreadId` bỏ fallback "link đầu tiên trong DOM" (trả null); crawl verify route trước collect + mỗi vòng (null-tolerant cho crawl mutex); realtime dùng `lastKnownBizThreadId` fallback
-6. ✅ `server.js` dispatch — fallback `page_id` từ `thread_url` + fallback `contact_name` từ thread row
+### Chẩn đoán đã xác minh (file:line)
 
-### Còn lại (bị plan mode chặn giữa chừng)
-1. **Cập nhật `tests/unit/pageThreadIngestAndRoute.test.js`**: test "PAGE_THREAD_MESSAGES_SYNCED_V1 pipeline" đang assert kỳ vọng namespaced CŨ (`page:1209...:100018089229407`) — sửa thành kỳ vọng bare-first (`100018089229407`), các assertion khác giữ nguyên (vẫn kiểm chứng không nổ FK, ACK giữ bare).
-2. **Chạy toàn bộ test suite** liên quan: threadIdResolver, pageThreadIngestAndRoute, initialMessageSweepService, inboxSyncScheduler — sửa nếu còn fail nào.
-3. **Kiểm chứng migration v62 trên BẢN SAO DB thật** (an toàn, không đụng DB live): copy `data/database.db` → `scratch/`, chạy migration bằng env `CRM_DATA_ROOT` trỏ vào bản copy, đối chiếu: hết row `page:%` trùng, messages được gộp về bare, source_id được bind.
-4. **Smoke load server** (`node --check` + require module) — xác nhận migration chạy sạch khi khởi động thật.
+**Bug 1 — Tin cũ bị re-stamp giờ cào rồi trôi xuống cuối thread:**
+- `shouldUpgradeTimestamp` (`ConversationRepository.js:847`): chỉ chặn drift cho `realtime_fallback/realtime_delta`; **`dom_order → dom_order` chênh ≥30s vẫn được phép upgrade** (đúng logic dòng 861-864: `Math.abs(newTs-oldTs) >= 30000 → true`). Crawl mới lúc 02:19-02:21 24/09 đã ghi đè giờ thật của tin 19/09 → sort đưa xuống cuối.
+- `sequence_order = excluded.sequence_order` (dòng ~1148, mệnh đề ON CONFLICT của page batch) — ghi đè **vô điều kiện**, không gate theo canUpgrade (timestamp thì có gate ✅).
 
-### Không đụng tới
-- DB thật chỉ được migration khi **bạn tự chạy `npm start`** (migration v62 sẽ chạy tự động, có backup cơ chế sẵn của runMigrations).
+**Bug 2 — Caption "ảnh"/"video" mất:**
+- Extension **có** gửi caption: `collectMountedBatchMessages` dòng 1087 `text = isMedia ? resolved.caption : resolved.text` — caption chảy vào content ✅.
+- **Server tự tay xóa**: `ConversationRepository.js` ~dòng 1169-1174 — content video mà `=== 'video'` (chữ thường) → **null**! Giết chết caption hợp lệ mang tên "video". Kèm bộ GLOC duration ở mệnh đề ON CONFLICT 1130-1140 có thể xóa thêm.
+- Ảnh: caption đi qua `cleanMessageText` (extension) — cần verify "ảnh" có bị coi là junk không; nếu container ảnh không bọc caption (caption là element sibling ngoài `[data-message-id]`) thì rawText không chứa caption → content rỗng.
+
+**Dữ liệu hỏng**: 8 row media (seq 96-103, `dom_order`, stamp 02:19-02:21 24/09) — mid cho biết đây là tin test 19/09, giờ thật không thể phục hồi từ DB (đã drift qua nhiều lần crawl). **Giả thuyết có khả năng cao: timestamp thật được nhúng trong payload base64 của `mid.$`** (cần verify lúc implement — plan mode chặn chạy test).
+
+---
+
+### Fix 1 — Chặn drift `dom_order` (server, `ConversationRepository.js`)
+- `shouldUpgradeTimestamp`: thêm `dom_order` vào nhóm cấm-drift (như `realtime_fallback/delta`) — `dom_order` **không bao giờ upgrade** timestamp đã tồn tại (kể cả cùng rank, kể cả chênh >30s). Vẫn cho phép: existing `unknown`/0 → nhận `dom_order`; existing rank thấp hơn → rank cao hơn (tooltip/separator) upgrade bình thường.
+- Gate `sequence_order` theo canUpgrade: khi `canUpgrade = 0` → `sequence_order = messages.sequence_order` (giữ chỗ cũ), tránh xáo trộn giữa 2 lần normalize.
+
+### Fix 2 — Cứu caption (2 tầng)
+- **Server**: bỏ điều kiện `content.trim().toLowerCase() === 'video'` → null (giữ lại duration-GLOB vì đó là rác thật: "0:00 / 0:19"); đảm bảo caption "video"/"ảnh" được lưu vào content của media.
+- **Extension**: verify `cleanMessageText("ảnh")` không bị strip (nếu bị, thêm allowlist cho caption); nếu caption là sibling nằm NGOÀI `[data-message-id]` container — mở rộng `resolveMessageContent` đọc caption element liền kề dưới media (giới hạn 1 element kế tiếp, cùng parent) và gán vào caption thay vì bỏ qua.
+- Unit test: content "video"/"ảnh" sống sót qua ingest; duration "0:19" vẫn bị lọc.
+
+### Fix 3 — Repair dữ liệu đã hỏng (mở rộng `scripts/repair-thread-sequence.js`)
+- **Bước verify-first**: viết mid-decoder (decode base64 payload, quét epoch 4-byte) — **chỉ tin nếu** ≥80% các row có timestamp tin cậy cao (tooltip/separator) khớp với mid-decoded (±24h). Nếu đạt → re-stamp toàn bộ row `dom_order` bằng giờ mid-decoded (nguồn giờ thật của Facebook!).
+- Nếu verify KHÔNG đạt → fallback: chỉ re-normalize thứ tự theo giờ hiện có + log cảnh báo các row drift không phục hồi được.
+- Chạy repair trên **bản sao DB** trước, đối chiếu acceptance (5-block thread Phạm Hùng + 0 inversion + media 96-103 quay về đúng vị trí giữa hội thoại), rồi mới chạy trên DB thật (server STOP).
+
+### Thứ tự triển khai & kiểm thử
+1. Fix 1 + Fix 2 (code) → unit tests → `node --test tests/unit/*.test.js` (564+) → `build:ui` không cần (không đụng client).
+2. Repair trên bản sao → verify → backup DB thật → repair thật → query acceptance cuối.
+3. `graphify update .`
+
+### Files
+`ConversationRepository.js` (shouldUpgradeTimestamp + ON CONFLICT + caption null-out), `page_content.js` (caption sibling, nếu cần), `textFilter.js` extension (nếu "ảnh" bị strip), `scripts/repair-thread-sequence.js` (mid-decode + re-stamp), `tests/unit/*` (2-3 test mới).
+
+### Rủi ro & đường lùi
+- Fix 1 có thể làm tin mới (chưa từng có) vẫn nhận giờ cào ban đầu — chấp nhận được vì lần ingest sau khi tooltip khả dụng sẽ upgrade lên (rank cao hơn vẫn được phép).
+- Repair mid-decode có verify-first: không đạt thì không đụng dữ liệu.
+- Backup DB + dry-run bản sao như mọi lần.
