@@ -2312,18 +2312,12 @@ try {
       const threadId = decodeURIComponent(m[1]);
       const main = document.querySelector('div[role="main"]');
       if (!main) return;
-      const mainRect = main.getBoundingClientRect();
-      // Tín hiệu 1 (mạnh nhất): Messenger hiện AVATAR NHỎ của khách dưới góc
-      // phải bubble tin cuối khi khách xem - chỉ render ở trạng thái seen,
-      // gắn đúng bubble cuối nên không lẫn marker cũ.
-      const miniAvatars = [...main.querySelectorAll('img')].filter((img) => {
-        const r = img.getBoundingClientRect();
-        if (r.width < 10 || r.width > 32 || r.height < 10 || r.height > 32) return false;
-        return /fbcdn|scontent|lookup\.fbsbx/.test(String(img.src || ''));
-      });
-      const seenAvatar = miniAvatars.some((img) => {
-        const r = img.getBoundingClientRect();
-        return r.left > mainRect.left + mainRect.width * 0.55;
+      // Tín hiệu 1 (mạnh nhất): Messenger render avatar seen với alt
+      // '<Tên> đã xem lúc <giờ>' (img 14px, scontent fbcdn) dưới bubble cuối.
+      // Match theo alt = chính xác tuyệt đối, không lẫn avatar nào khác.
+      const seenAvatar = [...main.querySelectorAll('img[alt]')].some((img) => {
+        const alt = String(img.alt || '').toLowerCase();
+        return alt.includes('đã xem') || (alt.includes('seen') && !alt.includes('unseen'));
       });
       // Tín hiệu 2: chữ 'Đã xem' là trạng thái CUỐI CÙNG trong hội thoại
       // (marker 'Đã xem' cũ đứng TRƯỚC 'Đã gửi' của tin mới chưa đọc không tính).

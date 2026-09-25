@@ -5060,15 +5060,20 @@ app.post('/api/threads/:id/unread', (req, res) => {
 // đang mở trên tab Facebook rồi relay về đây.
 app.post('/api/threads/:id/seen', (req, res) => {
   try {
-    const id = req.params.id;
+    // Content script gửi BARE id từ URL (/messages/t/<psid>), còn DB lưu id
+    // ghép '<account>:<psid>' cho hội thoại cá nhân - phải phân giải qua bộ
+    // giải chuẩn như mọi luồng sync, không thì UPDATE không khớp hàng nào.
+    const rawId = req.params.id;
+    const accountId = req.body?.account_id || null;
+    const canonicalId = resolveInternalThreadId(db, accountId, rawId) || rawId;
     const last = db.prepare(
       'SELECT id FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1'
-    ).get(id);
+    ).get(canonicalId);
     if (!last) return res.json({ success: true, last_seen_message_id: null });
-    const prev = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(id);
+    const prev = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(canonicalId);
     if (String(prev?.last_seen_message_id || '') !== String(last.id)) {
-      db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(last.id), id);
-      io.emit('THREAD_SEEN', { thread_id: String(id), last_seen_message_id: String(last.id) });
+      db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(last.id), canonicalId);
+      io.emit('THREAD_SEEN', { thread_id: String(canonicalId), last_seen_message_id: String(last.id) });
     }
     res.json({ success: true, last_seen_message_id: String(last.id) });
   } catch (error) {
