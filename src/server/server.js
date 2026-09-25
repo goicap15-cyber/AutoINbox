@@ -2875,6 +2875,14 @@ wss.on('connection', (ws, req) => {
           // Extension bắt được 'Đã xem' trong DOM hội thoại đang mở và relay
           // về đây. Phân giải bare psid -> id ghép rồi ghi mốc đã-xem.
           try {
+            const seenAltRaw = String(msg.data?.alt || '');
+            const seenBubbleRaw = String(msg.data?.bubble_text || '');
+            if (!seenAltRaw && !seenBubbleRaw) {
+              // Bản content script cũ (chỉ gửi thread_id) - dữ liệu không đủ
+              // để xác định tin, chấm mù sẽ gây false positive.
+              break;
+            }
+            console.log(`[SEEN] Nhận: alt="${seenAltRaw.slice(0, 60)}" bubble="${seenBubbleRaw.slice(0, 60)}"`);
             const rawSeenId = String(msg.data?.thread_id || '');
             const seenAccountId = msg.data?.account_id ? String(msg.data.account_id) : String(ws.accountId || '');
             if (rawSeenId) {

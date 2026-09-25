@@ -2324,14 +2324,17 @@ try {
       // chữ phải nằm ngay TRÊN avatar gửi về để backend tra tin đúng - không
       // cần đoán bằng giờ trong alt nữa.
       let bubbleText = '';
-      let walker = newestImg.closest('[role="row"], [role="article"]') || newestImg.parentElement;
-      for (let hop = 0; hop < 8 && walker && !bubbleText; hop++) {
-        const r = walker.getBoundingClientRect();
-        if (r.width > 30 && r.height > 0) {
-          const t = (walker.innerText || '').trim();
-          if (t) bubbleText = t.slice(0, 160);
+      let node = newestImg;
+      // Leo tối đa 6 tầng ancestor, mỗi tầng lùi tối đa 6 anh em: avatar
+      // nằm trong container nhỏ, bubble là anh em/ông tổ phía trên nó.
+      for (let up = 0; up < 6 && node && !bubbleText; up++) {
+        let prev = node.previousElementSibling;
+        for (let back = 0; back < 6 && prev && !bubbleText; back++) {
+          const t = (prev.innerText || '').trim();
+          if (t.length > 1) bubbleText = t.slice(0, 160);
+          else prev = prev.previousElementSibling;
         }
-        walker = walker.previousElementSibling;
+        node = node.parentElement;
       }
       const now = Date.now();
       if ((lastReportedAt.get(threadId) || 0) > now - 30000) return;
