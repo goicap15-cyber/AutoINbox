@@ -2871,6 +2871,32 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'THREAD_SEEN': {
+          // Extension bắt được 'Đã xem' trong DOM hội thoại đang mở và relay
+          // về đây. Phân giải bare psid -> id ghép rồi ghi mốc đã-xem.
+          try {
+            const rawSeenId = String(msg.data?.thread_id || '');
+            const seenAccountId = msg.data?.account_id ? String(msg.data.account_id) : String(ws.accountId || '');
+            if (rawSeenId) {
+              const canonicalSeenId = resolveInternalThreadId(db, seenAccountId, rawSeenId) || rawSeenId;
+              const lastSeenOut = db.prepare(
+                'SELECT id FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1'
+              ).get(canonicalSeenId);
+              if (lastSeenOut) {
+                const prevSeenRow = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(canonicalSeenId);
+                if (String(prevSeenRow?.last_seen_message_id || '') !== String(lastSeenOut.id)) {
+                  db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(lastSeenOut.id), canonicalSeenId);
+                  io.emit('THREAD_SEEN', { thread_id: String(canonicalSeenId), last_seen_message_id: String(lastSeenOut.id) });
+                  console.log(`[SEEN] thread=${canonicalSeenId} seen tới tin ${lastSeenOut.id}`);
+                }
+              }
+            }
+          } catch (seenErr) {
+            console.warn('[SEEN] Lỗi xử lý THREAD_SEEN:', seenErr.message);
+          }
+          break;
+        }
+
         case 'SYNC_THREADS_RESULT': {
           let { account_id, threads, partial, sync_status, checkpoint } = msg.data;
           if (!account_id && msg.data?.page_id) {
