@@ -2880,16 +2880,50 @@ wss.on('connection', (ws, req) => {
             if (rawSeenId) {
               const canonicalSeenId = resolveInternalThreadId(db, seenAccountId, rawSeenId) || rawSeenId;
               const lastSeenOut = db.prepare(
-                'SELECT id FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1'
+                'SELECT id, created_at FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1'
               ).get(canonicalSeenId);
-              if (lastSeenOut) {
-                const prevSeenRow = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(canonicalSeenId);
-                if (String(prevSeenRow?.last_seen_message_id || '') !== String(lastSeenOut.id)) {
-                  db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(lastSeenOut.id), canonicalSeenId);
-                  io.emit('THREAD_SEEN', { thread_id: String(canonicalSeenId), last_seen_message_id: String(lastSeenOut.id) });
-                  console.log(`[SEEN] thread=${canonicalSeenId} seen tới tin ${lastSeenOut.id}`);
+              if (!lastSeenOut) break;
+              // Ưu tiên 1: khớp NỘI DUNG bubble nằm ngay trên avatar seen -
+              // xác định chính xác khách đọc tới tin nào (không đoán giờ).
+              const altText = String(msg.data?.alt || '');
+              const bubbleText = String(msg.data?.bubble_text || '');
+              const normSeen = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+              const nb = normSeen(bubbleText);
+              let targetSeen = null;
+              if (nb && nb !== 'đã gửi') {
+                const recentOut = db.prepare(
+                  'SELECT id, content FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 30'
+                ).all(canonicalSeenId);
+                targetSeen = recentOut.find((m) => {
+                  const c = normSeen(m.content);
+                  return c && c.length > 1 && (nb === c || nb.includes(c) || c.includes(nb));
+                }) || null;
+              }
+              // Ưu tiên 2 (fallback): gate theo giờ trong alt so với tin cuối.
+              if (!targetSeen) {
+                const timeMatch = altText.match(/(?:lúc|at)\s+(\d{1,2}):(\d{2})/i);
+                const sentAt = Date.parse(lastSeenOut.created_at);
+                if (timeMatch && Number.isFinite(sentAt)) {
+                  const seenAt = new Date();
+                  seenAt.setHours(Number(timeMatch[1]) % 24, Number(timeMatch[2]), 0, 0);
+                  if (seenAt.getTime() - sentAt > 12 * 3600 * 1000) seenAt.setTime(seenAt.getTime() - 24 * 3600 * 1000);
+                  if (seenAt.getTime() + 120000 >= sentAt) targetSeen = lastSeenOut;
                 }
               }
+              if (!targetSeen) {
+                console.log(`[SEEN] Bỏ qua (bubble "${bubbleText.slice(0, 40)}" không khớp tin nào, alt "${altText.slice(0, 50)}")`);
+                break;
+              }
+              // Avatar chỉ tiến tới: mốc hiện tại mới hơn target thì không lùi.
+              const prevSeenRow2 = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(canonicalSeenId);
+              if (prevSeenRow2?.last_seen_message_id) {
+                const cur = db.prepare('SELECT COALESCE(sequence_order, id) AS ord FROM messages WHERE id = ?').get(prevSeenRow2.last_seen_message_id);
+                const tgt = db.prepare('SELECT COALESCE(sequence_order, id) AS ord FROM messages WHERE id = ?').get(targetSeen.id);
+                if (cur && tgt && Number(tgt.ord) <= Number(cur.ord)) break;
+              }
+              db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(targetSeen.id), canonicalSeenId);
+              io.emit('THREAD_SEEN', { thread_id: String(canonicalSeenId), last_seen_message_id: String(targetSeen.id) });
+              console.log(`[SEEN] thread=${canonicalSeenId} seen tới tin ${targetSeen.id} (bubble: "${bubbleText.slice(0, 40)}")`);
             }
           } catch (seenErr) {
             console.warn('[SEEN] Lỗi xử lý THREAD_SEEN:', seenErr.message);

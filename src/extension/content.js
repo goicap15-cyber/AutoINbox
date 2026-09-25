@@ -2299,10 +2299,12 @@ try {
 
 })();
 
-// ── Seen watcher: bắt dấu hiệu 'Đã xem' dưới tin nhắn của operator ──
-// Facebook chỉ hiện marker này trong DOM của hội thoại ĐANG mở trên tab,
-// nên watcher quét thread hiện tại; hội thoại khác sẽ được ghi nhận khi
-// tab có cơ hội đậu trên đó.
+// ── Seen watcher: bắt 'Đã xem' gắn với TIN CUỐI, không phải tin cũ ──
+// Avatar seen của Messenger có alt '<Tên> đã xem lúc HH:MM' và ở lại DOM
+// vĩnh viễn dưới tin cũ - nếu chỉ tìm 'có alt đã xem' là false positive
+// triền miên (đã tái hiện 25/09: khách chưa đọc vẫn ghi đã xem). Giờ phải
+// lấy MỚI NHẤT seen-avatar, tách giờ từ alt, để backend so với giờ gửi tin
+// cuối cùng của operator.
 (function () {
   const lastReportedAt = new Map();
   setInterval(() => {
@@ -2312,24 +2314,29 @@ try {
       const threadId = decodeURIComponent(m[1]);
       const main = document.querySelector('div[role="main"]');
       if (!main) return;
-      // Tín hiệu 1 (mạnh nhất): Messenger render avatar seen với alt
-      // '<Tên> đã xem lúc <giờ>' (img 14px, scontent fbcdn) dưới bubble cuối.
-      // Match theo alt = chính xác tuyệt đối, không lẫn avatar nào khác.
-      const seenAvatar = [...main.querySelectorAll('img[alt]')].some((img) => {
-        const alt = String(img.alt || '').toLowerCase();
-        return alt.includes('đã xem') || (alt.includes('seen') && !alt.includes('unseen'));
-      });
-      // Tín hiệu 2: chữ 'Đã xem' là trạng thái CUỐI CÙNG trong hội thoại
-      // (marker 'Đã xem' cũ đứng TRƯỚC 'Đã gửi' của tin mới chưa đọc không tính).
-      const tail = (main.innerText || '').slice(-1500);
-      const markers = [...tail.matchAll(/đã xem|đã gửi|seen|sent/gi)];
-      const lastMarker = markers.length ? markers[markers.length - 1][0].toLowerCase() : '';
-      const lastMarkerIsSeen = lastMarker.includes('xem') || lastMarker.includes('seen');
-      if (!seenAvatar && !lastMarkerIsSeen) return;
+      // Ảnh seen theo thứ tự DOM - lấy MỚI NHẤT (cuối cùng).
+      const seenImgs = [...main.querySelectorAll('img[alt]')]
+        .filter((img) => /đã xem/i.test(String(img.alt || '')) && !/^bạn\s+đã xem/i.test(String(img.alt || '').trim()));
+      if (!seenImgs.length) return;
+      const newestImg = seenImgs[seenImgs.length - 1];
+      const newest = String(newestImg.alt || '').trim();
+      // Bubble NÀO chứa avatar = khách đọc tới bubble ĐÓ: lấy nội dung khối
+      // chữ phải nằm ngay TRÊN avatar gửi về để backend tra tin đúng - không
+      // cần đoán bằng giờ trong alt nữa.
+      let bubbleText = '';
+      let walker = newestImg.closest('[role="row"], [role="article"]') || newestImg.parentElement;
+      for (let hop = 0; hop < 8 && walker && !bubbleText; hop++) {
+        const r = walker.getBoundingClientRect();
+        if (r.width > 30 && r.height > 0) {
+          const t = (walker.innerText || '').trim();
+          if (t) bubbleText = t.slice(0, 160);
+        }
+        walker = walker.previousElementSibling;
+      }
       const now = Date.now();
       if ((lastReportedAt.get(threadId) || 0) > now - 30000) return;
       lastReportedAt.set(threadId, now);
-      chrome.runtime.sendMessage({ type: 'CRM_THREAD_SEEN', thread_id: threadId });
+      chrome.runtime.sendMessage({ type: 'CRM_THREAD_SEEN', thread_id: threadId, alt: newest, bubble_text: bubbleText });
     } catch (_) {}
   }, 3000);
 })();
