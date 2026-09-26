@@ -2124,6 +2124,24 @@ wss.on('connection', (ws, req) => {
               .get(String(canonicalThreadId), String(m.fb_message_id)))
             : false;
           if (!isReplayedObservation) {
+            if (!isOutgoing) {
+              // Khách nhắn = khách đang trong hội thoại = mọi tin operator
+              // GỬI TRƯỚC tin này đã xem. Phải so thời gian: chỉ lấy tin đi
+              // cũ hơn tin khách vừa gửi - tin operator gửi SAU (khách chưa
+              // kịp đọc) tuyệt đối không được dán 'Đã xem'.
+              const incomingAt = Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now();
+              const prevSeen = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(String(canonicalThreadId));
+              const lastOut = db.prepare(`
+                SELECT id FROM messages
+                WHERE thread_id = ? AND is_outgoing = 1
+                  AND COALESCE(timestamp_ms, 0) <= ?
+                ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1
+              `).get(String(canonicalThreadId), incomingAt);
+              if (lastOut && String(prevSeen?.last_seen_message_id || '') !== String(lastOut.id)) {
+                db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(lastOut.id), String(canonicalThreadId));
+                io.emit('THREAD_SEEN', { thread_id: String(canonicalThreadId), last_seen_message_id: String(lastOut.id) });
+              }
+            }
             if (isOutgoing) {
               // Operator trả lời = đã đọc hội thoại: gỡ mọi cờ đánh tay.
               db.prepare('UPDATE threads SET is_unread = 0, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
@@ -2854,6 +2872,92 @@ wss.on('connection', (ws, req) => {
             }
           }
           owner.socket.emit('MESSAGE_REQUEST_ACTION_RESULT', { ...result, thread_id: owner.threadId });
+          break;
+        }
+
+        case 'THREAD_SEEN': {
+          // Extension bắt được 'Đã xem' từ 2 nguồn:
+          // - DOM watcher (alt avatar + bubble text) khi thread đang mở.
+          // - MQTT read receipt (watermark_ms) - dữ liệu chuẩn của Facebook,
+          //   về realtime kể cả khi thread không mở. Watermark khớp theo
+          //   messages.timestamp_ms (đã xác nhận từ FB) nên không cần đoán.
+          try {
+            const seenAltRaw = String(msg.data?.alt || '');
+            const seenBubbleRaw = String(msg.data?.bubble_text || '');
+            const seenWatermarkMs = Number(msg.data?.watermark_ms) || 0;
+            if (!seenAltRaw && !seenBubbleRaw && !(seenWatermarkMs > 0)) {
+              // Bản content script cũ (chỉ gửi thread_id) - dữ liệu không đủ
+              // để xác định tin, chấm mù sẽ gây false positive.
+              break;
+            }
+            console.log(`[SEEN] Nhận: alt="${seenAltRaw.slice(0, 60)}" bubble="${seenBubbleRaw.slice(0, 60)}" watermark=${seenWatermarkMs} source=${msg.data?.source || 'dom'}`);
+            const rawSeenId = String(msg.data?.thread_id || '');
+            const seenAccountId = msg.data?.account_id ? String(msg.data.account_id) : String(ws.accountId || '');
+            // Operator tự đọc tin của khách cũng sinh read receipt: actor
+            // trùng tài khoản đang chạy thì bỏ qua, không đánh 'đã xem'.
+            if (seenWatermarkMs > 0 && String(msg.data?.actor || '') && seenAccountId && String(msg.data.actor) === String(seenAccountId)) {
+              console.log(`[SEEN] Bỏ qua: receipt của chính operator (actor=${msg.data.actor})`);
+              break;
+            }
+            if (rawSeenId) {
+              const canonicalSeenId = resolveInternalThreadId(db, seenAccountId, rawSeenId) || rawSeenId;
+              const lastSeenOut = db.prepare(
+                'SELECT id, created_at FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1'
+              ).get(canonicalSeenId);
+              if (!lastSeenOut) break;
+              const altText = String(msg.data?.alt || '');
+              const bubbleText = String(msg.data?.bubble_text || '');
+              const normSeen = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+              const nb = normSeen(bubbleText);
+              let targetSeen = null;
+              // Ưu tiên 0 (MQTT): watermark từ read receipt chính chủ - tin
+              // outgoing cuối có timestamp_ms (giờ FB) ≤ watermark + dung sai
+              // 5s. Đây là mốc khách đã đọc tới, chính xác nhất.
+              if (seenWatermarkMs > 0) {
+                targetSeen = db.prepare(
+                  'SELECT id, content FROM messages WHERE thread_id = ? AND is_outgoing = 1 AND timestamp_ms > 0 AND timestamp_ms <= ? ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1'
+                ).get(canonicalSeenId, seenWatermarkMs + 5000) || null;
+              }
+              // Ưu tiên 1: khớp NỘI DUNG bubble nằm ngay trên avatar seen -
+              // xác định chính xác khách đọc tới tin nào (không đoán giờ).
+              if (!targetSeen && nb && nb !== 'đã gửi') {
+                const recentOut = db.prepare(
+                  'SELECT id, content FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 30'
+                ).all(canonicalSeenId);
+                targetSeen = recentOut.find((m) => {
+                  const c = normSeen(m.content);
+                  return c && c.length > 1 && (nb === c || nb.includes(c) || c.includes(nb));
+                }) || null;
+              }
+              // Ưu tiên 2 (fallback): gate theo giờ trong alt so với tin cuối.
+              if (!targetSeen) {
+                const timeMatch = altText.match(/(?:lúc|at)\s+(\d{1,2}):(\d{2})/i);
+                const sentAt = Date.parse(lastSeenOut.created_at);
+                if (timeMatch && Number.isFinite(sentAt)) {
+                  const seenAt = new Date();
+                  seenAt.setHours(Number(timeMatch[1]) % 24, Number(timeMatch[2]), 0, 0);
+                  if (seenAt.getTime() - sentAt > 12 * 3600 * 1000) seenAt.setTime(seenAt.getTime() - 24 * 3600 * 1000);
+                  if (seenAt.getTime() + 120000 >= sentAt) targetSeen = lastSeenOut;
+                }
+              }
+              if (!targetSeen) {
+                console.log(`[SEEN] Bỏ qua (bubble "${bubbleText.slice(0, 40)}" không khớp tin nào, alt "${altText.slice(0, 50)}")`);
+                break;
+              }
+              // Avatar chỉ tiến tới: mốc hiện tại mới hơn target thì không lùi.
+              const prevSeenRow2 = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(canonicalSeenId);
+              if (prevSeenRow2?.last_seen_message_id) {
+                const cur = db.prepare('SELECT COALESCE(sequence_order, id) AS ord FROM messages WHERE id = ?').get(prevSeenRow2.last_seen_message_id);
+                const tgt = db.prepare('SELECT COALESCE(sequence_order, id) AS ord FROM messages WHERE id = ?').get(targetSeen.id);
+                if (cur && tgt && Number(tgt.ord) <= Number(cur.ord)) break;
+              }
+              db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(targetSeen.id), canonicalSeenId);
+              io.emit('THREAD_SEEN', { thread_id: String(canonicalSeenId), last_seen_message_id: String(targetSeen.id) });
+              console.log(`[SEEN] thread=${canonicalSeenId} seen tới tin ${targetSeen.id} (bubble: "${bubbleText.slice(0, 40)}")`);
+            }
+          } catch (seenErr) {
+            console.warn('[SEEN] Lỗi xử lý THREAD_SEEN:', seenErr.message);
+          }
           break;
         }
 
@@ -5289,6 +5393,31 @@ app.post('/api/threads/:id/unread', (req, res) => {
     res.json({ success: true, id: String(id), is_unread: next });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Không thể cập nhật trạng thái chưa đọc.' });
+  }
+});
+
+// Đánh dấu khách đã đọc: content script bắt 'Đã xem' trong DOM hội thoại
+// đang mở trên tab Facebook rồi relay về đây.
+app.post('/api/threads/:id/seen', (req, res) => {
+  try {
+    // Content script gửi BARE id từ URL (/messages/t/<psid>), còn DB lưu id
+    // ghép '<account>:<psid>' cho hội thoại cá nhân - phải phân giải qua bộ
+    // giải chuẩn như mọi luồng sync, không thì UPDATE không khớp hàng nào.
+    const rawId = req.params.id;
+    const accountId = req.body?.account_id || null;
+    const canonicalId = resolveInternalThreadId(db, accountId, rawId) || rawId;
+    const last = db.prepare(
+      'SELECT id FROM messages WHERE thread_id = ? AND is_outgoing = 1 ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1'
+    ).get(canonicalId);
+    if (!last) return res.json({ success: true, last_seen_message_id: null });
+    const prev = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(canonicalId);
+    if (String(prev?.last_seen_message_id || '') !== String(last.id)) {
+      db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(last.id), canonicalId);
+      io.emit('THREAD_SEEN', { thread_id: String(canonicalId), last_seen_message_id: String(last.id) });
+    }
+    res.json({ success: true, last_seen_message_id: String(last.id) });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Không thể ghi nhận đã xem.' });
   }
 });
 

@@ -11,9 +11,13 @@ function pickAvatarColor(value) {
   return AVATAR_COLORS[total % AVATAR_COLORS.length];
 }
 
-function IncomingAvatar({ url, initial, color, threadId }) {
+function IncomingAvatar({ url, initial, color, threadId, size = 'md' }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [url, threadId]);
+
+  const sizeClass = size === 'sm'
+    ? 'w-4 h-4 text-[7px]'
+    : 'w-8 h-8 text-xs';
 
   if (url && !failed) {
     const source = String(url).startsWith('/api/') || /^https?:/i.test(String(url))
@@ -24,7 +28,7 @@ function IncomingAvatar({ url, initial, color, threadId }) {
         key={`${threadId || ''}:${source}`}
         src={source}
         alt=""
-        className="w-8 h-8 rounded-full object-cover border border-[var(--color-border)] shadow-sm"
+        className={`${sizeClass} rounded-full object-cover border border-[var(--color-border)] shadow-sm`}
         onError={() => setFailed(true)}
       />
     );
@@ -32,7 +36,7 @@ function IncomingAvatar({ url, initial, color, threadId }) {
 
   return (
     <div
-      className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--color-text-on-accent)] text-xs font-semibold shadow-sm"
+      className={`${sizeClass} rounded-full flex items-center justify-center text-[var(--color-text-on-accent)] font-semibold shadow-sm`}
       style={{ backgroundColor: color }}
     >
       {initial}
@@ -87,7 +91,7 @@ function renderRichContent(text) {
   return parts;
 }
 
-export default function MessageBubble({ msg, activeThread, onRetry }) {
+export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenByCustomer = false }) {
   const [isTimePinned, setIsTimePinned] = useState(false);
   const isPendingDirection = msg.direction_status === 'pending';
   const isBoolOutgoing = (msg.is_outgoing === true || msg.is_outgoing === 1 || String(msg.is_outgoing || '').toLowerCase() === 'true' || String(msg.is_outgoing || '') === '1') || msg.from === 'me' || msg.sender_type === 'staff' || msg.sender_type === 'ai';
@@ -98,6 +102,14 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
   // Persisted delivery_status is authoritative. A stale optimistic status can
   // remain 'pending' after the backend has confirmed the Messenger media.
   const status = msg.delivery_status || msg.status || (msg.is_failed ? 'failed' : msg.is_sending ? 'sending' : 'sent');
+  // 'Đã xem': tin đi của operator có id <= mốc last_seen_message_id mà
+  // extension bắt được từ DOM hội thoại đang mở trên tab Facebook.
+  const seenUpTo = Number(activeThread?.last_seen_message_id || 0);
+  const isSeenByCustomer = isOutgoing
+    && seenUpTo > 0
+    && Number(msg.id) > 0
+    && Number(msg.id) <= seenUpTo
+    && status !== 'sending' && status !== 'pending' && status !== 'failed';
   const displayTime = getMessageDisplayTime(msg);
   const avatarUrl = activeThread?.avatar_url || msg.sender_avatar_url || msg.sender_avatar || msg.avatar_url;
   const avatarSeed = String(senderName || activeThread?.contact_name || '').trim();
@@ -278,13 +290,36 @@ export default function MessageBubble({ msg, activeThread, onRetry }) {
             </button>
           )}
           {isOutgoing && status !== 'sending' && status !== 'pending' && status !== 'failed' && (
-            status === 'read' || status === 'delivered' ? (
-              <CheckCheck size={13} className="text-[var(--color-accent)]" strokeWidth={1.75} />
+            isSeenByCustomer || status === 'read' || status === 'delivered' ? (
+              <span className="inline-flex items-center gap-1 text-[var(--color-accent)] font-medium">
+                <CheckCheck size={13} strokeWidth={1.75} />
+                Đã xem
+              </span>
             ) : (
-              <Check size={13} className="text-[var(--color-text-muted)]" strokeWidth={1.75} />
+              <span className="inline-flex items-center gap-1">
+                <Check size={13} className="text-[var(--color-text-muted)]" strokeWidth={1.75} />
+                Đã gửi
+              </span>
             )
           )}
         </div>
+
+        {/* Seen receipt avatar - hiện avatar nhỏ của khách dưới tin nhắn cuối họ đã đọc */}
+        {isLastSeenByCustomer && isOutgoing && (
+          <div
+            className="flex justify-end mt-0.5 pr-0.5"
+            title={`${activeThread?.contact_name || 'Khách hàng'} đã xem`}
+            style={{ animation: 'seenAvatarFadeIn 0.35s ease-out both' }}
+          >
+            <IncomingAvatar
+              url={avatarUrl}
+              initial={avatarInitial}
+              color={avatarColor}
+              threadId={activeThread?.id || msg.thread_id}
+              size="sm"
+            />
+          </div>
+        )}
       </div>
     </div>
   );

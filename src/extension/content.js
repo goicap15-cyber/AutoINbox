@@ -256,6 +256,22 @@
         }
       } catch (e) {}
     }
+    if (event.data && event.data.type === 'FB_READ_RECEIPT') {
+      // Read receipt MQTT từ injected.js: khách đã đọc tới watermark - dữ
+      // liệu chuẩn của Facebook, không phụ thuộc DOM thread đang mở.
+      const rr = event.data.data;
+      if (!rr || !rr.thread_id || !(rr.watermark_ms > 0)) return;
+      try {
+        if (chrome?.runtime?.id) {
+          chrome.runtime.sendMessage({
+            type: 'CRM_READ_RECEIPT',
+            thread_id: String(rr.thread_id),
+            watermark_ms: Number(rr.watermark_ms) || 0,
+            actor: rr.actor ? String(rr.actor) : ''
+          });
+        }
+      } catch (e) {}
+    }
     if (event.data && event.data.type === 'FB_TOKEN_DISCOVERED') {
       if (event.data.fb_dtsg) {
         capturedFbDtsg = event.data.fb_dtsg;
@@ -2297,4 +2313,143 @@ try {
   }
 } catch (_) {}
 
+})();
+
+// ── Seen watcher v2: avatar mini nằm DƯỚI bubble outgoing ──
+// UI Messenger mới không còn alt '<Tên> đã xem lúc HH:MM'. Cách bắt chuẩn:
+// khi khách đã xem tin, avatar mini của khách (nhóm: các thành viên) hiện
+// NGAY DƯỚI bubble outgoing đó. Quét ảnh avatar size nhỏ (10-36px) trong
+// vùng chat, gán mỗi avatar cho bubble outgoing gần nhất PHÍA TRÊN nó (cùng
+// cột phải, cách tối đa 60px) - avatar thuộc bubble nào thì tin đó đã xem.
+// Avatar phải khớp với avatar khách (header hoặc avatar cột trái của tin
+// đến) để tránh nhầm sticker/ảnh nhỏ khác.
+(function () {
+  const lastReportedAt = new Map();
+  const REPORT_WINDOW_MS = 15000;
+  const SEEN_EXCLUDE = 'form, [contenteditable="true"], [role="textbox"], header, nav, [role="contentinfo"], [role="complementary"], [aria-label*="composer"], [aria-label*="Soạn"]';
+  // Thu thập avatar đã biết PHẢI thấy được avatar header (avatar khách 1:1).
+  const KNOWN_AVATAR_EXCLUDE = 'form, [contenteditable="true"], [role="textbox"], nav, [role="contentinfo"], [role="complementary"], [aria-label*="composer"], [aria-label*="Soạn"]';
+
+  function normalizeAvatarSrc(src) {
+    return String(src || '').split('?')[0].split('#')[0].trim();
+  }
+
+  // Avatar 'người thật' đã biết trong hội thoại: avatar header + avatar cột
+  // trái của các tin ĐẾN (khách 1:1, hoặc thành viên nhóm).
+  function getKnownContactAvatarSrcs(main) {
+    const known = new Set();
+    try {
+      const mainRect = main.getBoundingClientRect();
+      const allImgs = [...main.querySelectorAll('img')];
+      for (const img of allImgs) {
+        try {
+          if (img.closest(SEEN_EXCLUDE)) continue;
+          const src = img.currentSrc || img.src || '';
+          if (!/scontent|fbcdn|avatar/i.test(src)) continue;
+          const r = img.getBoundingClientRect();
+          if (!r.width || !r.height) continue;
+          // Avatar header (vùng trên cùng của cột chat, 28-56px)
+          if (r.width >= 28 && r.height >= 28 && r.width <= 56 && r.height <= 56 && r.top < mainRect.top + 140) {
+            known.add(normalizeAvatarSrc(src));
+            continue;
+          }
+          // Avatar cột trái của tin đến (16-40px, nằm nửa trái)
+          if (r.width >= 16 && r.height >= 16 && r.width <= 40 && r.height <= 40
+            && (r.left + r.width / 2 - mainRect.left) / Math.max(1, mainRect.width) <= 0.4) {
+            known.add(normalizeAvatarSrc(src));
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+    return known;
+  }
+
+  function rowIsOutgoing(row, main) {
+    try {
+      const al = String(row.getAttribute('aria-label') || '');
+      if (/do Bạn gửi|Bạn đã gửi|sent by you|You sent/i.test(al)) return true;
+      if (/tin nhắn do .+ gửi|sent by .+ at/i.test(al)) return false; // sender khác Bạn
+      const bubbles = [...row.querySelectorAll('div[dir="auto"], span[dir="auto"]')]
+        .filter((b) => !b.querySelector('div[dir="auto"], span[dir="auto"]'));
+      if (!bubbles.length) return false;
+      const mainRect = main.getBoundingClientRect();
+      if (!mainRect.width) return false;
+      const best = bubbles.reduce((bestEl, c) => {
+        const r = c.getBoundingClientRect();
+        const br = bestEl ? bestEl.getBoundingClientRect() : null;
+        return !br || r.width * r.height > br.width * br.height ? c : bestEl;
+      }, null);
+      if (!best) return false;
+      const r = best.getBoundingClientRect();
+      return (r.left + r.width / 2 - mainRect.left) / mainRect.width >= 0.5;
+    } catch (_) { return false; }
+  }
+
+  function scanSeenAvatars() {
+    try {
+      const m = location.pathname.match(/(?:\/messages(?:\/e2ee)?)?\/t\/([^\/?#]+)/);
+      if (!m) return;
+      const threadId = decodeURIComponent(m[1]);
+      const main = document.querySelector('div[role="main"]');
+      if (!main) return;
+      const knownAvatars = getKnownContactAvatarSrcs(main);
+
+      // Ứng viên: (a) avatar mini khớp avatar khách, (b) alt 'đã xem' kiểu UI cũ.
+      const candidates = [...main.querySelectorAll('img')].filter((img) => {
+        try {
+          if (img.closest(SEEN_EXCLUDE)) return false;
+          const alt = String(img.alt || '').trim();
+          if (/đã xem/i.test(alt) && !/^bạn\s+đã xem/i.test(alt)) return true; // UI cũ
+          const r = img.getBoundingClientRect();
+          if (r.width < 10 || r.height < 10 || r.width > 36 || r.height > 36) return false;
+          const style = window.getComputedStyle(img);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+          const src = img.currentSrc || img.src || '';
+          if (!src || /emoji|staticxx|rsrc|transparent|blank|sprites/i.test(src)) return false;
+          if (knownAvatars.size && !knownAvatars.has(normalizeAvatarSrc(src))) return false;
+          return true;
+        } catch (_) { return false; }
+      });
+      if (!candidates.length) return;
+
+      const outRows = [...main.querySelectorAll('div[role="row"], div[role="article"]')]
+        .map((row) => ({ row, rect: row.getBoundingClientRect() }))
+        .filter(({ row, rect }) => rect.width >= 50 && rect.height >= 10 && rowIsOutgoing(row, main));
+
+      for (const img of candidates) {
+        const aRect = img.getBoundingClientRect();
+        if (!aRect.width || !aRect.height) continue;
+        let owner = null;
+        // Avatar nằm TRONG row outgoing (cấu trúc mới: status ngay dưới bubble
+        // cùng article) -> bubble chính là row chứa nó.
+        const containing = img.closest('div[role="row"], div[role="article"]');
+        if (containing && rowIsOutgoing(containing, main)) {
+          owner = { row: containing, rect: containing.getBoundingClientRect() };
+        } else {
+          // Avatar trong status row riêng -> bubble outgoing gần nhất phía trên.
+          for (const cand of outRows) {
+            if (cand.rect.bottom > aRect.top + 4) continue;    // row nằm DƯỚI avatar
+            if (aRect.left < cand.rect.left - 40 || aRect.right > cand.rect.right + 40) continue; // khác cột
+            if (aRect.top - cand.rect.bottom > 60) continue;   // cách quá xa -> thuộc bubble khác
+            if (!owner || cand.rect.bottom > owner.rect.bottom) owner = cand;
+          }
+        }
+        if (!owner) continue;
+        const rowText = String(owner.row.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+        if (!rowText) continue;
+        const alt = String(img.alt || '').trim();
+        const avatarSrc = img.currentSrc || img.src || '';
+        const reportKey = `${threadId}:${rowText}:${normalizeAvatarSrc(avatarSrc) || alt}`;
+        const now = Date.now();
+        if ((lastReportedAt.get(reportKey) || 0) > now - REPORT_WINDOW_MS) continue;
+        lastReportedAt.set(reportKey, now);
+        console.log('[SEEN_SCAN] avatar dưới bubble outgoing:', { thread: threadId, bubble: rowText.slice(0, 50), alt, avatar: avatarSrc.slice(0, 90) });
+        try {
+          chrome.runtime.sendMessage({ type: 'CRM_THREAD_SEEN', thread_id: threadId, alt, bubble_text: rowText, avatar_src: avatarSrc });
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  setInterval(scanSeenAvatars, 3000);
 })();

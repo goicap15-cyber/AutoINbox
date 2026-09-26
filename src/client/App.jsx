@@ -1393,6 +1393,14 @@ export default function App() {
       setThreads(prev => prev.map(t => String(t.id) === tidStr ? { ...t, ai_paused_until: until } : t));
     });
     socket.on('THREAD_ASSIGNED', () => loadThreadsRef.current());
+    socket.on('THREAD_SEEN', (payload) => {
+      const tid = String(payload?.thread_id || '');
+      const mid = String(payload?.last_seen_message_id || '');
+      if (!tid) return;
+      setThreads((prev) => prev.map((t) => (String(t.id) === tid
+        ? { ...t, last_seen_message_id: mid }
+        : t)));
+    });
     socket.on('THREAD_PIN_CHANGED', (payload) => {
       const tid = String(payload?.thread_id || '');
       const next = Number(payload?.pinned) === 1;

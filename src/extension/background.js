@@ -470,14 +470,18 @@ async function waitForMessengerAttachmentReady(tabId, attachmentOrManifest) {
   const items = Array.isArray(attachmentOrManifest) ? attachmentOrManifest : [attachmentOrManifest];
   const hasVideo = items.some((item) => item?.media_type === 'video' || String(item?.mime_type || '').startsWith('video/'));
   const byteSize = items.reduce((sum, item) => sum + Number(item?.byte_size || 0), 0);
+  // Ảnh trước đây cứng 30s - upload xong nhưng DOM ready chưa thỏa trong khung
+  // này là văng ATTACHMENT_UPLOAD_TIMEOUT dù file đã nằm trong composer. Giờ ảnh
+  // co giãn theo dung lượng (min 45s, trần 120s).
+  // Video: Facebook xử lý phía server rất lâu (bandicam 9MB thực tế vượt
+  // trần 120s cũ) - co giãn chậm hơn theo dung lượng, tối đa 5 phút.
   const timeoutMs = hasVideo
-    ? Math.min(120000, Math.max(20000, 12000 + Math.ceil(byteSize / (256 * 1024)) * 1000))
-    : 30000;
+    ? Math.min(300000, Math.max(60000, 30000 + Math.ceil(byteSize / (100 * 1024)) * 1000))
+    : Math.min(120000, Math.max(45000, 12000 + Math.ceil(byteSize / (256 * 1024)) * 1000));
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   let readyStreak = 0;
-  while (Date.now() < deadline) {
-    lastState = await chrome.scripting.executeScript({
+  const probeReady = () => chrome.scripting.executeScript({
       target: { tabId },
       func: (expectVideo) => {
         const visible = (element) => {
@@ -539,15 +543,41 @@ async function waitForMessengerAttachmentReady(tabId, attachmentOrManifest) {
       },
       args: [hasVideo]
     }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+
+  let firstReadyAt = 0;
+  while (Date.now() < deadline) {
+    lastState = await probeReady();
     readyStreak = lastState?.ready ? readyStreak + 1 : 0;
-    // Video controls can become enabled briefly while Facebook is still
-    // processing the upload. Require a stable ready state before submitting.
-    if (readyStreak >= (hasVideo ? 2 : 1)) {
-      sendToBackend('COMPOSER_DEBUG', { stage: 'attachment_ready', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
+    if (lastState?.ready && !firstReadyAt) firstReadyAt = Date.now();
+    if (!lastState?.ready) firstReadyAt = 0;
+    // Video: nút Gửi bật SỚM ngay khi file vừa staged, trong khi Facebook còn
+    // xử lý phía server (thanh tiến trình mount trễ hơn ~1-2s). Submit lúc đó
+    // là mất video. Yêu cầu trạng thái sẵn sàng TRỤ ĐỨNG 8s liên tục: đủ lâu
+    // để progressbar kịp hiện rồi biến mất = upload thật sự hoàn tất.
+    const dwellOk = !hasVideo || (firstReadyAt && Date.now() - firstReadyAt >= 8000);
+    if (readyStreak >= (hasVideo ? 2 : 1) && dwellOk) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'attachment_ready', dwell_ms: firstReadyAt ? Date.now() - firstReadyAt : 0, timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
       return lastState;
     }
     await delay(hasVideo ? 150 : 100);
   }
+
+  // Hết hạn lần 1: thăm dò lại một nhịp 10s với điều kiện nới lỏng - CHỈ cho
+  // ảnh. Nút Gửi của video có lúc bật sớm trong lúc Facebook còn xử lý, submit
+  // lúc đó là mất tin; video phải chờ đủ chỉ báo sẵn sàng trong ngân sách dài.
+  if (!hasVideo) {
+  sendToBackend('COMPOSER_DEBUG', { stage: 'attachment_ready_first_timeout', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...(lastState || {}) });
+  const reprobeDeadline = Date.now() + 10000;
+  while (Date.now() < reprobeDeadline) {
+    lastState = await probeReady();
+    if (lastState?.send_found) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'attachment_ready_after_reprobe', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
+      return lastState;
+    }
+    await delay(200);
+  }
+  }
+
   const error = new Error('Messenger chưa tải xong file đính kèm để gửi');
   error.code = 'ATTACHMENT_UPLOAD_TIMEOUT';
   sendToBackend('COMPOSER_DEBUG', { stage: 'attachment_ready_timeout', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...(lastState || {}) });
@@ -559,13 +589,17 @@ async function waitForBusinessSuiteAttachmentReady(tabId, attachmentOrManifest) 
   const items = Array.isArray(attachmentOrManifest) ? attachmentOrManifest : [attachmentOrManifest];
   const hasVideo = items.some((item) => item?.media_type === 'video' || String(item?.mime_type || '').toLowerCase().startsWith('video/'));
   const byteSize = items.reduce((sum, item) => sum + Number(item?.byte_size || 0), 0);
+  // Ảnh co giãn theo dung lượng (min 45s, trần 120s); video chậm hơn và tối
+  // đa 5 phút - Facebook xử lý video phía server lâu (thực tế bandicam 9MB
+  // vượt trần 120s cũ).
   const timeoutMs = hasVideo
-    ? Math.min(120000, Math.max(25000, 15000 + Math.ceil(byteSize / (256 * 1024)) * 1000))
-    : 35000;
+    ? Math.min(300000, Math.max(60000, 30000 + Math.ceil(byteSize / (100 * 1024)) * 1000))
+    : Math.min(120000, Math.max(45000, 15000 + Math.ceil(byteSize / (256 * 1024)) * 1000));
   const deadline = Date.now() + timeoutMs;
   const basenames = items.map((i) => (i?.local_path || i?.name || '').split(/[\\/]/).pop()).filter(Boolean);
   let lastState = null;
   let readyStreak = 0;
+  let firstReadyAt = 0;
 
   while (Date.now() < deadline) {
     lastState = await chrome.scripting.executeScript({
@@ -653,11 +687,56 @@ async function waitForBusinessSuiteAttachmentReady(tabId, attachmentOrManifest) 
     }).then((rows) => rows?.[0]?.result || null).catch(() => null);
 
     readyStreak = lastState?.ready ? readyStreak + 1 : 0;
-    if (readyStreak >= (hasVideo ? 2 : 1)) {
-      sendToBackend('COMPOSER_DEBUG', { stage: 'page_attachment_ready', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
+    if (lastState?.ready && !firstReadyAt) firstReadyAt = Date.now();
+    if (!lastState?.ready) firstReadyAt = 0;
+    // Video: chờ trụ 8s liên tục như bản Messenger tab (nút Gửi bật sớm).
+    const dwellOk = !hasVideo || (firstReadyAt && Date.now() - firstReadyAt >= 8000);
+    if (readyStreak >= (hasVideo ? 2 : 1) && dwellOk) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'page_attachment_ready', dwell_ms: firstReadyAt ? Date.now() - firstReadyAt : 0, timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
       return lastState;
     }
     await delay(hasVideo ? 250 : 150);
+  }
+
+  // Thăm dò lại một nhịp 10s với điều kiện nới lỏng (nút Gửi đã bật là đủ) -
+  // CHỈ cho ảnh: nút Gửi của video bật sớm khi Facebook còn xử lý.
+  if (!hasVideo) {
+  sendToBackend('COMPOSER_DEBUG', { stage: 'page_attachment_ready_first_timeout', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...(lastState || {}) });
+  const bsReprobeDeadline = Date.now() + 10000;
+  while (Date.now() < bsReprobeDeadline) {
+    lastState = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (searchNames, expectVideo) => {
+        const visible = (element) => {
+          const rect = element?.getBoundingClientRect?.();
+          return Boolean(rect && rect.width > 0 && rect.height > 0);
+        };
+        const composer = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
+          .filter(visible)
+          .sort((left, right) => {
+            const a = left.getBoundingClientRect();
+            const b = right.getBoundingClientRect();
+            return b.width * b.height - a.width * a.height;
+          })[0] || null;
+        const nearComposer = (element) => {
+          if (!composer || !element) return true;
+          const a = composer.getBoundingClientRect();
+          const b = element.getBoundingClientRect();
+          return Math.abs(a.bottom - b.bottom) < 260;
+        };
+        const sendButton = [...document.querySelectorAll('[role="button"], button')]
+          .filter(nearComposer)
+          .find((element) => /^(Gửi|Send)$/i.test(String(element.getAttribute('aria-label') || element.textContent || '').trim()));
+        return { send_found: Boolean(sendButton) };
+      },
+      args: [basenames, hasVideo]
+    }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+    if (lastState?.send_found) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'page_attachment_ready_after_reprobe', timeout_ms: timeoutMs, byte_size: byteSize, has_video: hasVideo, ...lastState });
+      return lastState;
+    }
+    await delay(250);
+  }
   }
 
   const error = new Error('Business Suite chưa tải xong file đính kèm để gửi');
@@ -899,6 +978,32 @@ async function triggerPageDiscovery(accountId, force = false) {
 closeOrphanMarkerTabs();
 chrome.runtime.onMessage.addListener((msg, sender) => {
   try {
+    if (msg && msg.type === 'CRM_READ_RECEIPT' && msg.thread_id && msg.watermark_ms > 0) {
+      // Read receipt MQTT (deltaReadReceipt) - 'Đã xem' chuẩn của Facebook.
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        sendToBackend('THREAD_SEEN', {
+          thread_id: String(msg.thread_id),
+          account_id: user_id || null,
+          watermark_ms: Number(msg.watermark_ms) || 0,
+          actor: msg.actor || '',
+          alt: '',
+          bubble_text: '',
+          source: 'mqtt_read_receipt',
+        });
+      }
+      return;
+    }
+    if (msg && msg.type === 'CRM_THREAD_SEEN' && msg.thread_id) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        sendToBackend('THREAD_SEEN', {
+          thread_id: String(msg.thread_id),
+          account_id: user_id || null,
+          alt: msg.alt || '',
+          bubble_text: msg.bubble_text || '',
+        });
+      }
+      return;
+    }
     if (msg && msg.type === 'CRM_LINK_IMAGE' && msg.hash && /^[0-9a-f]{40}$/.test(String(msg.hash))) {
       if (msg.image && /^https?:\/\//.test(String(msg.image)) && ws && ws.readyState === WebSocket.OPEN) {
         sendToBackend('UPDATE_LINK_PREVIEW_IMAGE', { url_hash: msg.hash, image_url: msg.image });
@@ -2674,6 +2779,48 @@ async function prepareCampaignRecipientComposer(tabId, targetThreadId, timeoutMs
   throw error;
 }
 
+// Sau khi submit video, Messenger vẫn xử lý phía server ("Đang xử lý").
+// Điều hướng tab sang thread khác trong lúc đó làm hủy xử lý - video không
+// bao giờ lên. Chờ spinner/progressbar quanh bubble biến mất rồi mới cho
+// runner chuyển người nhận kế tiếp. Timeout chỉ ghi log, không coi là lỗi
+// (video thường vẫn đăng thành công sau khi hết chờ).
+async function waitPersonalVideoSettled(tabId, timeoutMs = 90000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const main = document.querySelector('div[role="main"]');
+        if (!main) return { settled: true, reason: 'no_main' };
+        const tail = (main.innerText || '').slice(-2500);
+        // Spinner / tiến trình upload còn chạy?
+        const processing = /đang xử lý|xử lý video|processing video|đang tải lên|uploading|đang gửi|sending/i.test(tail);
+        const busy = [...main.querySelectorAll('[aria-busy="true"], [role="progressbar"]')]
+          .filter((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          }).length;
+        // Tín hiệu giao hàng chính thức của Messenger: dòng 'Đã gửi'/'Đã xem'
+        // (hoặc tiếng Anh) dưới bubble - video chưa hiện dòng này là chưa xong.
+        const sentMarker = /(đã gửi|đã xem|đã thấy|sent|seen|delivered)/i.test(tail);
+        return { settled: !processing && busy === 0 && sentMarker, processing, busy, sent_marker: sentMarker };
+      }
+    }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+    if (lastState?.settled) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'video_settled', waited_ms: timeoutMs - (deadline - Date.now()), ...lastState });
+      return true;
+    }
+    // Log nhịp thăm dò mỗi 5s để nhìn thấy nó đang chờ điều kiện nào.
+    if (Math.floor((timeoutMs - (deadline - Date.now())) / 5000) !== Math.floor((timeoutMs - (deadline - Date.now()) + 1000) / 5000)) {
+      sendToBackend('COMPOSER_DEBUG', { stage: 'video_settle_poll', ...lastState });
+    }
+    await delay(1000);
+  }
+  sendToBackend('COMPOSER_DEBUG', { stage: 'video_settle_timeout', timeout_ms: timeoutMs, ...(lastState || {}) });
+  return false;
+}
+
 async function handleSendPersonalMessageWithAttachment({ thread_id, recipient_thread_id = null, thread_url = null, expected_contact_name = null, strict_recipient_identity = false, content, attachment, attachmentManifest = null, client_message_id, account_id = user_id, tab_role = 'interaction' }) {
   const trace = (stage, extra = {}) => console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage, thread_id: String(thread_id), client_message_id, at: new Date().toISOString(), ...extra }));
   trace('EXTENSION_SEND_RECEIVED', { text_length: String(content || '').length, has_attachment: true });
@@ -2754,6 +2901,14 @@ async function handleSendPersonalMessageWithAttachment({ thread_id, recipient_th
       mediaType,
       idsBefore: outgoingMediaIdsBefore
     }).catch(() => null);
+
+    // Video: submit chỉ đưa bubble vào thread - Facebook vẫn xử lý phía server
+    // ("Đang xử lý"). Nếu chuyển sang người nhận kế tiếp ngay, tab điều hướng
+    // đi mất làm hủy xử lý -> video không bao giờ lên. Chờ bubble video hoàn
+    // tất (spinner/progressbar biến mất, tối đa 90s) trước khi báo hoàn tất.
+    if (mediaType === 'video') {
+      await waitPersonalVideoSettled(tab.id, 90000);
+    }
 
     console.log('[FB Engine] ✅ Đã dispatch tin nhắn (có đính kèm) qua Messenger cá nhân');
     sendToBackend('SEND_MESSAGE_RESULT', {
@@ -3777,8 +3932,13 @@ async function stagePersonalMessengerAttachment(tabId, attachmentOrManifest) {
     for (let attempt = 1; attempt <= 2; attempt++) {
       const point = await findAttachButtonCenter(tabId, 6000, preferredKind);
       try {
+        // Video trước đây bị ép đi đường chặn hộp thoại chọn file - menu
+        // đính kèm của Messenger thường không mở native chooser kịp -> đạn
+        // CAMERA_STAGE chết cả 2 lượt. Đường set file trực tiếp vào input
+        // (đã chứng minh với ảnh) chấp nhận video khi accept cho phép, nên
+        // dùng làm đường chính cho mọi loại; chooser chỉ là fallback.
         await stageAttachmentViaFileChooser(tabId, point, attachmentOrManifest, {
-          preferDirectInput: preferredKind !== 'video'
+          preferDirectInput: true
         });
         return;
       } catch (error) {
