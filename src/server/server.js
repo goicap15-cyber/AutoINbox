@@ -5157,6 +5157,33 @@ app.get('/api/accounts/:id/pages', (req, res) => {
     }
   }
 
+  // Bổ sung source page chưa rõ chủ (owner NULL, vd tạo từ thread cũ):
+  // discovery không trả về chúng nên không bao giờ được auto-bind owner -
+  // nếu không thêm vào đây thì modal thiếu page so với Business Suite.
+  // User bấm "Mở" sẽ qua ensurePageSource -> tự gắn owner cho account này.
+  const unownedSources = db.prepare(`
+    SELECT external_id, display_name, avatar_url
+    FROM inbox_sources
+    WHERE source_type = 'page_messenger' AND owner_account_id IS NULL AND status = 'ACTIVE'
+  `).all().filter(s => String(s.external_id) !== accountId
+    && !isGenericPageName(s.display_name)
+    && !isSuspiciousPageId(s.external_id)
+    && !isOwnerSelfSourceName(s.display_name, accountName));
+  for (const s of unownedSources) {
+    const extId = String(s.external_id);
+    const norm = (s.display_name || '').trim().toLowerCase();
+    const key = norm || extId;
+    if (!combinedByName.has(key)) {
+      combinedByName.set(key, {
+        page_id: extId,
+        name: s.display_name || ('Page ' + extId),
+        avatar_url: s.avatar_url || `https://graph.facebook.com/${extId}/picture?type=normal`,
+        category: 'Trang Facebook',
+        is_connected: false
+      });
+    }
+  }
+
   const pages = Array.from(combinedByName.values());
   res.json({
     success: true,
