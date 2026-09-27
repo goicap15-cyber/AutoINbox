@@ -347,8 +347,9 @@
       console.warn('[FbPageDiscovery] Lỗi khi fetch your_pages:', e?.message || e);
     }
 
-    // Nguồn 2: Nếu chưa tìm thấy trang nào, thử fetch bookmarks/pages
-    if (results.length === 0) {
+    // Nguồn 2: bookmarks/pages - your_pages có khi chỉ render một phần danh sách
+    // (lazy-load) nên luôn quét thêm nguồn này và gộp, tránh thiếu page.
+    {
       try {
         const urlBookmarks = 'https://www.facebook.com/bookmarks/pages/';
         const resBm = await fetch(urlBookmarks, {
