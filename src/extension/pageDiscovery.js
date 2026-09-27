@@ -68,12 +68,21 @@
 
   /**
    * Khử trùng lặp danh sách Page theo tên chuẩn hóa.
-   * Nếu có 2 ID cho cùng 1 tên (ví dụ ID Delegate 6159... và ID Legacy 1112...),
-   * ưu tiên giữ lại ID Legacy thực (không bắt đầu bằng 6159 hoặc dài hơn).
+   * Nếu có 2 ID cho cùng 1 tên, ưu tiên giữ ID legacy (đánh dấu qua legacyIds -
+   * lấy từ cấu trúc delegate_page, là ID Business Suite nhận) thay vì ID
+   * profile kiểu mới (10007... - Business Suite chặn asset_id này).
    */
-  function deduplicatePages(pages) {
+  function deduplicatePages(pages, legacyIds) {
     if (!Array.isArray(pages)) return [];
     const byName = new Map();
+    const idScore = (p) => {
+      const id = String(p.page_id);
+      let score = 0;
+      if (legacyIds && legacyIds.has(id)) score += 2;
+      if (SUSPICIOUS_PAGE_ID_REGEX.test(id)) score -= 4;
+      else if (id.startsWith('6159')) score -= 1;
+      return score;
+    };
     for (const p of pages) {
       if (!p || !p.page_id) continue;
       // ID profile/delegate 6155xxx-6159xxx không phải page thật -> loại luôn.
@@ -82,13 +91,8 @@
       if (!norm) continue;
       if (!byName.has(norm)) {
         byName.set(norm, p);
-      } else {
-        const existing = byName.get(norm);
-        const existingIsActor = String(existing.page_id).startsWith('6159');
-        const currentIsActor = String(p.page_id).startsWith('6159');
-        if (existingIsActor && !currentIsActor) {
-          byName.set(norm, p);
-        }
+      } else if (idScore(p) > idScore(byName.get(norm))) {
+        byName.set(norm, p);
       }
     }
     return Array.from(byName.values());
@@ -100,12 +104,12 @@
    * hoặc { delegate_page: { id: "...", name: "..." } }
    * hoặc trong viewer.actor.all_pages / launchpoint
    */
-  function extractPagesFromJsonTree(node, foundPagesMap, depth = 0, accountId = null) {
+  function extractPagesFromJsonTree(node, foundPagesMap, depth = 0, accountId = null, legacyIds = null) {
     if (!node || depth > 25 || typeof node !== 'object') return;
 
     if (Array.isArray(node)) {
       for (let i = 0; i < node.length; i++) {
-        extractPagesFromJsonTree(node[i], foundPagesMap, depth + 1, accountId);
+        extractPagesFromJsonTree(node[i], foundPagesMap, depth + 1, accountId, legacyIds);
       }
       return;
     }
@@ -119,6 +123,7 @@
       const dpId = String(dp.id || '');
       const dpName = cleanPageName(dp.name || node.name);
       if (dpId && dpName && PAGE_ID_REGEX.test(dpId) && (!safeAccountId || dpId !== safeAccountId)) {
+        if (legacyIds) legacyIds.add(dpId);
         let avatar = dp.profile_picture?.uri || `https://graph.facebook.com/${dpId}/picture?type=normal`;
         if (!foundPagesMap.has(dpId)) {
           foundPagesMap.set(dpId, {
@@ -173,7 +178,7 @@
       const k = keys[i];
       // Bỏ qua các key nhị phân hoặc chuỗi quá dài không chứa object
       if (typeof node[k] === 'object' && node[k] !== null) {
-        extractPagesFromJsonTree(node[k], foundPagesMap, depth + 1, accountId);
+        extractPagesFromJsonTree(node[k], foundPagesMap, depth + 1, accountId, legacyIds);
       }
     }
   }
@@ -182,9 +187,10 @@
    * Bóc tách danh sách Fanpage từ HTML response của Facebook
    * (áp dụng cho https://www.facebook.com/pages/?category=your_pages hoặc bookmarks)
    */
-  function parsePagesFromHtml(html, accountId = null) {
+  function parsePagesFromHtml(html, accountId = null, legacyIds = null) {
     if (!html || typeof html !== 'string') return [];
     const foundPagesMap = new Map();
+    if (!legacyIds) legacyIds = new Set();
     const safeAccountId = accountId ? String(accountId).trim() : null;
 
     // 1. Quét các khối <script ...> chứa JSON Comet
@@ -219,7 +225,7 @@
           }
         }
         if (parsed) {
-          extractPagesFromJsonTree(parsed, foundPagesMap, 0, safeAccountId);
+          extractPagesFromJsonTree(parsed, foundPagesMap, 0, safeAccountId, legacyIds);
         }
       } catch (_) {}
 
@@ -227,12 +233,15 @@
       const jsonBlobRegex = /"__typename"\s*:\s*"Page"|"delegate_page"\s*:\s*\{/g;
       if (jsonBlobRegex.test(scriptContent)) {
         // Ưu tiên regex tìm delegate_page
-        const dpRegex = /"delegate_page"\s*:\s*\{[^{}]*?"id"\s*:\s*"(\d{14,})"[^{}]*?"name"\s*:\s*"([^"]+)"/g;
+        const dpRegex = /"delegate_page"\s*:\s*\{[^{}]*?"id"\s*:\s*"(\d{11,})"[^{}]*?"name"\s*:\s*"([^"]+)"/g;
         let dpMatch;
         while ((dpMatch = dpRegex.exec(scriptContent)) !== null) {
           const rawId = dpMatch[1];
           const rawName = dpMatch[2];
           const name = cleanPageName(rawName);
+          if (rawId && name && (!safeAccountId || rawId !== safeAccountId)) {
+            legacyIds.add(rawId);
+          }
           if (rawId && name && (!safeAccountId || rawId !== safeAccountId) && !foundPagesMap.has(rawId)) {
             foundPagesMap.set(rawId, {
               page_id: rawId,
@@ -299,7 +308,7 @@
 
     const allDiscovered = Array.from(foundPagesMap.values());
     const filtered = safeAccountId ? allDiscovered.filter(p => String(p.page_id) !== safeAccountId) : allDiscovered;
-    return deduplicatePages(filtered);
+    return deduplicatePages(filtered, legacyIds);
   }
 
   /**
@@ -312,6 +321,7 @@
     const results = [];
     const seenIds = new Set();
     const safeAccountId = accountId ? String(accountId).trim() : null;
+    const legacyIds = new Set();
 
     // Nguồn 1: your_pages
     try {
@@ -325,7 +335,7 @@
       });
       if (res.ok) {
         const html = await res.text();
-        const pages = parsePagesFromHtml(html, safeAccountId);
+        const pages = parsePagesFromHtml(html, safeAccountId, legacyIds);
         for (const p of pages) {
           if (!seenIds.has(p.page_id)) {
             seenIds.add(p.page_id);
@@ -350,7 +360,7 @@
         });
         if (resBm.ok) {
           const htmlBm = await resBm.text();
-          const pagesBm = parsePagesFromHtml(htmlBm, safeAccountId);
+          const pagesBm = parsePagesFromHtml(htmlBm, safeAccountId, legacyIds);
           for (const p of pagesBm) {
             if (!seenIds.has(p.page_id)) {
               seenIds.add(p.page_id);
@@ -365,7 +375,7 @@
 
     // Lọc lại lần cuối loại trừ tài khoản cá nhân và khử trùng lặp theo tên
     const filtered = safeAccountId ? results.filter(p => String(p.page_id) !== safeAccountId) : results;
-    return deduplicatePages(filtered);
+    return deduplicatePages(filtered, legacyIds);
   }
 
   return {

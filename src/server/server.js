@@ -5107,6 +5107,23 @@ app.get('/api/accounts/:id/pages', (req, res) => {
 
   const activeById = new Map();
   const activeByName = new Map();
+  // 1 Page có thể bị discovery quét nhầm ID profile kiểu mới (10007...) thay vì
+  // ID legacy mà Business Suite nhận. Map tên "lỏng" (bỏ dấu cách/ký tự) giữa
+  // page quét được và mọi source ACTIVE để thay ID sai bằng ID chuẩn trong DB.
+  const looseNameKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9\u00c0-\u024f\u1e00-\u1eff]+/g, '');
+  const anyPageSources = db.prepare(`
+    SELECT external_id, display_name, owner_account_id
+    FROM inbox_sources
+    WHERE source_type = 'page_messenger' AND status = 'ACTIVE'
+  `).all();
+  const activeByLooseName = new Map();
+  const anyByLooseName = new Map();
+  for (const s of anyPageSources) {
+    const key = looseNameKey(s.display_name);
+    if (!key) continue;
+    if (!anyByLooseName.has(key)) anyByLooseName.set(key, s);
+    if (String(s.owner_account_id) === String(accountId) && !activeByLooseName.has(key)) activeByLooseName.set(key, s);
+  }
   for (const s of activeSources) {
     const extId = String(s.external_id);
     activeById.set(extId, s);
@@ -5123,10 +5140,18 @@ app.get('/api/accounts/:id/pages', (req, res) => {
   for (const p of rawPages) {
     const pid = String(p.page_id);
     const norm = (p.name || '').trim().toLowerCase();
-    const matchedSource = activeById.get(pid) || (norm ? activeByName.get(norm) : null);
+    const loose = looseNameKey(p.name);
+    let effectivePid = pid;
+    if (!activeById.has(pid)) {
+      const cand = (loose && (activeByLooseName.get(loose) || anyByLooseName.get(loose))) || null;
+      if (cand) effectivePid = String(cand.external_id);
+    }
+    const matchedSource = activeById.get(effectivePid)
+      || (norm ? activeByName.get(norm) : null)
+      || (loose ? activeByLooseName.get(loose) : null);
     const isConn = !!matchedSource;
     // Ưu tiên dùng ID từ database nếu đã kết nối (ID legacy 16 số chuẩn), nếu chưa có thì dùng pid quét được
-    const effectiveId = matchedSource ? String(matchedSource.external_id) : pid;
+    const effectiveId = matchedSource ? String(matchedSource.external_id) : effectivePid;
     const effectiveName = matchedSource?.display_name || p.name || ('Page ' + effectiveId);
     const key = norm || effectiveId;
 
