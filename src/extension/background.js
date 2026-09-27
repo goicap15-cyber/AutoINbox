@@ -838,7 +838,8 @@ function decodeFbHtmlEntities(value) {
 async function fetchOwnProfileViaTab(accountId) {
   try {
     await closeOrphanMarkerTabs();
-    openMarkerTabInMessengerWindow('https://www.facebook.com/profile.php?id=' + encodeURIComponent(String(accountId)) + '&crm_own_profile=1');
+    const created = await openMarkerTabInMessengerWindow('https://www.facebook.com/profile.php?id=' + encodeURIComponent(String(accountId)) + '&crm_own_profile=1');
+    if (created?.id != null) trackMarkerTab(created.id, String(accountId));
   } catch (_) {}
   return null;
 }
@@ -912,12 +913,32 @@ function flushPendingPageProfiles() {
 // Tab phu (profile/link-image) phai nam TRONG cua so Messenger ca nhan -
 // tao ngoai windowId khi moi cua so dang an/parked thi Chrome sinh mot cua
 // so rieng nho (133x38) o goc - chinh la "2 cai gi do" user thay.
+//
+// Theo doi tab marker bang id (khong dua vao URL): Facebook redirect
+// profile.php?id=X&crm_page_profile=X sang URL vanity cua Page lam mat
+// marker, content script khong con biet de gui ket qua -> tab mo coi nam lai
+// vinh vien. TTL 90s: qua han ma chua co ket qua la dong tab (ke ca khi URL
+// da mat marker).
+const markerTabIds = new Map(); // tabId -> { openedAt, pageId }
+const MARKER_TAB_TTL_MS = 90 * 1000;
+
+function trackMarkerTab(tabId, pageId) {
+  if (tabId == null) return;
+  markerTabIds.set(Number(tabId), { openedAt: Date.now(), pageId: String(pageId || '') });
+}
+function untrackMarkerTab(tabId) {
+  if (tabId == null) return;
+  markerTabIds.delete(Number(tabId));
+}
+
 async function openMarkerTabInMessengerWindow(url) {
   try {
     const wins = await chrome.windows.getAll({ populate: true });
     const target = wins.find((w) => (w.tabs || []).some((t) => /facebook\.com\/(messages|business\.facebook)/.test(t.url || '')));
-    chrome.tabs.create({ url, active: false, pinned: true, windowId: target ? target.id : undefined }, () => { void chrome.runtime.lastError; });
-  } catch (_) {}
+    return await chrome.tabs.create({ url, active: false, pinned: true, windowId: target ? target.id : undefined });
+  } catch (_) {
+    return null;
+  }
 }
 // Quet don tab marker mo coi (mat ket noi SW luc content script gui ket qua,
 // hoac redirect lam handler khong chay) - goi khi SW thuc day va truoc khi
@@ -925,8 +946,14 @@ async function openMarkerTabInMessengerWindow(url) {
 async function closeOrphanMarkerTabs() {
   try {
     const tabs = await chrome.tabs.query({ url: ['*://www.facebook.com/*'] });
+    const now = Date.now();
     for (const t of tabs) {
-      if (/crm_link_img=|crm_page_profile=|crm_own_profile=/.test(t.url || '') && t.id != null) {
+      if (t.id == null) continue;
+      const info = markerTabIds.get(t.id);
+      const hasMarker = /crm_link_img=|crm_page_profile=|crm_own_profile=/.test(t.url || '');
+      const timedOut = Boolean(info) && now - info.openedAt >= MARKER_TAB_TTL_MS;
+      if (hasMarker || timedOut) {
+        markerTabIds.delete(t.id);
         try { await chrome.tabs.remove(t.id); } catch (_) {}
       }
     }
@@ -934,8 +961,23 @@ async function closeOrphanMarkerTabs() {
 }
 async function fetchPageProfileViaTab(pageId) {
   try {
+    const pid = String(pageId);
     await closeOrphanMarkerTabs();
-    openMarkerTabInMessengerWindow('https://www.facebook.com/profile.php?id=' + encodeURIComponent(String(pageId)) + '&crm_page_profile=' + encodeURIComponent(String(pageId)));
+    // Khong mo them tab neu da co tab profile cung page con dang mo (ke ca
+    // tab cu da bi redirect mat marker) - tranh don dong tab trung lap.
+    const existing = await chrome.tabs.query({ url: ['*://www.facebook.com/*'] });
+    const dup = existing.find((t) => {
+      const u = String(t.url || '');
+      return u.includes('profile.php') && u.includes('id=' + pid)
+        && !u.includes('crm_page_profile=')
+        && t.pinned && !t.active;
+    });
+    if (dup && dup.id != null) {
+      trackMarkerTab(dup.id, pid);
+      return;
+    }
+    const created = await openMarkerTabInMessengerWindow('https://www.facebook.com/profile.php?id=' + encodeURIComponent(pid) + '&crm_page_profile=' + encodeURIComponent(pid));
+    if (created?.id != null) trackMarkerTab(created.id, pid);
   } catch (_) {}
 }
 
@@ -1009,6 +1051,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
         sendToBackend('UPDATE_LINK_PREVIEW_IMAGE', { url_hash: msg.hash, image_url: msg.image });
       }
       if (sender && sender.tab && sender.tab.id != null) {
+        untrackMarkerTab(sender.tab.id);
         try { chrome.tabs.remove(sender.tab.id).catch(() => {}); } catch (_) {}
       }
       return;
@@ -1017,6 +1060,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       pendingPageProfileQueue.push({ pageId: String(msg.pageId), data: msg.data || {} });
       flushPendingPageProfiles();
       if (sender && sender.tab && sender.tab.id != null) {
+        untrackMarkerTab(sender.tab.id);
         try { chrome.tabs.remove(sender.tab.id).catch(() => {}); } catch (_) {}
       }
       return;
@@ -1026,6 +1070,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     let changed = false;
     if (data.name && data.name !== account_name) { account_name = data.name; changed = true; }
     if (data.avatar && /^https?:\/\//.test(data.avatar) && data.avatar !== account_avatar_url) { account_avatar_url = data.avatar; changed = true; }
+    untrackMarkerTab(sender.tab.id);
     try { chrome.tabs.remove(sender.tab.id).catch(() => {}); } catch (_) {}
     if (changed && user_id) {
       if (ws && ws.readyState === WebSocket.OPEN && backendAccountRegistered) {
@@ -2147,6 +2192,7 @@ async function closeSidebarSyncTabs(accountId) {
 }
 
 chrome.tabs.onRemoved.addListener((closedTabId) => {
+  untrackMarkerTab(closedTabId);
   loadTabRegistry().then(async () => {
     let changed = false;
     for (const [role, tabId] of tabRegistry.entries()) {

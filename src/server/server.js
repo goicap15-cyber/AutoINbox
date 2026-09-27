@@ -674,6 +674,8 @@ const backgroundAfterConnectRequests = new Map();
 // requests sync pipeline as the existing "Connect Facebook" action, even if
 // the first scan races the three Messenger role tabs becoming ready.
 const newAccountBootstrapSyncs = new Map();
+// pageId -> lan cuoi yeu cau extension lay profile (ten/avatar) cua Page
+const pageProfileFetchLastRequestedAt = new Map();
 const domReplaySuppressUntil = new Map();
 const callEventDeduplicator = new CallEventDeduplicator();
 const historyBackfillJobs = new Map();
@@ -1442,16 +1444,21 @@ wss.on('connection', (ws, req) => {
 
           // Giao viec lay profile cho cac Page con ten generic / chua co
           // avatar - extension se mo tab profile Page va tra ket qua qua
-          // UPDATE_PAGE_PROFILE. Chay lai moi lan extension reconnect nen
-          // neu lan truoc that bai se du thu lai.
+          // UPDATE_PAGE_PROFILE. Cooldown 30 phut/page: khong mo lai tab
+          // profile moi lan extension reconnect (moi lan reconnect truoc day
+          // sinh them ca loat tab cho cung cac Page khong bao gio resolve).
           try {
             const pagesNeedProfile = db.prepare(`
               SELECT external_id FROM inbox_sources
               WHERE source_type = 'page_messenger' AND owner_account_id = ?
                 AND (avatar_url IS NULL OR display_name = 'Page ' || external_id)
+                AND external_id NOT GLOB '615[5-9]??????????'
             `).all(String(account_id));
-            const pageIds = pagesNeedProfile.map((r) => String(r.external_id)).filter((id) => /^\d+$/.test(id));
+            const now = Date.now();
+            const pageIds = pagesNeedProfile.map((r) => String(r.external_id)).filter((id) => /^\d+$/.test(id))
+              .filter((id) => now - (pageProfileFetchLastRequestedAt.get(id) || 0) > 30 * 60 * 1000);
             if (pageIds.length && ws.readyState === WebSocket.OPEN) {
+              for (const id of pageIds) pageProfileFetchLastRequestedAt.set(id, now);
               ws.send(JSON.stringify({ type: 'FETCH_PAGE_PROFILES', data: { page_ids: pageIds } }));
               console.log(`[PAGE_SOURCE] Giao lay profile cho ${pageIds.length} Page:`, pageIds.join(','));
             }
