@@ -4891,6 +4891,9 @@ app.post('/api/accounts/:id/start', async (req, res) => {
     const ownerAccountId = parts[1];
     const pageId = parts[2];
     if (!ownerAccountId || !pageId) return res.status(400).json({ success: false, error: 'Key Page không hợp lệ' });
+    if (isSuspiciousPageId(pageId)) {
+      return res.status(400).json({ success: false, error: `ID ${pageId} là ID profile/delegate, không phải Fanpage - không mở tab.` });
+    }
     const ok = await processManager.openBusinessTabForPage(pageId, ownerAccountId);
     return res.json({ success: ok });
   }
@@ -5040,7 +5043,7 @@ function isGenericPageName(name) {
 // (vd 61564781823946). Business Suite chặn asset_id dạng này với lỗi
 // "nội dung này hiện không khả dụng" - chỉ ID page thật (15-16 chữ số
 // legacy) mới mở được inbox.
-const SUSPICIOUS_PAGE_ID_REGEX = /^615[5-9]\d{11}$/;
+const SUSPICIOUS_PAGE_ID_REGEX = /^615[5-9]\d{10}$/;
 
 function isSuspiciousPageId(id) {
   return SUSPICIOUS_PAGE_ID_REGEX.test(String(id || '').trim());

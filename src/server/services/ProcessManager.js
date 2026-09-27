@@ -511,6 +511,12 @@ class ProcessManager {
     const safePageId = String(pageId || '').trim();
     const safeAccountId = String(accountId || '').trim();
     if (!/^\d+$/.test(safePageId) || !safeAccountId) return false;
+    // ID profile/delegate 14 chữ số đầu 6155-6159: Business Suite luôn chặn
+    // ("nội dung không khả dụng") - không mở tab, không ghi log thừa.
+    if (/^615[5-9]\d{10}$/.test(safePageId)) {
+      console.warn(`[ProcessManager] Từ chối mở tab Business Suite cho ID profile/delegate ${safePageId}.`);
+      return false;
+    }
     // Khoa per-account: nhieu Page goi cung luc thi xep hang, tranh race
     // startAccountProcess nhieu lan (sinh nhieu cua so Chrome).
     this._pageTabLocks = this._pageTabLocks || new Map();

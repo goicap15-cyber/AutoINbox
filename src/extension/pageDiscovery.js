@@ -25,7 +25,7 @@
   // ID profile/delegate mới (14 chữ số đầu 6155-6159) không phải ID page thật:
   // Business Suite chặn asset_id dạng này ("nội dung này hiện không khả dụng").
   // Loại khỏi discovery để không tạo source/link sai.
-  const SUSPICIOUS_PAGE_ID_REGEX = /^615[5-9]\d{11}$/;
+  const SUSPICIOUS_PAGE_ID_REGEX = /^615[5-9]\d{10}$/;
 
   /**
    * Decode ký tự escape Unicode trong Facebook JSON/HTML (ví dụ \u003C -> <, \u0026 -> &)
