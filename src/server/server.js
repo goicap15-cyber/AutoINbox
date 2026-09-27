@@ -5161,10 +5161,14 @@ app.get('/api/accounts/:id/pages', (req, res) => {
   // discovery không trả về chúng nên không bao giờ được auto-bind owner -
   // nếu không thêm vào đây thì modal thiếu page so với Business Suite.
   // User bấm "Mở" sẽ qua ensurePageSource -> tự gắn owner cho account này.
+  // Page mồ côi (owner NULL, thường là page của account đã bị xóa) phải có
+  // hội thoại thật mới được đề xuất kết nối - nếu không modal sẽ ngập page rác
+  // của account khác (30 thay vì 18 page).
   const unownedSources = db.prepare(`
-    SELECT external_id, display_name, avatar_url
-    FROM inbox_sources
-    WHERE source_type = 'page_messenger' AND owner_account_id IS NULL AND status = 'ACTIVE'
+    SELECT s.external_id, s.display_name, s.avatar_url
+    FROM inbox_sources s
+    WHERE s.source_type = 'page_messenger' AND s.owner_account_id IS NULL AND s.status = 'ACTIVE'
+      AND EXISTS (SELECT 1 FROM threads t WHERE t.source_id = s.id)
   `).all().filter(s => String(s.external_id) !== accountId
     && !isGenericPageName(s.display_name)
     && !isSuspiciousPageId(s.external_id)
