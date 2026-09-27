@@ -5041,8 +5041,8 @@ function isGenericPageName(name) {
 
 // ID profile/delegate mới của Facebook có 14 chữ số bắt đầu 6155-6159
 // (vd 61564781823946). Business Suite chặn asset_id dạng này với lỗi
-// "nội dung này hiện không khả dụng" - chỉ ID page thật (15-16 chữ số
-// legacy) mới mở được inbox.
+// "nội dung này hiện không khả dụng" - chỉ ID page thật (11-16 chữ số
+// hợp lệ) mới mở được inbox. Lọc bỏ 615[5-9]\d{10} (profile/delegate).
 const SUSPICIOUS_PAGE_ID_REGEX = /^615[5-9]\d{10}$/;
 
 function isSuspiciousPageId(id) {

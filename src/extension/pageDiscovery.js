@@ -18,9 +18,9 @@
   // Facebook trả "Rất tiếc, nội dung này hiện không khả dụng".
   const GENERIC_EXCLUDE_REGEX = /^(?:facebook|messenger|trang|page|trang cá nhân|profile|hộp thư|inbox|bảng tin|feed|thông báo|notifications|cài đặt|settings|xem tất cả|see all|quản lý|manage|quản lý trang|trang của bạn|trang bạn quản lý|trang của tôi|tất cả trang|your pages|pages you manage|manage pages|my pages)$/i;
 
-  // Page ID thật của Facebook luôn >= 14 chữ số (dạng legacy 15-16 số, dạng mới 6156... 14 số).
-  // ID ngắn hơn là element UI/tiêu đề bị trích xuất nhầm, không được nhận làm Page.
-  const PAGE_ID_REGEX = /\d{14,}/;
+  // Facebook trả về Page ID dài khác nhau: legacy 15-16 chữ số, new-style 11-14 chữ số.
+  // Chỉ lọc element UI ngắn ≤ 10 chữ số bị trích xuất nhầm.
+  const PAGE_ID_REGEX = /\d{11,}/;
 
   // ID profile/delegate mới (14 chữ số đầu 6155-6159) không phải ID page thật:
   // Business Suite chặn asset_id dạng này ("nội dung này hiện không khả dụng").
