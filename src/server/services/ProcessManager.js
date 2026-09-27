@@ -532,15 +532,21 @@ class ProcessManager {
       this.unhideWindow(safeAccountId);
       if (entry?.browser?.connected) {
         // Đã có tab business cho page này -> kích hoạt lại, không mở trùng.
+        // Tab đã fallback sang /messages/t/<page_id>/ cũng được nhận diện.
         const openPages = await entry.browser.pages();
-        const existing = openPages.find((p) => String(p.url() || '').includes(`asset_id=${safePageId}`));
+        const existing = openPages.find((p) => {
+          const u = String(p.url() || '');
+          return u.includes(`asset_id=${safePageId}`) || u.includes(`/messages/t/${safePageId}`);
+        });
         if (existing) {
           await existing.bringToFront().catch(() => {});
+          await this.fallbackIfBusinessInboxBlocked(existing, safePageId);
           console.log(`[ProcessManager] Tab Business Suite cho Page ${safePageId} đã tồn tại - kích hoạt lại.`);
           return true;
         }
         const bizPage = await entry.browser.newPage();
-        await bizPage.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await bizPage.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await this.fallbackIfBusinessInboxBlocked(bizPage, safePageId);
         console.log(`[ProcessManager] Đã mở tab Business Suite cho Page ${safePageId} trong Chrome account ${safeAccountId}.`);
         return true;
       }
@@ -560,6 +566,28 @@ class ProcessManager {
     } finally {
       release();
     }
+  }
+
+  // Business Suite chặn inbox khi tài khoản không đủ quyền trên Page hoặc
+  // page_id giả lọt qua discovery: trang hiện "Rất tiếc, nội dung này hiện
+  // không khả dụng". Phát hiện rồi chuyển tab sang inbox Page qua Messenger
+  // (extension quan sát cả www.facebook.com) để tab không chết trắng.
+  async fallbackIfBusinessInboxBlocked(page, pageId) {
+    const errorPattern = /nội dung này hiện không khả dụng|content isn'?t available|content is unavailable|no longer available/i;
+    for (const delay of [2500, 1500]) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      try {
+        const bodyText = await page.evaluate(() => (document.body ? document.body.innerText : ''));
+        if (errorPattern.test(bodyText)) {
+          await page.goto(`https://www.facebook.com/messages/t/${String(pageId)}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          console.log(`[ProcessManager] Page ${pageId}: Business Suite inbox bị chặn -> fallback /messages/t/.`);
+          return true;
+        }
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
   }
 
   // DEPRECATED (2026-09-19): trước đây mỗi Page có Chrome riêng (profile

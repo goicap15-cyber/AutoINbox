@@ -12,8 +12,15 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  // Danh sách các chuỗi tĩnh generic cần loại bỏ khi bóc tách tên Page (chỉ loại bỏ nếu toàn bộ tên là từ khóa generic)
-  const GENERIC_EXCLUDE_REGEX = /^(?:facebook|messenger|trang|page|trang cá nhân|profile|hộp thư|inbox|bảng tin|feed|thông báo|notifications|cài đặt|settings|xem tất cả|see all|quản lý|manage)$/i;
+  // Danh sách các chuỗi tĩnh generic cần loại bỏ khi bóc tách tên Page (chỉ loại bỏ nếu toàn bộ tên là từ khóa generic).
+  // Bao gồm cả tiêu đề mục trong UI Facebook ("Quản lý trang", "Trang của bạn"...) - trước đây
+  // các tiêu đề này bị quét nhầm thành 1 Page có ID 13 số, mở tab Business Suite thì
+  // Facebook trả "Rất tiếc, nội dung này hiện không khả dụng".
+  const GENERIC_EXCLUDE_REGEX = /^(?:facebook|messenger|trang|page|trang cá nhân|profile|hộp thư|inbox|bảng tin|feed|thông báo|notifications|cài đặt|settings|xem tất cả|see all|quản lý|manage|quản lý trang|trang của bạn|trang bạn quản lý|trang của tôi|tất cả trang|your pages|pages you manage|manage pages|my pages)$/i;
+
+  // Page ID thật của Facebook luôn >= 14 chữ số (dạng legacy 15-16 số, dạng mới 6156... 14 số).
+  // ID ngắn hơn là element UI/tiêu đề bị trích xuất nhầm, không được nhận làm Page.
+  const PAGE_ID_REGEX = /\d{14,}/;
 
   /**
    * Decode ký tự escape Unicode trong Facebook JSON/HTML (ví dụ \u003C -> <, \u0026 -> &)
@@ -104,7 +111,7 @@
       const dp = node.delegate_page;
       const dpId = String(dp.id || '');
       const dpName = cleanPageName(dp.name || node.name);
-      if (dpId && dpName && /^\d{5,}$/.test(dpId) && (!safeAccountId || dpId !== safeAccountId)) {
+      if (dpId && dpName && PAGE_ID_REGEX.test(dpId) && (!safeAccountId || dpId !== safeAccountId)) {
         let avatar = dp.profile_picture?.uri || `https://graph.facebook.com/${dpId}/picture?type=normal`;
         if (!foundPagesMap.has(dpId)) {
           foundPagesMap.set(dpId, {
@@ -120,7 +127,7 @@
       // 2. Kiểm tra cấu trúc Page trực tiếp (chỉ khi KHÔNG PHẢI tài khoản cá nhân User/Actor)
       const isUserType = node.__typename === 'User' || node.__typename === 'CometUser' || node.__typename === 'Actor';
       const isPageType = node.__typename === 'Page' || node.__typename === 'CometPage';
-      const hasPageFields = !isUserType && node.id && (node.name || node.name_or_vanity) && /^\d{5,}$/.test(String(node.id));
+      const hasPageFields = !isUserType && node.id && (node.name || node.name_or_vanity) && PAGE_ID_REGEX.test(String(node.id));
 
       if ((isPageType || hasPageFields) && node.name) {
         const pageId = String(node.id || '');
@@ -213,7 +220,7 @@
       const jsonBlobRegex = /"__typename"\s*:\s*"Page"|"delegate_page"\s*:\s*\{/g;
       if (jsonBlobRegex.test(scriptContent)) {
         // Ưu tiên regex tìm delegate_page
-        const dpRegex = /"delegate_page"\s*:\s*\{[^{}]*?"id"\s*:\s*"(\d{5,})"[^{}]*?"name"\s*:\s*"([^"]+)"/g;
+        const dpRegex = /"delegate_page"\s*:\s*\{[^{}]*?"id"\s*:\s*"(\d{14,})"[^{}]*?"name"\s*:\s*"([^"]+)"/g;
         let dpMatch;
         while ((dpMatch = dpRegex.exec(scriptContent)) !== null) {
           const rawId = dpMatch[1];
@@ -230,7 +237,7 @@
         }
 
         // Regex tìm object Page thông thường (chỉ match khi có __typename Page để tránh nhặt User)
-        const pageItemRegex = /\{[^{}]*?"id"\s*:\s*"(\d{5,})"[^{}]*?"name"\s*:\s*"([^"]+)"[^{}]*?"__typename"\s*:\s*"(?:Page|CometPage)"[^{}]*?\}/g;
+        const pageItemRegex = /\{[^{}]*?"id"\s*:\s*"(\d{14,})"[^{}]*?"name"\s*:\s*"([^"]+)"[^{}]*?"__typename"\s*:\s*"(?:Page|CometPage)"[^{}]*?\}/g;
         let itemMatch;
         while ((itemMatch = pageItemRegex.exec(scriptContent)) !== null) {
           const rawId = itemMatch[1];
@@ -251,7 +258,7 @@
     // 2. Fallback: Quét Regex toàn bộ nội dung HTML cho các pattern phổ biến của Facebook Launchpoint
     if (foundPagesMap.size === 0) {
       // Pattern 1: {"page_id":"123","page_name":"XYZ"}
-      const launchpointRegex = /"page_id"\s*:\s*"(\d{5,})"[^}]*?"(?:page_)?name"\s*:\s*"([^"]+)"/g;
+      const launchpointRegex = /"page_id"\s*:\s*"(\d{14,})"[^}]*?"(?:page_)?name"\s*:\s*"([^"]+)"/g;
       let lpMatch;
       while ((lpMatch = launchpointRegex.exec(html)) !== null) {
         const id = lpMatch[1];
@@ -267,7 +274,7 @@
       }
 
       // Pattern 2: "id":"123","name":"XYZ","__typename":"Page"
-      const typePageRegex = /"id"\s*:\s*"(\d{5,})"[^}]*?"name"\s*:\s*"([^"]+)"[^}]*?"__typename"\s*:\s*"(?:Page|CometPage)"/g;
+      const typePageRegex = /"id"\s*:\s*"(\d{14,})"[^}]*?"name"\s*:\s*"([^"]+)"[^}]*?"__typename"\s*:\s*"(?:Page|CometPage)"/g;
       let tpMatch;
       while ((tpMatch = typePageRegex.exec(html)) !== null) {
         const id = tpMatch[1];

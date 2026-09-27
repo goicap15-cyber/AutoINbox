@@ -3552,7 +3552,12 @@ wss.on('connection', (ws, req) => {
             });
             if (hasRecentIncomingHistory) {
               const historyManualState = db.prepare('SELECT unread_manual FROM threads WHERE id = ?').get(thread_id);
-              if (Number(historyManualState?.unread_manual || 0) !== 1) {
+              // Chỉ gắn chưa đọc khi user CHƯA từng đọc tay (manual = 0).
+              // manual = -1 nghĩa là user vừa mở/đánh dấu đã đọc: history sync
+              // chèn chính tin khách mà user đang đọc, nếu gắn lại is_unread
+              // thì hội thoại đã đọc lại nhảy lên đầu đánh dấu chưa đọc sau
+              // mỗi lần reload. manual = 1 thì cờ dính tin mới đã bật rồi.
+              if (Number(historyManualState?.unread_manual || 0) === 0) {
                 db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 0 WHERE id = ?').run(thread_id);
                 io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(thread_id), is_unread: 1 });
               }
@@ -5001,11 +5006,35 @@ app.post('/api/accounts/:id/background', async (req, res) => {
 // ────────────────────────────────────────────────
 // Fanpage Auto-Discovery & Batch-Open Endpoints
 // ────────────────────────────────────────────────
+// Đồng bộ với GENERIC_EXCLUDE_REGEX trong src/extension/pageDiscovery.js:
+// các chuỗi này là tiêu đề UI Facebook, không phải tên Page thật.
+const GENERIC_PAGE_NAME_REGEX = /^(?:facebook|messenger|trang|page|trang cá nhân|profile|hộp thư|inbox|bảng tin|feed|thông báo|notifications|cài đặt|settings|xem tất cả|see all|quản lý|manage|quản lý trang|trang của bạn|trang bạn quản lý|trang của tôi|tất cả trang|your pages|pages you manage|manage pages|my pages)$/i;
+
+function isGenericPageName(name) {
+  if (!name || typeof name !== 'string') return false;
+  const trimmed = name.trim();
+  if (GENERIC_PAGE_NAME_REGEX.test(trimmed)) return true;
+  if (/^page \d+$/i.test(trimmed)) return true;
+  return false;
+}
+
 app.get('/api/accounts/:id/pages', (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
     return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
   }
   const accountId = String(req.params.id);
+  // Tự dọn source rác đã lỡ tạo từ đợt quét buggy cũ: tên là tiêu đề UI
+  // Facebook ("Quản lý trang") hoặc placeholder ("Page 123...") - mở tab
+  // Business Suite cho chúng luôn bị chặn "nội dung không khả dụng".
+  const junkSources = db.prepare(`
+    SELECT id, display_name FROM inbox_sources
+    WHERE source_type = 'page_messenger' AND owner_account_id = ?
+  `).all(accountId).filter((s) => isGenericPageName(s.display_name));
+  if (junkSources.length > 0) {
+    const deleteSource = db.prepare('DELETE FROM inbox_sources WHERE id = ?');
+    for (const junk of junkSources) deleteSource.run(junk.id);
+    console.log(`[Pages] Đã dọn ${junkSources.length} source page rác của account ${accountId}: ${junkSources.map((j) => j.display_name).join(', ')}`);
+  }
   const cached = discoveredPagesByAccount.get(accountId);
   // Loại bỏ tài khoản cá nhân ra khỏi danh sách quét được
   const rawPages = (cached?.pages || []).filter(p => String(p.page_id) !== accountId);
@@ -5015,7 +5044,7 @@ app.get('/api/accounts/:id/pages', (req, res) => {
     SELECT external_id, display_name, avatar_url, status
     FROM inbox_sources
     WHERE source_type = 'page_messenger' AND owner_account_id = ? AND status = 'ACTIVE'
-  `).all(accountId).filter(s => String(s.external_id) !== accountId);
+  `).all(accountId).filter(s => String(s.external_id) !== accountId && !isGenericPageName(s.display_name));
 
   const activeById = new Map();
   const activeByName = new Map();
@@ -5143,6 +5172,16 @@ app.post('/api/accounts/:id/pages/batch-open', async (req, res) => {
   for (const rawPageId of pageIds) {
     try {
       const pageInfo = cachedPageMap.get(rawPageId);
+
+      // Tên quét được là tiêu đề UI Facebook ("Quản lý trang"...) -> ID giả,
+      // mở tab Business Suite luôn bị chặn. Bỏ qua luôn, không tạo source.
+      // Chỉ chặn khi có pageInfo thật (cache rỗng sau restart thì vẫn mở bình thường).
+      if (pageInfo?.name && isGenericPageName(pageInfo.name)) {
+        console.log(`[BatchOpen] Bỏ qua Page giả "${pageInfo.name}" (${rawPageId}).`);
+        errors.push(`Đã bỏ qua "${pageInfo.name}" - không phải Fanpage thật.`);
+        continue;
+      }
+
       const pageName = pageInfo?.name || ('Page ' + rawPageId);
       const norm = pageName.trim().toLowerCase();
 

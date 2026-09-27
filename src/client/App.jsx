@@ -559,9 +559,9 @@ export default function App() {
   const handleToggleThreadPinned = useCallback(async (thread, nextPinned) => {
     const threadId = String(thread?.id || '');
     if (!threadId) return;
-    setThreads((prev) => prev.map((t) => (String(t.id) === threadId
+    setThreads((prev) => sortThreadsByActivity(prev.map((t) => (String(t.id) === threadId
       ? { ...t, pinned: nextPinned ? 1 : 0 }
-      : t)));
+      : t))));
     try {
       const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/pin', {
         method: 'POST',
@@ -578,9 +578,9 @@ export default function App() {
   const handleToggleThreadUnread = useCallback(async (thread, nextUnread) => {
     const threadId = String(thread?.id || '');
     if (!threadId) return;
-    setThreads((prev) => prev.map((t) => (String(t.id) === threadId
+    setThreads((prev) => sortThreadsByActivity(prev.map((t) => (String(t.id) === threadId
       ? { ...t, is_unread: nextUnread ? 1 : 0, unread_manual: nextUnread ? 1 : -1 }
-      : t)));
+      : t))));
     try {
       const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/unread', {
         method: 'POST',
@@ -1416,9 +1416,11 @@ export default function App() {
       // Thread đang mở trong CRM thì không nhảy sang chưa đọc (người dùng
       // đang nhìn nó rồi); server-side sync sẽ tự hiệu chỉnh về sau.
       if (next && String(activeThreadIdRef.current) === tid) return;
-      setThreads((prev) => prev.map((t) => (String(t.id) === tid
+      // Sort lại ngay: tin mới -> thread nhảy lên đầu nhóm chưa đọc,
+      // đánh dấu đã đọc -> thread tụt về vị trí theo last_activity như Messenger.
+      setThreads((prev) => sortThreadsByActivity(prev.map((t) => (String(t.id) === tid
         ? { ...t, is_unread: next ? 1 : 0, unread_manual: next ? 1 : -1 }
-        : t)));
+        : t))));
     });
     socket.on('THREAD_COMPLETED', () => loadThreadsRef.current());
     socket.on('INBOX_SOURCE_ADDED', () => { loadInboxSources(); loadThreadsRef.current(); });
