@@ -156,7 +156,11 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       }
       onSourcesChanged?.();
       await loadPages();
-      setSuccessMsg(`Đã mở thành công ${data.opened_count} Fanpage trong Chrome và tích hợp vào CRM!`);
+      let msg = `Đã mở thành công ${data.opened_count} Fanpage trong Chrome và tích hợp vào CRM!`;
+      if (Array.isArray(data.errors) && data.errors.length > 0) {
+        msg += ` (${data.errors.length} page bị bỏ qua: ${data.errors.slice(0, 2).join(' | ')}${data.errors.length > 2 ? '...' : ''})`;
+      }
+      setSuccessMsg(msg);
       setTimeout(() => {
         onClose();
       }, 1500);

@@ -22,6 +22,11 @@
   // ID ngắn hơn là element UI/tiêu đề bị trích xuất nhầm, không được nhận làm Page.
   const PAGE_ID_REGEX = /\d{14,}/;
 
+  // ID profile/delegate mới (14 chữ số đầu 6155-6159) không phải ID page thật:
+  // Business Suite chặn asset_id dạng này ("nội dung này hiện không khả dụng").
+  // Loại khỏi discovery để không tạo source/link sai.
+  const SUSPICIOUS_PAGE_ID_REGEX = /^615[5-9]\d{11}$/;
+
   /**
    * Decode ký tự escape Unicode trong Facebook JSON/HTML (ví dụ \u003C -> <, \u0026 -> &)
    */
@@ -71,6 +76,8 @@
     const byName = new Map();
     for (const p of pages) {
       if (!p || !p.page_id) continue;
+      // ID profile/delegate 6155xxx-6159xxx không phải page thật -> loại luôn.
+      if (SUSPICIOUS_PAGE_ID_REGEX.test(String(p.page_id))) continue;
       const norm = (p.name || '').trim().toLowerCase();
       if (!norm) continue;
       if (!byName.has(norm)) {

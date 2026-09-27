@@ -162,6 +162,13 @@ class InboxSourceService {
    */
   static ensurePageSource({ pageId, accountId, threadId, canonicalThreadId, pageName }, database = getDb()) {
     if (!pageId) return null;
+    // ID profile/delegate mới (14 chữ số đầu 6155-6159) không phải ID page thật:
+    // Business Suite chặn asset_id này ("nội dung không khả dụng") và tab
+    // fallback /messages/t/<id> cũng không mở được inbox. Không tạo source.
+    if (/^615[5-9]\d{11}$/.test(String(pageId))) {
+      console.warn(`[PAGE_SOURCE] Bỏ qua ID profile/delegate ${pageId} - không tạo source page.`);
+      return null;
+    }
     const sourceId = 'src_page_' + pageId;
     const targetThreadId = threadId || canonicalThreadId;
 

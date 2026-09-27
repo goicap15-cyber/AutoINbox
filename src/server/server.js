@@ -3717,6 +3717,12 @@ wss.on('connection', (ws, req) => {
           const pageId = String(msg.data?.page_id || '');
           const accountId = String(ws.accountId || msg.data?.account_id || '');
           const pageName = msg.data?.page_name ? String(msg.data.page_name).trim() : null;
+          // Tab fallback /messages/t/<id-giả> (ID profile/delegate 6155xxx-6159xxx)
+          // cũng bắn READY - chặn để không tái tạo source page rác.
+          if (isSuspiciousPageId(pageId)) {
+            console.warn(`[PageSync] Bỏ qua PAGE_EXTENSION_READY với ID profile/delegate ${pageId} (account=${accountId}).`);
+            break;
+          }
           if (pageId && pageName) {
             InboxSourceService.updatePageDisplayName({ pageId, pageName }, db);
           }
@@ -3765,8 +3771,13 @@ wss.on('connection', (ws, req) => {
           const pages = Array.isArray(msg.data?.pages) ? msg.data.pages : [];
           if (!accountId) break;
 
-          // Lọc bỏ tài khoản cá nhân
-          const filteredPages = pages.filter(p => String(p.page_id) !== accountId);
+          // Lọc bỏ tài khoản cá nhân + ID profile/delegate 6155xxx-6159xxx +
+          // profile trùng tên chủ account (mở Business Suite bị chặn ngay).
+          const accountName = getAccountName(accountId);
+          const filteredPages = pages.filter(p => String(p.page_id) !== accountId
+            && !isGenericPageName(p?.name)
+            && !isSuspiciousPageId(p?.page_id)
+            && !isOwnerSelfSourceName(p?.name, accountName));
 
           console.log(`[WS] 📄 Nhận ACCOUNT_PAGES_DISCOVERED cho account=${accountId}, số trang=${filteredPages.length}`);
           discoveredPagesByAccount.set(accountId, {
@@ -5018,18 +5029,49 @@ function isGenericPageName(name) {
   return false;
 }
 
+// ID profile/delegate mới của Facebook có 14 chữ số bắt đầu 6155-6159
+// (vd 61564781823946). Business Suite chặn asset_id dạng này với lỗi
+// "nội dung này hiện không khả dụng" - chỉ ID page thật (15-16 chữ số
+// legacy) mới mở được inbox.
+const SUSPICIOUS_PAGE_ID_REGEX = /^615[5-9]\d{11}$/;
+
+function isSuspiciousPageId(id) {
+  return SUSPICIOUS_PAGE_ID_REGEX.test(String(id || '').trim());
+}
+
+// Tên page trùng khớp tên chủ tài khoản (khác ID account) = profile cá nhân
+// khác của chủ bị quét nhầm thành page.
+function isOwnerSelfSourceName(name, accountName) {
+  const n = (name || '').trim().toLowerCase();
+  const a = (accountName || '').trim().toLowerCase();
+  return !!n && !!a && n === a;
+}
+
+function getAccountName(accountId) {
+  try {
+    return db.prepare('SELECT name FROM accounts WHERE id = ?').get(String(accountId))?.name || '';
+  } catch (_) {
+    return '';
+  }
+}
+
 app.get('/api/accounts/:id/pages', (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
     return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
   }
   const accountId = String(req.params.id);
+  const accountName = getAccountName(accountId);
   // Tự dọn source rác đã lỡ tạo từ đợt quét buggy cũ: tên là tiêu đề UI
   // Facebook ("Quản lý trang") hoặc placeholder ("Page 123...") - mở tab
   // Business Suite cho chúng luôn bị chặn "nội dung không khả dụng".
+  // Tương tự với ID profile/delegate 6155xxx-6159xxx (14 chữ số) và profile
+  // cá nhân trùng tên chủ account.
   const junkSources = db.prepare(`
-    SELECT id, display_name FROM inbox_sources
+    SELECT id, external_id, display_name FROM inbox_sources
     WHERE source_type = 'page_messenger' AND owner_account_id = ?
-  `).all(accountId).filter((s) => isGenericPageName(s.display_name));
+  `).all(accountId).filter((s) => isGenericPageName(s.display_name)
+    || isSuspiciousPageId(s.external_id)
+    || isOwnerSelfSourceName(s.display_name, accountName));
   if (junkSources.length > 0) {
     const deleteSource = db.prepare('DELETE FROM inbox_sources WHERE id = ?');
     for (const junk of junkSources) deleteSource.run(junk.id);
@@ -5037,14 +5079,21 @@ app.get('/api/accounts/:id/pages', (req, res) => {
   }
   const cached = discoveredPagesByAccount.get(accountId);
   // Loại bỏ tài khoản cá nhân ra khỏi danh sách quét được
-  const rawPages = (cached?.pages || []).filter(p => String(p.page_id) !== accountId);
+  // + lọc luôn entry ID profile/delegate 6155xxx-6159xxx và profile trùng tên chủ
+  const rawPages = (cached?.pages || []).filter(p => String(p.page_id) !== accountId
+    && !isGenericPageName(p.name)
+    && !isSuspiciousPageId(p.page_id)
+    && !isOwnerSelfSourceName(p.name, accountName));
 
   // Lấy các source Page đã ACTIVE của account này trong database (bỏ qua personal profile)
   const activeSources = db.prepare(`
     SELECT external_id, display_name, avatar_url, status
     FROM inbox_sources
     WHERE source_type = 'page_messenger' AND owner_account_id = ? AND status = 'ACTIVE'
-  `).all(accountId).filter(s => String(s.external_id) !== accountId && !isGenericPageName(s.display_name));
+  `).all(accountId).filter(s => String(s.external_id) !== accountId
+    && !isGenericPageName(s.display_name)
+    && !isSuspiciousPageId(s.external_id)
+    && !isOwnerSelfSourceName(s.display_name, accountName));
 
   const activeById = new Map();
   const activeByName = new Map();
@@ -5149,16 +5198,20 @@ app.post('/api/accounts/:id/pages/batch-open', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Vui lòng chọn ít nhất 1 Page để mở.' });
   }
 
+  const accountName = getAccountName(accountId);
+
   const cached = discoveredPagesByAccount.get(accountId);
   const cachedPages = cached?.pages || [];
   const cachedPageMap = new Map(cachedPages.map(p => [String(p.page_id), p]));
 
   // Lấy các source hiện tại để kiểm tra trùng tên trước khi tạo mới (tránh tạo 2 source kép cho 1 Page)
+  // Bỏ qua source rác (ID profile/delegate, tên trùng chủ account) khỏi map trùng tên
+  // để không bao giờ map 1 Page thật vào external_id giả.
   const existingSources = db.prepare(`
     SELECT id, external_id, display_name
     FROM inbox_sources
     WHERE source_type = 'page_messenger' AND owner_account_id = ?
-  `).all(accountId);
+  `).all(accountId).filter((s) => !isSuspiciousPageId(s.external_id) && !isOwnerSelfSourceName(s.display_name, accountName));
 
   const existingByName = new Map();
   for (const s of existingSources) {
@@ -5173,10 +5226,18 @@ app.post('/api/accounts/:id/pages/batch-open', async (req, res) => {
     try {
       const pageInfo = cachedPageMap.get(rawPageId);
 
+      // ID profile/delegate 6155xxx-6159xxx (14 chữ số): Business Suite luôn
+      // chặn với "nội dung không khả dụng" -> không mở, không tạo source.
+      if (isSuspiciousPageId(rawPageId)) {
+        console.log(`[BatchOpen] Bỏ qua ID profile/delegate ${rawPageId} (không phải ID page thật).`);
+        errors.push(`Đã bỏ qua ID ${rawPageId} - không phải Fanpage thật.`);
+        continue;
+      }
+
       // Tên quét được là tiêu đề UI Facebook ("Quản lý trang"...) -> ID giả,
       // mở tab Business Suite luôn bị chặn. Bỏ qua luôn, không tạo source.
       // Chỉ chặn khi có pageInfo thật (cache rỗng sau restart thì vẫn mở bình thường).
-      if (pageInfo?.name && isGenericPageName(pageInfo.name)) {
+      if (pageInfo?.name && (isGenericPageName(pageInfo.name) || isOwnerSelfSourceName(pageInfo.name, accountName))) {
         console.log(`[BatchOpen] Bỏ qua Page giả "${pageInfo.name}" (${rawPageId}).`);
         errors.push(`Đã bỏ qua "${pageInfo.name}" - không phải Fanpage thật.`);
         continue;
@@ -5222,6 +5283,7 @@ app.post('/api/accounts/:id/pages/batch-open', async (req, res) => {
     success: openedPages.length > 0,
     opened_count: openedPages.length,
     opened_page_ids: openedPages,
+    error: openedPages.length === 0 && errors.length > 0 ? errors.join('; ') : undefined,
     errors: errors.length > 0 ? errors : undefined
   });
 });
