@@ -3791,8 +3791,8 @@ wss.on('connection', (ws, req) => {
             // Debug file: payload quet thuc te tu extension (raw + sau loc) -
             // dung truy vet page thieu / sai ID ma khong phai doan mo
             const dump = (tag, list) => JSON.stringify({ at: new Date().toISOString(), tag, account_id: accountId, count: list.length, pages: list.map(p => ({ id: String(p?.page_id || ''), name: String(p?.name || '').slice(0, 90) })) });
-            fs.appendFileSync(path.join(APP_DATA_ROOT, 'logs', 'discovery-debug.log'), dump('raw', pages) + '\n');
-            fs.appendFileSync(path.join(APP_DATA_ROOT, 'logs', 'discovery-debug.log'), dump('filtered', filteredPages) + '\n');
+            fs.appendFileSync(path.join(APP_DATA_ROOT, 'discovery-debug.log'), dump('raw', pages) + '\n');
+            fs.appendFileSync(path.join(APP_DATA_ROOT, 'discovery-debug.log'), dump('filtered', filteredPages) + '\n');
           } catch (_) {}
           discoveredPagesByAccount.set(accountId, {
             pages: filteredPages,
@@ -5222,7 +5222,7 @@ app.get('/api/accounts/:id/pages', (req, res) => {
 
   const pages = Array.from(combinedByName.values());
   try {
-    fs.appendFileSync(path.join(APP_DATA_ROOT, 'logs', 'discovery-debug.log'), JSON.stringify({ at: new Date().toISOString(), tag: 'GET_PAGES', account_id: accountId, count: pages.length, pages: pages.map(p => ({ id: String(p.page_id), name: String(p.name || '').slice(0, 90), conn: !!p.is_connected })) }) + '\n');
+    fs.appendFileSync(path.join(APP_DATA_ROOT, 'discovery-debug.log'), JSON.stringify({ at: new Date().toISOString(), tag: 'GET_PAGES', account_id: accountId, count: pages.length, pages: pages.map(p => ({ id: String(p.page_id), name: String(p.name || '').slice(0, 90), conn: !!p.is_connected })) }) + '\n');
   } catch (_) {}
   res.json({
     success: true,
