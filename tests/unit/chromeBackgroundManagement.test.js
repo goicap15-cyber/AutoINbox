@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const processManagerModule = require('../../src/server/services/ProcessManager');
-const { ProcessManager, hideFromTaskbar } = processManagerModule;
+const { ProcessManager } = processManagerModule;
 
 function createManager() {
   // Use `new ProcessManager()` to get a fully initialized instance
@@ -185,19 +185,6 @@ test('ProcessManager: stopAccountProcess supersedes any pending display operatio
   const res1 = await p1;
   assert.equal(res1.success, false);
   assert.equal(res1.error, 'OPERATION_SUPERSEDED');
-});
-
-test('ProcessManager: hideFromTaskbar on non-win32 returns safe object without TypeError', async () => {
-  const origPlatform = process.platform;
-  try {
-    Object.defineProperty(process, 'platform', { value: 'linux' });
-    const res = await hideFromTaskbar(12345);
-    assert.equal(typeof res, 'object');
-    assert.equal(res.success, true);
-    assert.equal(res.platform, 'linux');
-  } finally {
-    Object.defineProperty(process, 'platform', { value: origPlatform });
-  }
 });
 
 test('REGISTER_ACCOUNT auto-hide flow emits ACCOUNT_DISPLAY_CHANGED', async () => {

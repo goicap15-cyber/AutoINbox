@@ -54,82 +54,10 @@ function getPuppeteer() {
   return puppeteerPromise;
 }
 
-// Ẩn cửa sổ Chrome khỏi màn hình và taskbar Windows bằng Win32 API
-function hideFromTaskbar(pid, profileDir = '', delayMs = 2500, keepWindowOnScreen = false) {
-  if (process.platform !== 'win32') return Promise.resolve({ success: true, platform: process.platform });
-  const psScript = `
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public class WinHelper {
-  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n);
-  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
-  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
-}
-
-'@ -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds ${delayMs}
-
-$targetPids = @()
-if (${pid || 0}) {
-  $targetPids += ${pid}
-  $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = ${pid}" -ErrorAction SilentlyContinue
-  if ($children) { foreach ($c in $children) { $targetPids += $c.ProcessId } }
-}
-
-$profile = '${String(profileDir || '').replace(/'/g, "''").replace(/\\/g, '/')}'
-if ($profile) {
-  $profileProcs = Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue | Where-Object { ($_.CommandLine -replace '\\','/') -like "*$profile*" }
-  if ($profileProcs) { foreach ($c in $profileProcs) { $targetPids += $c.ProcessId } }
-}
-
-# Retry: window co the mount cham hon thoi diem quet - quet lai den khi bat
-# duoc moi thoi (truoc day quet 1 lan, truot la hien tuong "an luc duoc luc khong")
-$processedTotal = 0
-for ($attempt = 0; $attempt -lt 16; $attempt++) {
-  $allChrome = Get-Process -Name 'chrome' -ErrorAction SilentlyContinue
-  $processedCount = 0
-  foreach ($p in $allChrome) {
-    if ($targetPids.Count -eq 0 -or $targetPids -contains $p.Id) {
-      if ($p.MainWindowHandle -ne 0) {
-        $hwnd = $p.MainWindowHandle
-        $ex = [WinHelper]::GetWindowLong($hwnd, -20)
-        $ex = ($ex -band -bnot 0x00040000) -bor 0x00000080
-        [WinHelper]::SetWindowLong($hwnd, -20, $ex) | Out-Null
-        # Keep Chrome's top-level window shown so Chromium continues rendering
-        # Messenger DOM in background tabs. SW_HIDE made document visibility
-        # hidden and caused request/history scrapes to return partial results.
-        [WinHelper]::ShowWindow($hwnd, 4) | Out-Null
-        ${keepWindowOnScreen ? '' : '[WinHelper]::SetWindowPos($hwnd, [IntPtr]::Zero, -32000, -32000, 0, 0, 0x0015) | Out-Null'}
-        $processedCount++
-      }
-    }
-  }
-  if ($processedCount -gt 0) { break }
-  Start-Sleep -Milliseconds 500
-}
-if ($processedTotal -eq 0 -and $processedCount -eq 0) {
-  [Console]::Error.WriteLine("NO_WINDOW_FOUND")
-  exit 1
-}
-`;
-  const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
-  return new Promise((resolve) => {
-    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], (err, stdout, stderr) => {
-      if (err) {
-        const errorMsg = String(stderr || err.message || 'NO_WINDOW_FOUND').trim();
-        console.error('[ProcessManager] Lỗi ẩn Chrome khỏi màn hình/taskbar:', errorMsg);
-        resolve({ success: false, error: errorMsg });
-      } else {
-        resolve({ success: true });
-      }
-    });
-  });
-}
-
-// Keep Chrome as a normal taskbar application while minimizing its window.
-// This is the two-minute sync presentation mode, distinct from BACKGROUND.
+// Thu nhỏ window Chrome xuống taskbar bằng cách minimize bình thường:
+// nút taskbar vẫn hiện và BẤM ĐƯỢC để khôi phục, Chrome không bị đóng nên
+// extension vẫn đồng bộ ngầm. Tuyệt đối không dùng chiêuWS_EX_TOOLWINDOW +
+// SetWindowPos(-32000) nữa — nó sinh ra các nút taskbar "ma" không bấm được.
 function minimizeToTaskbar(pid, profileDir = '') {
   if (process.platform !== 'win32') return;
   const profile = String(profileDir || '').replace(/'/g, "''").replace(/\\/g, '/');
@@ -343,7 +271,7 @@ class ProcessManager {
     const timer = setTimeout(() => {
       const current = this.processes.get(accountId);
       if (current?.pid === pid && current.displayMode === 'BACKGROUND') {
-        hideFromTaskbar(pid, current.profileDir, 0);
+        minimizeToTaskbar(pid, current.profileDir);
       }
       const remaining = (this.hideTimers.get(key) || []).filter((item) => item !== timer);
       if (remaining.length) this.hideTimers.set(key, remaining);
@@ -797,12 +725,12 @@ class ProcessManager {
         this.processes.delete(accId);
         return { success: false, error: 'CHROME_PROCESS_DEAD' };
       }
-      const result = await hideFromTaskbar(currentProc.pid, currentProc.profileDir, 0, false);
-      if (result?.success && this.displayOpTokens.get(accId) === opToken) {
+      minimizeToTaskbar(currentProc.pid, currentProc.profileDir);
+      if (this.displayOpTokens.get(accId) === opToken) {
         currentProc.displayMode = 'BACKGROUND';
-        console.log(`[ProcessManager] Tự động ẩn Chrome của account ${accId} khỏi Taskbar.`);
+        console.log(`[ProcessManager] Đã thu nhỏ Chrome của account ${accId} xuống taskbar (vẫn chạy ngầm).`);
       }
-      return result;
+      return { success: true };
     });
   }
 
@@ -1050,16 +978,6 @@ if ($processedCount -eq 0) {
     return procInfo.status || 'STOPPED';
   }
 
-  hideAccountFromTaskbarForSync(accountId) {
-    const procInfo = this.processes.get(accountId);
-    if (!procInfo?.pid) return false;
-    this.cancelScheduledHides(accountId);
-    procInfo.displayMode = 'VISIBLE';
-    hideFromTaskbar(procInfo.pid, procInfo.profileDir, 0, true);
-    console.log(`[ProcessManager] Chrome account ${accountId} remains visible for sync but is removed from taskbar.`);
-    return true;
-  }
-
   minimizeAccountForSync(accountId) {
     const procInfo = this.processes.get(accountId);
     if (!procInfo?.pid) return false;
@@ -1156,4 +1074,3 @@ foreach ($proc in $roots) {
 
 module.exports = new ProcessManager();
 module.exports.ProcessManager = ProcessManager;
-module.exports.hideFromTaskbar = hideFromTaskbar;
