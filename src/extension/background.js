@@ -218,14 +218,32 @@ function runPersonalHistorySerialized(accountId, operation, isPriority = false) 
 // Messenger remounts its virtualized tree. Release the serialized history lane
 // after a bounded wait and invalidate the old navigation token so realtime
 // customer replies are not trapped behind it for one or two minutes.
+const pageBatchSeenAt = new Map(); // thread_id -> last PAGE_THREAD_MESSAGES_SYNCED_V1 relay time
 function runPersonalHistoryWithDeadline(historyKey, data, operation) {
   const mode = String(data?.mode || 'initial');
-  const timeoutMs = mode === 'older' ? 30000 : 18000;
+  // 2026-09-29: page scans took 20-40s per thread (background tabs render
+  // throttled), so the 18s deadline fired mid-scan and reported successful
+  // syncs as extension_history_timeout - the SW console caught a batch
+  // committing AFTER its own deadline had already failed it. Tab activation
+  // shrinks the cycle; keep the deadline above the real one - it releases
+  // the lane, it must not cut a working scan. The server's 120s timeout
+  // still bounds genuinely stuck operations.
+  const timeoutMs = mode === 'older' ? 60000 : 45000;
+  const startedAt = Date.now();
   let timeout = null;
   const timedOperation = Promise.resolve().then(operation);
   const deadline = new Promise((resolve) => {
     timeout = setTimeout(() => {
       beginPersonalNavigation(historyKey);
+      const batchAt = data?.thread_id ? pageBatchSeenAt.get(String(data.thread_id)) || 0 : 0;
+      if (batchAt > startedAt) {
+        // 2026-09-29: batches for THIS thread arrived while we waited - the
+        // scan is alive and delivering. Reporting a failure here marked
+        // successful syncs as FAILED and triggered duplicate rescans.
+        console.log(`[FB Engine] [HISTORY] Deadline reached but batches are flowing for thread=${data?.thread_id} - not reporting failure`);
+        resolve({ timed_out: true });
+        return;
+      }
       sendToBackend('THREAD_MESSAGES_SYNCED', {
         account_id: data?.account_id || user_id,
         thread_id: data?.thread_id,
@@ -2030,6 +2048,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'PAGE_THREAD_MESSAGES_SYNCED_V1') {
     const msgData = message.data || {};
+    if (msgData.thread_id) {
+      pageBatchSeenAt.set(String(msgData.thread_id), Date.now());
+      if (pageBatchSeenAt.size > 500) pageBatchSeenAt.clear();
+    }
     sendToBackend('PAGE_THREAD_MESSAGES_SYNCED_V1', {
       ...msgData,
       account_id: user_id || msgData.account_id,
@@ -6401,6 +6423,19 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
       manualHistoryTabOwners.delete(tab.id);
     }
   };
+  // 2026-09-29: Focus the page's Business Suite tab before scanning. Chrome
+  // throttles rendering of background tabs, which stretched each scan cycle
+  // to 20-40s and blew the lane deadline mid-scan - successful batches were
+  // still reported as extension_history_timeout (reproduce: SW console log,
+  // batch committed then deadline fired for the same thread). Focusing the
+  // per-page tab is also the requested UX: the operator sees which
+  // conversation is being synced.
+  if (page_id && tab && tab.id != null) {
+    chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    if (tab.windowId != null) {
+      chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    }
+  }
   const onTargetThread = await ensureTabOnThread(
     tab,
     navigationThreadId,

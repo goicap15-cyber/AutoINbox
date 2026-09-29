@@ -1047,10 +1047,32 @@ if (isBusiness) {
                     if (el.closest && el.closest('[aria-label*="Phản hồi" i], [aria-label*="Chuyển tiếp" i], [aria-label*="bày tỏ" i], [aria-label*="Đánh dấu" i]')) continue;
                     const raw = (el.innerText || '').trim();
                     if (!raw || raw.length < 2 || raw.length > 300) continue;
-                    const cleaned = textFilter && typeof textFilter.cleanMessageText === 'function'
+                    const cleanedBase = textFilter && typeof textFilter.cleanMessageText === 'function'
                         ? textFilter.cleanMessageText(raw) : raw;
+                    if (!cleanedBase || cleanedBase.length < 2) continue;
+                    if (textFilter && typeof textFilter.isSystemOrMetadataText === 'function' && textFilter.isSystemOrMetadataText(cleanedBase)) continue;
+                    // 2026-09-29: Business Suite vẽ "Người gửi: <agent>" dưới mỗi tin
+                    // page gửi ra - orphan harvester từng nhặt dòng này thành tin riêng
+                    // hoặc dính đuôi bubble (reproduce: Trịnh Mạnh Nguyen #1443 - 3 row
+                    // page_orphan quanh 1 tin thật). Bỏ row attr-only, strip đuôi
+                    // attribution, rồi dedupe với tin thật đã harvest.
+                    if (textFilter && typeof textFilter.isBizSentByAttributionOnly === 'function' && textFilter.isBizSentByAttributionOnly(cleanedBase)) {
+                        // 2026-09-29: dòng "Người gửi: <agent>" -> gắn tên agent vào
+                        // tin đứng ngay trước nó (metadata sent_by) thay vì tạo tin rác.
+                        // Operator muốn biết ai gửi mà không muốn nó thành message.
+                        const agentName = cleanedBase.replace(/^Ng\u01b0\u1eddi g\u1eedi:?\s*/, '').trim();
+                        for (let u = rawUnits.length - 1; u >= 0; u--) {
+                            const cand = rawUnits[u];
+                            if (!cand.fbMessageId || !String(cand.fbMessageId).startsWith('mid.') || cand.sent_by) continue;
+                            const pos = cand.element.compareDocumentPosition(el);
+                            if (pos & Node.DOCUMENT_POSITION_FOLLOWING) { cand.sent_by = agentName || null; break; }
+                        }
+                        continue;
+                    }
+                    if (textFilter && typeof textFilter.isBizFeedbackOnly === 'function' && textFilter.isBizFeedbackOnly(cleanedBase)) continue;
+                    const cleaned = textFilter && typeof textFilter.stripBizSentByAttribution === 'function'
+                        ? textFilter.stripBizSentByAttribution(cleanedBase) : cleanedBase;
                     if (!cleaned || cleaned.length < 2) continue;
-                    if (textFilter && typeof textFilter.isSystemOrMetadataText === 'function' && textFilter.isSystemOrMetadataText(cleaned)) continue;
                     if (orphanSeenText.has(cleaned)) continue;
                     if (rawUnits.some(u => (u.resolved && u.resolved.text) === cleaned)) continue;
                     orphanSeenText.add(cleaned);
@@ -1187,6 +1209,7 @@ if (isBusiness) {
                 is_outgoing: isOutgoing,
                 direction_status: isOutgoing === null ? 'pending' : 'confirmed',
                 direction_confidence: isOutgoing === null ? 'unknown' : dirEvidence.confidence,
+                sent_by: unit.sent_by || null,
                 dom_order: i,
                 timestamp_ms: parsedTs,
                 timestamp_source: tsSource

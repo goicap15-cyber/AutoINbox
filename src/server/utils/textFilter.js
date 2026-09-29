@@ -292,12 +292,53 @@ function cleanContactName(rawName, fallback = 'Khách hàng') {
   return trimmed;
 }
 
+// 2026-09-29: Business Suite vẽ dòng attribution "Người gửi: <agent>" bên dưới
+// mỗi tin page gửi ra. Bộ quét page (nhánh orphan) từng nhặt dòng này thành tin
+// riêng hoặc dính vào đuôi bubble (reproduce: thread Trịnh Mạnh Nguyen #1443 -
+// 3 row page_orphan quanh 1 tin thật). Strip đuôi attribution + nhận diện row
+// chỉ-toàn-attribution để ingest bỏ qua. Labels qua unicode escape cho ASCII-safe.
+const BIZ_SENT_BY_ATTR_RE = /(^|\n)\s*Ng\u01b0\u1eddi g\u1eedi:?\s*[^\n]{0,80}\s*$/;
+// 2026-09-29: nút feedback "Phản hồi tốt/tệ" dưới tin AI agent cũng bị nhặt
+// thành tin riêng / dính đuôi bubble (reproduce: Dũng Trần #7264).
+const BIZ_FEEDBACK_TAIL_RE = /(?:\n\s*Ph\u1ea3n h\u1ed3i (?:t\u1ed1t|t\u1ec7)\s*)+$/;
+const BIZ_FEEDBACK_ONLY_RE = /^(?:\s*Ph\u1ea3n h\u1ed3i (?:t\u1ed1t|t\u1ec7)\s*)+$/;
+
+function isBizFeedbackOnly(text) {
+  // 2026-09-29: BS DOM hay chèn zero-width (\u200b...) vào text - chuẩn hóa
+  // trước khi test, kẻo "Phản hồi tốt\u200b" thoát bộ lọc.
+  const s = String(text || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  return s.length > 0 && BIZ_FEEDBACK_ONLY_RE.test(s);
+}
+
+function stripBizSentByAttribution(text) {
+  if (typeof text !== 'string' || !text) return text;
+  let stripped = text.replace(/[\u200B-\u200D\uFEFF]/g, '');
+  if (stripped.indexOf('Ng\u01b0\u1eddi g\u1eedi') !== -1) {
+    stripped = stripped.replace(BIZ_SENT_BY_ATTR_RE, '');
+  }
+  if (/Ph\u1ea3n h\u1ed3i (?:t\u1ed1t|t\u1ec7)/.test(stripped)) {
+    stripped = stripped.replace(BIZ_FEEDBACK_TAIL_RE, '');
+  }
+  stripped = stripped.replace(/\s+$/, '');
+  return stripped.length ? stripped : '';
+}
+
+function isBizSentByAttributionOnly(text) {
+  const s = String(text || '').trim();
+  if (!s || s.indexOf('Ng\u01b0\u1eddi g\u1eedi') !== 0) return false;
+  const rest = s.replace(/^Ng\u01b0\u1eddi g\u1eedi:?\s*/, '');
+  return rest.length <= 60 && rest.indexOf('\n') === -1;
+}
+
 module.exports = {
   isRelativeTimeMetadataText: (text) => RELATIVE_TIME_METADATA_RE.test(String(text || '').trim()),
   isSystemOrMetadataText,
   cleanMessageText,
   isSidebarActivitySummary,
   isInvalidContactName,
-  cleanContactName
+  cleanContactName,
+  stripBizSentByAttribution,
+  isBizSentByAttributionOnly,
+  isBizFeedbackOnly
 };
 

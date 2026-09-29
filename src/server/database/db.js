@@ -1225,6 +1225,20 @@ const migrations = [
       }
       console.log(`[DB] Migration v20260929001: Gộp ${merged} bong bóng cuộc gọi trùng lặp vào dòng mid thật.`);
     }
+  },
+  {
+    // 2026-09-29: lưu agent gửi tin page ("Người gửi: <agent>" trong BS DOM)
+    // làm metadata hiển thị trong CRM - KHÔNG còn lưu thành nội dung tin nhắn.
+    version: 65,
+    name: 'add_messages_sent_by_agent',
+    up: (db) => {
+      try {
+        db.exec('ALTER TABLE messages ADD COLUMN sent_by_agent TEXT;');
+        console.log('[DB] Migration v65: Added messages.sent_by_agent column.');
+      } catch (e) {
+        console.log('[DB] Migration v65: messages.sent_by_agent already exists, skipped.');
+      }
+    }
   }
 ];
 

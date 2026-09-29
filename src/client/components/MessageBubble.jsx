@@ -277,6 +277,16 @@ export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenBy
           ) : (
             isTimePinned && <span className="font-mono text-[10px] text-[var(--color-text-muted)] italic">Không rõ thời gian</span>
           )}
+          {/* 2026-09-29: agent gửi tin page ("Người gửi: <agent>" trong BS DOM)
+              được lưu làm metadata sent_by_agent - hiển thị thay vì tạo tin rác */}
+          {isOutgoing && msg.sent_by_agent && (
+            <span
+              className="inline-flex items-center text-[10px] text-[var(--color-text-muted)]"
+              title={`Agent gửi tin này: ${msg.sent_by_agent}`}
+            >
+              Gửi bởi: {msg.sent_by_agent}
+            </span>
+          )}
           {isOutgoing && (status === 'sending' || status === 'pending') && (
             <span className="inline-flex items-center gap-1">
               <Loader2 size={12} className="animate-spin text-[var(--color-accent)]" />

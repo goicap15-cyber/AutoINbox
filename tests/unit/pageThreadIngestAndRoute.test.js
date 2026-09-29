@@ -63,6 +63,7 @@ function setupFullTestDb() {
       sequence_order INTEGER,
       direction_status TEXT,
       created_at DATETIME,
+      sent_by_agent TEXT,
       FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
     );
   `);

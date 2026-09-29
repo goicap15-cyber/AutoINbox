@@ -1,5 +1,6 @@
 const crypto = require('crypto');
-const { isInvalidContactName, cleanContactName, cleanMessageText, isSystemOrMetadataText } = require('../utils/textFilter');
+const { isInvalidContactName, cleanContactName, cleanMessageText, isSystemOrMetadataText, stripBizSentByAttribution, isBizSentByAttributionOnly, isBizFeedbackOnly } = require('../utils/textFilter');
+const { isKnownPageSystemNotice } = require('../utils/pageSystemNotice');
 const { isBlacklistedThreadId } = require('../utils/threadGuard');
 let defaultDb;
 function getDefaultDb() {
@@ -1057,6 +1058,44 @@ class ConversationRepository {
     cleanExpiredScanIds();
     const { thread_id, session_epoch, generation, scan_id, mode, messages = [] } = envelope;
 
+    // 2026-09-29: strip Business Suite attribution ("Người gửi: <agent>") khỏi
+    // nội dung batch page - orphan harvester từng gửi row attr-only hoặc bubble
+    // dính đuôi attribution (reproduce: Trịnh Mạnh Nguyen #1443). Defense-in-depth
+    // phía server: hoạt động kể cả khi extension chưa reload.
+    for (const m of messages) {
+      if (m && typeof m.content === 'string' && m.content) {
+        m.content = stripBizSentByAttribution(m.content);
+      }
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (!m) continue;
+      const content = typeof m.content === 'string' ? m.content : '';
+      const isOrphan = String(m.fb_message_id || '').startsWith('page_orphan_');
+      const notOutgoing = !(m.is_outgoing === 1 || m.is_outgoing === true);
+      if (isOrphan && isBizSentByAttributionOnly(content)) {
+        messages.splice(i, 1);
+        continue;
+      }
+      // 2026-09-29: thông báo handover AI + nút feedback "Phản hồi tốt/tệ" là
+      // UI chrome của Business Suite, không phải tin nhắn (reproduce: Dũng
+      // Trần #7264). Drop khi đến từ orphan hoặc phía không-outgoing.
+      if ((isKnownPageSystemNotice(content) || isBizFeedbackOnly(content)) && (isOrphan || notOutgoing)) {
+        messages.splice(i, 1);
+        continue;
+      }
+      // 2026-09-29: orphan trùng nội dung 1 row có mid.$ thật cùng thread -
+      // Business Suite thi thoảng render bubble không mang data-message-id rồi
+      // crawl sau lấy lại đầy đủ -> cả hai id đều được lưu (reproduce: Dũng
+      // Trần #7264 - "Cổng Nhôm Đúc Trống Đồng..." tồn tại 2 row). Giữ row
+      // thật, bỏ orphan.
+      if (isOrphan && content && database.prepare(
+        "SELECT 1 FROM messages WHERE thread_id = ? AND content = ? AND (fb_message_id IS NULL OR fb_message_id NOT LIKE 'page_orphan_%') LIMIT 1"
+      ).get(thread_id, content)) {
+        messages.splice(i, 1);
+      }
+    }
+
     if (isBlacklistedThreadId(thread_id)) {
       return {
         status: 'rejected',
@@ -1153,8 +1192,8 @@ class ConversationRepository {
       INSERT INTO messages (
         thread_id, fb_message_id, client_message_id, sender_id, content,
         media_type, media_url, timestamp_ms, timestamp_source, is_outgoing,
-        sender_role, sequence_order, direction_status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        sender_role, sequence_order, direction_status, created_at, sent_by_agent
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(fb_message_id) DO UPDATE SET
         content = CASE
           WHEN excluded.content IS NOT NULL AND (
@@ -1183,7 +1222,10 @@ class ConversationRepository {
         -- biết phải bám theo giờ thật của nó, không bám theo giờ cào của batch
         -- (normalizeMessageSequence sẽ sắp lại theo timestamp sau vòng này).
         sequence_order = CASE WHEN ? = 1 THEN excluded.sequence_order ELSE messages.sequence_order END,
-        direction_status = CASE WHEN excluded.direction_status = 'confirmed' THEN 'confirmed' ELSE messages.direction_status END
+        direction_status = CASE WHEN excluded.direction_status = 'confirmed' THEN 'confirmed' ELSE messages.direction_status END,
+        -- 2026-09-29: agent gui tin page (attribution "Nguoi gui: <agent>" trong
+        -- BS DOM) la metadata hien thi trong CRM, khong phai noi dung tin nhan.
+        sent_by_agent = COALESCE(excluded.sent_by_agent, messages.sent_by_agent)
     `);
 
     const updateTx = database.transaction((mergedList) => {
@@ -1224,6 +1266,7 @@ class ConversationRepository {
           msg.sequence_order,
           directionStatus,
           createdAt,
+          msg.sent_by || null,
           canUpgrade ? 1 : 0,
           canUpgrade ? 1 : 0,
           canUpgrade ? 1 : 0

@@ -443,6 +443,13 @@ class InboxSyncScheduler {
     const resolvedLane = this.getLaneKey({ account_id: accId, page_id, lane_key });
     const key = `${accId}:${threadId}`;
 
+    // 2026-09-29: operator-driven requests (click a conversation in the CRM)
+    // jump the lane queue - they must not wait behind the initial_sweep
+    // backlog while their server-side 120s timeout burns (reproduce: thread
+    // Nguyen Thi Hoa timed out twice before its scan could start).
+    const userDriven = /^(crm_navigation|crm_navigation_replay|crm_scroll_older|crm_scroll_viewport)/.test(String(reason || ''));
+    const effectivePriority = priority === 'high' || userDriven ? 'high' : priority;
+
     const isScrollOlder = String(reason || '').includes('scroll_older') || sync_mode === 'ondemand_older' || sync_mode === 'page_scroll_older';
     if (isScrollOlder && this.isThreadHistoryCompleted(threadId, accId)) {
       console.log(`[INBOX_SYNC_MESSAGES_SKIP] account=${accId} lane=${resolvedLane} thread=${threadId} reason=${reason} skip=history_completed`);
@@ -450,11 +457,11 @@ class InboxSyncScheduler {
     }
 
     const now = Date.now();
-    const jobData = { account_id: accId, thread_id: threadId, external_thread_id, thread_url, page_id, lane_key: resolvedLane, contact_name, reason, allow_navigation: allow_navigation === true, priority, sync_mode, scroll_delta: Number(scroll_delta) || 0, key };
+    const jobData = { account_id: accId, thread_id: threadId, external_thread_id, thread_url, page_id, lane_key: resolvedLane, contact_name, reason, allow_navigation: allow_navigation === true, priority: effectivePriority, sync_mode, scroll_delta: Number(scroll_delta) || 0, key };
     const cooldownUntil = this.threadCooldownUntil.get(key) || 0;
     // Explicit CRM navigation/scroll may reacquire a thread immediately after
     // it was preempted when the operator switched away and then back.
-    if (this.threadInFlight.has(key) || (now < cooldownUntil && priority !== 'high')) {
+    if (this.threadInFlight.has(key) || (now < cooldownUntil && effectivePriority !== 'high')) {
       const pending = this.pendingThreadSyncs.get(key);
       const combinedScrollDelta = sync_mode === 'ondemand_viewport' && pending?.sync_mode === 'ondemand_viewport'
         ? Math.max(-3600, Math.min(3600, Number(pending.scroll_delta || 0) + Number(jobData.scroll_delta || 0)))
@@ -482,7 +489,7 @@ class InboxSyncScheduler {
       console.log(`[INBOX_SYNC_MESSAGES_COALESCED] account=${accId} lane=${resolvedLane} thread=${threadId} reason=${reason} waited_ms=${waitedMs}`);
       // Anti-starve: job của thao tác user chờ quá 20s không được dispatch
       // (lane bận/kẹt) -> đẩy đầu hàng và thử drain ngay thay vì nuốt mãi.
-      if (priority === 'high' && waitedMs > 20000) {
+      if (effectivePriority === 'high' && waitedMs > 20000) {
         const escalated = queue.splice(existingIndex, 1)[0];
         queue.unshift(escalated);
         this.drainThreadQueue(resolvedLane);
@@ -490,7 +497,7 @@ class InboxSyncScheduler {
       return false;
     }
 
-    if (priority === 'high') queue.unshift({ key, ...jobData, queuedAt: now });
+    if (effectivePriority === 'high') queue.unshift({ key, ...jobData, queuedAt: now });
     else queue.push({ key, ...jobData, queuedAt: now });
     this.threadQueues.set(resolvedLane, queue);
     this.threadCooldownUntil.set(key, now + this.threadCooldownMs);

@@ -274,10 +274,45 @@ function isBareVietnamMobileText(text) {
     return trimmed;
   }
 
+  // 2026-09-29: Business Suite attribution "Người gửi: <agent>" under every
+  // page-sent bubble - the orphan harvester harvested it as standalone rows or
+  // glued it onto the bubble tail (reproduce: Trịnh Mạnh Nguyen #1443).
+  const BIZ_SENT_BY_ATTR_RE = /(^|\n)\s*Ng\u01b0\u1eddi g\u1eedi:?\s*[^\n]{0,80}\s*$/;
+  const BIZ_FEEDBACK_TAIL_RE = /(?:\n\s*Ph\u1ea3n h\u1ed3i (?:t\u1ed1t|t\u1ec7)\s*)+$/;
+  const BIZ_FEEDBACK_ONLY_RE = /^(?:\s*Ph\u1ea3n h\u1ed3i (?:t\u1ed1t|t\u1ec7)\s*)+$/;
+
+  function isBizFeedbackOnly(text) {
+    const s = String(text || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+    return s.length > 0 && BIZ_FEEDBACK_ONLY_RE.test(s);
+  }
+
+  function stripBizSentByAttribution(text) {
+    if (typeof text !== 'string' || !text) return text;
+    let stripped = text.replace(/[\u200B-\u200D\uFEFF]/g, '');
+    if (stripped.indexOf('Ng\u01b0\u1eddi g\u1eedi') !== -1) {
+      stripped = stripped.replace(BIZ_SENT_BY_ATTR_RE, '');
+    }
+    if (/Ph\u1ea3n h\u1ed3i (?:t\u1ed1t|t\u1ec7)/.test(stripped)) {
+      stripped = stripped.replace(BIZ_FEEDBACK_TAIL_RE, '');
+    }
+    stripped = stripped.replace(/\s+$/, '');
+    return stripped.length ? stripped : '';
+  }
+
+  function isBizSentByAttributionOnly(text) {
+    const s = String(text || '').trim();
+    if (!s || s.indexOf('Ng\u01b0\u1eddi g\u1eedi') !== 0) return false;
+    const rest = s.replace(/^Ng\u01b0\u1eddi g\u1eedi:?\s*/, '');
+    return rest.length <= 60 && rest.indexOf('\n') === -1;
+  }
+
   globalThis.FbCrmTextFilter = {
     isSystemOrMetadataText,
     cleanMessageText,
     isInvalidContactName,
-    cleanContactName
+    cleanContactName,
+    stripBizSentByAttribution,
+    isBizSentByAttributionOnly,
+    isBizFeedbackOnly
   };
 })();
