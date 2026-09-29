@@ -544,7 +544,7 @@ class ProcessManager {
   // Mở (hoặc kích hoạt) tab Business Suite cho 1 Page TRONG Chrome cá nhân của
   // account - chính sách "1 account = 1 Chrome". Không còn spawn Chrome riêng
   // cho từng Page (đã gỡ 2026-09-19).
-  async openBusinessTabForPage(pageId, accountId) {
+  async openBusinessTabForPage(pageId, accountId, options = {}) {
     const safePageId = String(pageId || '').trim();
     const safeAccountId = String(accountId || '').trim();
     if (!/^\d+$/.test(safePageId) || !safeAccountId) return false;
@@ -572,7 +572,9 @@ class ProcessManager {
     }
 
     try {
-      this.unhideWindow(safeAccountId);
+      // Kết nối nền khi mở lại app (auto-reconnect) mở tab Page nhưng không
+      // được bật sáng cửa sổ Chrome - nút "Mở Page" thủ công vẫn unhide như cũ.
+      if (!options?.skipUnhide) this.unhideWindow(safeAccountId);
       if (entry?.browser?.connected) {
         // Đã có tab business cho page này -> kích hoạt lại, không mở trùng.
         // Tab đã fallback sang /messages/t/<page_id>/ cũng được nhận diện.
@@ -635,8 +637,8 @@ class ProcessManager {
 
   // DEPRECATED (2026-09-19): trước đây mỗi Page có Chrome riêng (profile
   // page-profiles/<acc>_<page>). Giờ Page chạy dạng TAB trong Chrome cá nhân.
-  async startPageProcess(pageId, accountId) {
-    return this.openBusinessTabForPage(pageId, accountId);
+  async startPageProcess(pageId, accountId, options = {}) {
+    return this.openBusinessTabForPage(pageId, accountId, options);
   }
 
   // (Đã gỡ launcher "mỗi Page 1 Chrome riêng" - Page giờ chạy dạng tab trong

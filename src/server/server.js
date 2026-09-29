@@ -6635,6 +6635,60 @@ function startServer() {
     setTimeout(() => campaignRunner.recover(), 1500);
   }
 
+  // Tự kết nối lại mọi tài khoản Facebook khi mở lại app (yêu cầu 2026-09-29):
+  // Chrome của account chết theo app nên trước đây phải bấm "Kết nối" thủ công.
+  // Chạy cùng luồng với nút Kết nối: đăng ký ẩn nền sau khi extension kết nối,
+  // khởi động Chrome + mở tab Business Suite cho từng Page (không bật sáng cửa
+  // sổ), rồi chủ động ẩn Chrome khi extension đã đăng ký. Nối tiếp nhau để
+  // tránh nhiều Chrome khởi động tranh nhau cùng lúc.
+  const autoReconnectTimer = setTimeout(() => {
+    (async () => {
+      const accounts = db.prepare('SELECT id FROM accounts').all();
+      for (const acc of accounts) {
+        const accountId = String(acc.id);
+        const requestedAt = Date.now();
+        try {
+          backgroundAfterConnectRequests.set(accountId, requestedAt);
+          const started = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: true });
+          if (!started) {
+            backgroundAfterConnectRequests.delete(accountId);
+            continue;
+          }
+          const pageSources = activePageSourcesForAccount(accountId);
+          for (const source of pageSources) {
+            try { await processManager.startPageProcess(source.page_id, accountId, { skipUnhide: true }); } catch (_) {}
+          }
+          // Ẩn Chrome chạy ngầm sau khi các tab Page đã mở xong (mở tab thủ công
+          // unhide ngay, phải ẩn lại sau cùng). Retry nhiều nhịp phòng extension
+          // đăng ký chậm; dừng khi user bấm Bật hiển thị / Kết nối thủ công
+          // (xoá backgroundAfterConnectRequests) hoặc register-path đã tự ẩn.
+          if (!KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) {
+            for (const delayMs of [6000, 20000, 60000, 150000]) {
+              await new Promise((resolve) => setTimeout(resolve, delayMs));
+              if (backgroundAfterConnectRequests.get(accountId) !== requestedAt) break;
+              if (!extensionConnections.has(accountId)) continue;
+              const hideResult = await processManager.hideAccountProcess(accountId);
+              if (hideResult?.success) {
+                backgroundAfterConnectRequests.delete(accountId);
+                io.emit('ACCOUNT_DISPLAY_CHANGED', {
+                  account_id: accountId,
+                  chrome_display_mode: 'BACKGROUND',
+                  is_chrome_running: true
+                });
+                break;
+              }
+            }
+          }
+          console.log(`[AUTO_RECONNECT] Đã tự kết nối account ${accountId} khi khởi động.`);
+        } catch (err) {
+          backgroundAfterConnectRequests.delete(accountId);
+          console.warn(`[AUTO_RECONNECT] Lỗi tự kết nối account ${accountId}:`, err.message);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+    })();
+  }, 4000);
+
   return listenPromise;
 }
 
