@@ -410,9 +410,11 @@ class ConversationRepository {
         content = CASE WHEN excluded.content IS NOT NULL AND excluded.content <> '' THEN excluded.content ELSE messages.content END,
         media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
         media_url = COALESCE(excluded.media_url, messages.media_url),
-        timestamp_ms = excluded.timestamp_ms,
-        timestamp_source = excluded.timestamp_source,
-        created_at = excluded.created_at,
+        -- Một lần quét lại thiếu thông tin thời gian (ts <= 0) không được xóa
+        -- timestamp đã lưu - tin cũ bị "mất thời gian" sẽ bị normalize xếp nhầm ngày.
+        timestamp_ms = CASE WHEN excluded.timestamp_ms > 0 THEN excluded.timestamp_ms ELSE messages.timestamp_ms END,
+        timestamp_source = CASE WHEN excluded.timestamp_ms > 0 THEN excluded.timestamp_source ELSE messages.timestamp_source END,
+        created_at = CASE WHEN excluded.timestamp_ms > 0 THEN excluded.created_at ELSE messages.created_at END,
         is_outgoing = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.is_outgoing ELSE messages.is_outgoing END,
         sender_role = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.sender_role ELSE messages.sender_role END,
         -- Once a bubble is stored its visible position is immutable. A later
@@ -642,10 +644,15 @@ class ConversationRepository {
       // 23/09 nhảy lên trước tin 22/09. Timestamp là tiêu chí chính.
       const tsA = parseSafeUtcTimestamp(a);
       const tsB = parseSafeUtcTimestamp(b);
-      const minuteA = Math.floor(tsA / 60000);
-      const minuteB = Math.floor(tsB / 60000);
-      if (minuteA !== minuteB && minuteA > 0 && minuteB > 0) {
+      const minuteA = tsA > 0 ? Math.floor(tsA / 60000) : 0;
+      const minuteB = tsB > 0 ? Math.floor(tsB / 60000) : 0;
+      if (minuteA > 0 && minuteB > 0 && minuteA !== minuteB) {
         return minuteA - minuteB;
+      }
+      // Tin không còn thời gian nào hợp lệ (cả timestamp_ms lẫn created_at)
+      // đứng sau mọi tin đã biết thời gian, giữ thứ tự cũ trong nhóm của nó.
+      if ((minuteA > 0) !== (minuteB > 0)) {
+        return minuteA > 0 ? -1 : 1;
       }
 
       const orderA = a.sequence_order !== null && a.sequence_order !== undefined ? Number(a.sequence_order) : a.id;
@@ -1090,9 +1097,26 @@ class ConversationRepository {
     // mid.$ ID to a Like message. Once the extension is updated (or the
     // next sync provides the real ID), these orphans cause duplicates and
     // push Likes to the bottom of the conversation.
-    database.prepare(
-      "DELETE FROM messages WHERE thread_id = ? AND fb_message_id LIKE 'page_like_%'"
-    ).run(thread_id);
+    //
+    // 2026-09-28: chỉ purge like NẰM TRONG CỬA SỔ của batch incoming
+    // (±60s quanh min/max timestamp batch). Like sâu lịch sử (ngoài viewport
+    // batch không quét lại tới) trước đây bị xoá vĩnh viễn mỗi lần ingest
+    // -> like biến mất khỏi CRM (reproduce: thread lead-quảng cáo mất 👍
+    // đầu hội thoại).
+    const incomingTsList = messages.map((m) => Number(m.timestamp_ms || 0)).filter((t) => t > 0);
+    if (incomingTsList.length > 0) {
+      const windowStart = Math.min(...incomingTsList) - 60000;
+      const windowEnd = Math.max(...incomingTsList) + 60000;
+      database.prepare(`
+        DELETE FROM messages
+        WHERE thread_id = ? AND fb_message_id LIKE 'page_like_%'
+          AND COALESCE(timestamp_ms, 0) >= ? AND COALESCE(timestamp_ms, 0) <= ?
+      `).run(thread_id, windowStart, windowEnd);
+    } else {
+      database.prepare(
+        "DELETE FROM messages WHERE thread_id = ? AND fb_message_id LIKE 'page_like_%'"
+      ).run(thread_id);
+    }
 
     const existingRows = database.prepare(`
       SELECT * FROM messages WHERE thread_id = ? ORDER BY sequence_order ASC, id ASC
@@ -1208,6 +1232,15 @@ class ConversationRepository {
     });
 
     updateTx(reconcileRes.mergedList);
+    // 2026-09-28: thứ tự DOM trong cửa sổ quét là bằng chứng mới nhất về vị trí
+    // hiển thị, nhưng reconcileBatchWithAnchors sort theo timestamp trước (DOM
+    // chỉ là tiebreak khi ts bằng nhau) nên các timestamp tổng hợp lệch nhau
+    // từng ms khiến thứ tự DOM bị bỏ qua và sai lệch đóng băng qua các lần quét
+    // (reproduce: thread #1443 - tin 13:24 nhảy lên đầu, cụm 16:19-16:54 xáo
+    // trộn giữa các đợt ingest). Chỉ re-slot các row CÓ fb_message_id khớp
+    // trong batch này theo đúng thứ tự DOM; row ngoài cửa sổ giữ nguyên slot -
+    // tin đã lưu không bao giờ bị kết quả quét sau đẩy khỏi vị trí.
+    ConversationRepository.reconcileObservedDomSequence(thread_id, messages, database);
     ConversationRepository.normalizeMessageSequence(thread_id, database);
     scanIdCache.set(scan_id, Date.now());
 

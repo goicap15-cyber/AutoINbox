@@ -2464,6 +2464,16 @@ wss.on('connection', (ws, req) => {
               console.warn('[WS] Deferred media companion collapse:', collapseError.message);
             }
           }
+          if (wasNewMessage) {
+            // Tin mới chèn theo anchor DOM có thể rơi sai ngày (tin 16/9 được
+            // quét lại hôm nay bị gắn seq cuối thread). Chuẩn hóa lại ngay
+            // theo timestamp để DB không giữ thứ tự sai tới lần GET tiếp theo.
+            try {
+              ConversationRepository.normalizeMessageSequence(m.thread_id, db);
+            } catch (normalizeError) {
+              console.warn('[WS] Normalize sequence sau insert thất bại:', normalizeError.message);
+            }
+          }
           let directionWasUpdated = false;
 
           let mediaWasUpdated = false;
@@ -3789,8 +3799,25 @@ wss.on('connection', (ws, req) => {
           console.log(`[WS] 📄 Nhận ACCOUNT_PAGES_DISCOVERED cho account=${accountId}, số trang=${filteredPages.length}`);
           try {
             // Debug file: payload quet thuc te tu extension (raw + sau loc) -
-            // dung truy vet page thieu / sai ID ma khong phai doan mo
-            const dump = (tag, list) => JSON.stringify({ at: new Date().toISOString(), tag, account_id: accountId, count: list.length, pages: list.map(p => ({ id: String(p?.page_id || ''), name: String(p?.name || '').slice(0, 90) })) });
+            // dung truy vet page thieu / sai ID ma khong phai doan mo.
+            const dump = (tag, list) => JSON.stringify({
+              at: new Date().toISOString(),
+              tag,
+              account_id: accountId,
+              count: list.length,
+              pages: list.map(p => ({
+                id: String(p?.page_id || ''),
+                name: String(p?.name || '').slice(0, 90),
+                id_source: p?.id_source || null,
+                source_url: p?.source_url || null,
+                context_id: p?.context_id || null,
+                dropped: !!p?.dropped,
+                drop_reason: p?.drop_reason || null,
+                alias_ids: p?.alias_ids || null,
+                url_params: p?.url_params || null,
+                raw_fragment: String(p?.raw_fragment || '').slice(0, 1400) || null
+              }))
+            });
             fs.appendFileSync(path.join(APP_DATA_ROOT, 'discovery-debug.log'), dump('raw', pages) + '\n');
             fs.appendFileSync(path.join(APP_DATA_ROOT, 'discovery-debug.log'), dump('filtered', filteredPages) + '\n');
           } catch (_) {}
@@ -3825,6 +3852,14 @@ wss.on('connection', (ws, req) => {
             pages: filteredPages,
             updated_at: Date.now()
           });
+          break;
+        }
+        case 'PAGE_URL_DEBUG': {
+          // (Phase 0 debug) Kênh 2: cặp asset_id/mailbox_id thực tế trên URL
+          // tab Business Suite - ghi thẳng vào discovery-debug.log.
+          try {
+            fs.appendFileSync(path.join(APP_DATA_ROOT, 'discovery-debug.log'), JSON.stringify({ at: new Date().toISOString(), tag: 'PAGE_URL_DEBUG', account_id: String(msg.data?.account_id || ws.accountId || ''), asset_id: String(msg.data?.asset_id || ''), mailbox_id: String(msg.data?.mailbox_id || ''), title: String(msg.data?.title || '').slice(0, 90), url: String(msg.data?.url || '').slice(0, 300) }) + '\n');
+          } catch (_) {}
           break;
         }
         case 'UPDATE_LINK_PREVIEW_IMAGE': {

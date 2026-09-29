@@ -54,17 +54,27 @@ const messageTime = (message) => {
 const sortMessagesChronologically = (items = []) => items
   .map((message, originalIndex) => ({ message, originalIndex }))
   .sort((left, right) => {
+    // Thời gian là tiêu chí chính (ngày trước, trong ngày theo giờ).
+    // sequence_order chỉ dùng để xếp các tin cùng phút hoặc không có thời gian.
+    const timeA = messageTime(left.message);
+    const timeB = messageTime(right.message);
+    if (timeA > 0 && timeB > 0 && timeA !== timeB) return timeA - timeB;
+    if ((timeA > 0) !== (timeB > 0)) return timeA > 0 ? -1 : 1;
     const sequenceA = Number(left.message?.sequence_order ?? left.message?.id);
     const sequenceB = Number(right.message?.sequence_order ?? right.message?.id);
-    // Persisted backend order is authoritative. A local placeholder without a
-    // backend sequence keeps its existing array position; timestamps never
-    // participate in chat ordering.
     if (Number.isFinite(sequenceA) && Number.isFinite(sequenceB) && sequenceA !== sequenceB) {
       return sequenceA - sequenceB;
     }
     return left.originalIndex - right.originalIndex;
   })
   .map(({ message }) => message);
+
+const messageIdentities = (message) => [
+  message?.client_message_id ? `client:${message.client_message_id}` : null,
+  message?.attachment_id ? `attachment:${message.attachment_id}` : null,
+  message?.fb_message_id ? `fb:${message.fb_message_id}` : null,
+  message?.id != null ? `id:${message.id}` : null
+].filter(Boolean);
 
 const messageText = (message) => String(
   message?.content ?? message?.text_content ?? message?.text ?? message?.message ?? ''
@@ -113,17 +123,11 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
     const sequence = Number(message?.sequence_order ?? message?.id);
     return Number.isFinite(sequence) ? Math.max(maximum, sequence) : maximum;
   }, Number.NEGATIVE_INFINITY);
-  const identities = (message) => [
-    message?.client_message_id ? `client:${message.client_message_id}` : null,
-    message?.attachment_id ? `attachment:${message.attachment_id}` : null,
-    message?.fb_message_id ? `fb:${message.fb_message_id}` : null,
-    message?.id != null ? `id:${message.id}` : null
-  ].filter(Boolean);
   const indexByIdentity = new Map();
-  result.forEach((message, index) => identities(message).forEach((key) => indexByIdentity.set(key, index)));
+  result.forEach((message, index) => messageIdentities(message).forEach((key) => indexByIdentity.set(key, index)));
 
   cleanIncoming.forEach((message) => {
-    let matchedIndex = identities(message)
+    let matchedIndex = messageIdentities(message)
       .map((key) => indexByIdentity.get(key))
       .find((index) => index !== undefined);
     if (matchedIndex === undefined && message?.is_outgoing && String(message?.fb_message_id || '').startsWith('mid.')) {
@@ -157,7 +161,7 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
         const insertAt = previousIndex >= 0 ? previousIndex + 1 : nextIndex;
         result.splice(insertAt, 0, message);
         indexByIdentity.clear();
-        result.forEach((candidate, index) => identities(candidate)
+        result.forEach((candidate, index) => messageIdentities(candidate)
           .forEach((key) => indexByIdentity.set(key, index)));
         if (Number.isFinite(incomingSequence)) newestVisibleSequence = Math.max(newestVisibleSequence, incomingSequence);
         return;
@@ -175,14 +179,14 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
         });
         result.splice(insertAt >= 0 ? insertAt : result.length, 0, message);
         indexByIdentity.clear();
-        result.forEach((candidate, index) => identities(candidate)
+        result.forEach((candidate, index) => messageIdentities(candidate)
           .forEach((key) => indexByIdentity.set(key, index)));
         return;
       }
       const appendedIndex = result.length;
       result.push(message);
       if (Number.isFinite(incomingSequence)) newestVisibleSequence = Math.max(newestVisibleSequence, incomingSequence);
-      identities(message).forEach((key) => indexByIdentity.set(key, appendedIndex));
+      messageIdentities(message).forEach((key) => indexByIdentity.set(key, appendedIndex));
       return;
     }
     const previous = result[matchedIndex];
@@ -203,10 +207,42 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
       order_anchor_ms: previous.order_anchor_ms,
       sequence_order: previous.sequence_order ?? message.sequence_order
     };
-    identities(result[matchedIndex]).forEach((key) => indexByIdentity.set(key, matchedIndex));
+    messageIdentities(result[matchedIndex]).forEach((key) => indexByIdentity.set(key, matchedIndex));
   });
   return result;
 };
+
+// Snapshot DB trả về đúng thứ tự chuẩn hóa, nhưng merge append-only có thể
+// đã "đóng băng" một thứ tự sai trên màn hình. Nếu thứ tự các tin đang hiển
+// thị lệch với thứ tự DB trả về thì sắp lại theo thời gian để tự lành.
+const snapshotOrderConflicts = (existing = [], incoming = []) => {
+  const positionByIdentity = new Map();
+  existing.forEach((message, index) => {
+    messageIdentities(message).forEach((key) => {
+      if (!positionByIdentity.has(key)) positionByIdentity.set(key, index);
+    });
+  });
+  let lastSeen = -1;
+  for (const message of incoming) {
+    const key = messageIdentities(message).find((candidate) => positionByIdentity.has(candidate));
+    if (key === undefined) continue;
+    const position = positionByIdentity.get(key);
+    if (position < lastSeen) return true;
+    lastSeen = position;
+  }
+  return false;
+};
+
+const mergeSnapshotSelfHealing = (existing = [], incoming = []) => {
+  const cleanIncoming = filterRenderableMessages(incoming);
+  if (!existing.length) return sortMessagesChronologically(cleanIncoming);
+  const merged = mergeMessagesWithoutReordering(existing, cleanIncoming);
+  if (snapshotOrderConflicts(existing, cleanIncoming)) {
+    return sortMessagesChronologically(merged);
+  }
+  return merged;
+};
+
 const isSyntheticId = (messageOrId) => {
   const id = typeof messageOrId === 'string'
     ? messageOrId
@@ -735,7 +771,7 @@ export default function App() {
           if (stopped || !Array.isArray(data)) return;
           setMessages((previous) => ({
             ...previous,
-            [threadIdStr]: reconcileOutgoingTextEchoes(mergeMessagesWithoutReordering(previous[threadIdStr] || [], preserveOrderAnchors(data, previous[threadIdStr] || [])))
+            [threadIdStr]: reconcileOutgoingTextEchoes(mergeSnapshotSelfHealing(previous[threadIdStr] || [], preserveOrderAnchors(data, previous[threadIdStr] || [])))
           }));
         })
         .catch(() => {});

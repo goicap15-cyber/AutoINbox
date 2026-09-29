@@ -183,3 +183,64 @@ test('Unit Test: pageDiscovery.parsePagesFromHtml', async (t) => {
     assert.equal(pages[0].name, 'Quản Lý Tài Chính Trẻ - 334');
   });
 });
+
+// ── 2026-09-28: Sửa mất page 20 & đảo ngược Cổng nhôm đúc 24h ──────────────
+
+test('Unit Test: pageDiscovery đọc delegate_page_id dạng CHUỖI (không có object)', async (t) => {
+  await t.test('page Meditech B chỉ có delegate_page_id chuỗi -> lấy đúng ID page thật, loại profile', () => {
+    // Node thật từ payload 28/9: User node có delegate_page_id chuỗi,
+    // KHÔNG có delegate_page object như page thường.
+    const mockHtml = `
+      <script>
+        [{"__typename":"User","id":"61594384621540","name":"Phòng Khám Meditech - Filler Botox Cân Chỉnh Mặt","delegate_page_id":"1283058584897853"}]
+      </script>
+    `;
+    const pages = pageDiscovery.parsePagesFromHtml(mockHtml);
+    // Trang thật phải được extract với ID delegate_page_id
+    const real = pages.filter(p => p.page_id === '1283058584897853' && !p.dropped);
+    assert.equal(real.length, 1, 'page thật 1283058584897853 phải được giữ');
+    assert.equal(real[0].name, 'Phòng Khám Meditech - Filler Botox Cân Chỉnh Mặt');
+    // Profile 61594384621540 phải bị loại (suspicious hoặc profile_alias)
+    const profile = pages.filter(p => p.page_id === '61594384621540');
+    const profileKept = profile.filter(p => !p.dropped);
+    assert.equal(profileKept.length, 0, 'profile 61594384621540 không được lọt danh sách chính');
+  });
+
+  await t.test('hai page THẬT trùng tên không bị gộp mất (dedupe theo page-id, không theo tên)', () => {
+    const mockHtml = `
+      <script>
+        [
+         {"__typename":"Page","id":"1258043150736673","name":"Phòng Khám Meditech - Filler Botox Cân Chỉnh Mặt"},
+         {"__typename":"User","id":"61594384621540","name":"Phòng Khám Meditech - Filler Botox Cân Chỉnh Mặt","delegate_page_id":"1283058584897853"}
+        ]
+      </script>
+    `;
+    const pages = pageDiscovery.parsePagesFromHtml(mockHtml);
+    const kept = pages.filter(p => !p.dropped);
+    const ids = kept.map(p => p.page_id);
+    // Cả 2 page thật (A 1258... và B 1283...) phải cùng sống sót
+    assert.ok(ids.includes('1258043150736673'), 'Page A phải giữ');
+    assert.ok(ids.includes('1283058584897853'), 'Page B phải giữ (trước đây bị gộp/ filter mất)');
+  });
+});
+
+test('Unit Test: pageDiscovery đảo ngược Cổng nhôm đúc 24h (7684 là page thật)', async (t) => {
+  await t.test('node User có delegate_page object: giữ delegate id, profile alias bị loại', () => {
+    // Node thật từ payload 28/9 (raw_fragment): User 61583290945157
+    // có delegate_page.id = 768461266361443 (đây mới là Page thật)
+    const mockHtml = `
+      <script>
+        [{"__typename":"User","delegate_page_id":"768461266361443","delegate_page":{"id":"768461266361443","name":"Cổng nhôm đúc 24h"},"if_viewer_can_login_as_profile_plus":{"__typename":"User","id":"61583290945157"},"id":"61583290945157","name":"Cổng nhôm đúc 24h"}]
+      </script>
+    `;
+    const pages = pageDiscovery.parsePagesFromHtml(mockHtml);
+    const kept = pages.filter(p => !p.dropped);
+    // Page thật 7684 phải được giữ
+    const real = kept.filter(p => p.page_id === '768461266361443');
+    assert.equal(real.length, 1);
+    assert.equal(real[0].name, 'Cổng nhôm đúc 24h');
+    // Profile 6158 không được lọt danh sách chính (dù bị extract nhầm từ node lồng)
+    const profileKept = pages.filter(p => p.page_id === '61583290945157' && !p.dropped);
+    assert.equal(profileKept.length, 0, 'profile 61583290945157 phải bị loại');
+  });
+});

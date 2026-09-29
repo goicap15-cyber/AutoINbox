@@ -139,3 +139,54 @@ test('T002: Video player duration text (0:00 / 0:19, 0:03, 0:19) không bị nh�
   assert.equal(res3.timestamp_source, 'unknown');
 });
 
+
+// ── 2026-09-28: separator DD/MM/YYYY + Thứ-N-số + giờ tương đối ────────────
+// (cả khối lịch sử page mới bị dán giờ-cào vì separator "26/09/2026" không
+// parse được - reproduce 2026-09-28, thread Đặng Thanh Nhàn #7264)
+const BASE_28_09_2026 = new Date('2026-09-28T03:00:00.000Z'); // 10:00 giờ VN
+
+test('T-Sep: parseDateSeparator đọc DD/MM/YYYY (kèm và không kèm giờ)', () => {
+  const r1 = parseDateSeparator('26/09/2026', null, BASE_28_09_2026);
+  assert.equal(r1.timestamp_source, 'separator_date_clock');
+  // 26/09 00:00 giờ VN = 25/09 17:00 UTC
+  assert.equal(new Date(r1.timestamp_ms).toISOString(), '2026-09-25T17:00:00.000Z');
+
+  const r2 = parseDateSeparator('26/09/2026 14:53', null, BASE_28_09_2026);
+  assert.equal(r2.timestamp_source, 'separator_date_clock');
+  assert.equal(new Date(r2.timestamp_ms).toISOString(), '2026-09-26T07:53:00.000Z');
+
+  // DD/MM không năm: tháng tương lai -> năm trước
+  const r3 = parseDateSeparator('25/12', null, BASE_28_09_2026);
+  assert.equal(r3.timestamp_source, 'separator_date_clock');
+  assert.equal(new Date(r3.timestamp_ms).getUTCFullYear(), 2025);
+});
+
+test('T-Sep: regression các format đã hoạt động (14:53 T7, Hôm Nay, video guard)', () => {
+  const r1 = parseDateSeparator('14:53 T7', null, BASE_28_09_2026);
+  assert.equal(r1.timestamp_ms, new Date('2026-09-26T07:53:00.000Z').getTime()); // T7 27/09 VN
+
+  const r2 = parseDateSeparator('Hôm Nay', null, BASE_28_09_2026);
+  assert.equal(new Date(r2.timestamp_ms).toISOString(), '2026-09-27T17:00:00.000Z'); // 28/09 00:00 VN
+
+  const r3 = parseDateSeparator('0:00 / 0:19', null, BASE_28_09_2026);
+  assert.equal(r3.timestamp_ms, 0);
+  assert.equal(r3.timestamp_source, 'unknown');
+});
+
+test('T-Sep: giờ tương đối (N phút / N giờ / N ngày)', () => {
+  const r1 = parseDateSeparator('2 giờ', null, BASE_28_09_2026);
+  assert.equal(r1.timestamp_ms, BASE_28_09_2026.getTime() - 2 * 3600000);
+
+  const r2 = parseDateSeparator('45 phút', null, BASE_28_09_2026);
+  assert.equal(r2.timestamp_ms, BASE_28_09_2026.getTime() - 45 * 60000);
+
+  const r3 = parseDateSeparator('3 ngày', null, BASE_28_09_2026);
+  assert.equal(r3.timestamp_ms, BASE_28_09_2026.getTime() - 3 * 86400000);
+});
+
+test('T-Sep: Thứ 2 dạng số (digit weekday) parse được', () => {
+  const r = parseDateSeparator('Thứ 2', null, BASE_28_09_2026);
+  assert.equal(r.timestamp_source, 'separator_date_clock');
+  // 28/09/2026 là thứ Hai; Thứ 2 gần nhất = 21/09
+  assert.equal(new Date(r.timestamp_ms).getUTCDate(), 20); // 21/09 00:00 VN = 20/09 17:00 UTC
+});

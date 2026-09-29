@@ -11,7 +11,10 @@ test('personal Messenger sends are serialized and image work is not detached by 
 
 test('personal images prefer the mounted composer file input before chooser interception', () => {
   const source = fs.readFileSync('src/extension/background.js', 'utf8');
-  assert.match(source, /preferDirectInput: preferredKind !== 'video'/);
+  // Direct input là đường chính cho MỌI loại (video freeze fix 2026-09-24);
+  // rule cũ `preferredKind !== 'video'` không được phép quay lại.
+  assert.match(source, /preferDirectInput:\s*true/);
+  assert.doesNotMatch(source, /preferDirectInput:\s*preferredKind !== 'video'/);
   assert.match(source, /Runtime\.evaluate/);
   assert.match(source, /DOM\.setFileInputFiles/);
   assert.match(source, /visibleComposerControl/);

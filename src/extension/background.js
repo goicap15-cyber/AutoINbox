@@ -1201,6 +1201,20 @@ async function detectAndReportOpenPageTabs() {
       const pId = url.match(/[?&](?:asset_id|mailbox_id)=(\d+)/)?.[1];
       if (!pId) continue;
 
+      // (Phase 0 debug) Gửi CẶP param asset_id/mailbox_id tách riêng (không
+      // first-match) để server log - kênh 2 truy vết ID thật vs mailbox.
+      const assetParam = url.match(/[?&]asset_id=(\d+)/)?.[1] || null;
+      const mailboxParam = url.match(/[?&]mailbox_id=(\d+)/)?.[1] || null;
+      if (assetParam || mailboxParam) {
+        sendToBackend('PAGE_URL_DEBUG', {
+          account_id: user_id,
+          asset_id: assetParam,
+          mailbox_id: mailboxParam,
+          url: url.slice(0, 300),
+          title: tab?.title || null
+        });
+      }
+
       let detectedName = null;
       if (tab.id) {
         try {
@@ -1245,7 +1259,20 @@ async function detectAndReportOpenPageTabs() {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' || changeInfo.title) {
     const url = String(tab?.url || '');
-    if (url.includes('business.facebook.com') || url.includes('asset_id=')) {
+    if (url.includes('business.facebook.com') || url.includes('asset_id=') || url.includes('mailbox_id=')) {
+      // (Phase 0 debug) Kênh 2: log cặp asset_id/mailbox_id riêng biệt mỗi
+      // khi tab Business Suite load xong (B.S. hay tự redirect URL).
+      const assetParam = url.match(/[?&]asset_id=(\d+)/)?.[1] || null;
+      const mailboxParam = url.match(/[?&]mailbox_id=(\d+)/)?.[1] || null;
+      if (assetParam || mailboxParam) {
+        sendToBackend('PAGE_URL_DEBUG', {
+          account_id: user_id,
+          asset_id: assetParam,
+          mailbox_id: mailboxParam,
+          url: url.slice(0, 300),
+          title: tab?.title || null
+        });
+      }
       const pId = url.match(/[?&](?:asset_id|mailbox_id)=(\d+)/)?.[1];
       if (pId && tabId) {
         chrome.scripting.executeScript({

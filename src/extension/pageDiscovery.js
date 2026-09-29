@@ -67,35 +67,114 @@
   }
 
   /**
-   * Khử trùng lặp danh sách Page theo tên chuẩn hóa.
-   * Nếu có 2 ID cho cùng 1 tên, ưu tiên giữ ID legacy (đánh dấu qua legacyIds -
-   * lấy từ cấu trúc delegate_page, là ID Business Suite nhận) thay vì ID
-   * profile kiểu mới (10007... - Business Suite chặn asset_id này).
+   * Khử trùng lặp danh sách Page.
+   * Quy tắc (sửa 2026-09-28 - trước đây dedupe theo TÊN đã gộp nhầm 2 page
+   * khác nhau trùng tên "Phòng Khám Meditech" làm mất 1 page):
+   * 1. ID profile/delegate 6155xxx-6159xxx -> loại (chúng KHÔNG phải page).
+   * 2. ID nằm trong profileAliases (node.id của node có delegate_page) -> loại.
+   * 3. Các page còn lại KHÔNG BAO GIỜ gộp theo tên — Facebook cho phép 2 page
+   *    khác nhau trùng tên; gộp theo tên = mất page.
+   * 4. Trong nhóm trùng tên: nếu có member legacy (delegate) thì loại member
+   *    profile 10007xxx cùng tên (bài học commit ed24ca2).
+   * Tên chỉ dùng để GÁN alias_ids (thông tin, không quyết định sống còn).
    */
-  function deduplicatePages(pages, legacyIds) {
+  function deduplicatePages(pages, legacyIds, profileAliases = null) {
     if (!Array.isArray(pages)) return [];
-    const byName = new Map();
-    const idScore = (p) => {
-      const id = String(p.page_id);
-      let score = 0;
-      if (legacyIds && legacyIds.has(id)) score += 2;
-      if (SUSPICIOUS_PAGE_ID_REGEX.test(id)) score -= 4;
-      else if (id.startsWith('6159')) score -= 1;
-      return score;
-    };
+    const keptById = new Map();
+    const nameGroups = new Map();
+    const droppedOut = [];
     for (const p of pages) {
       if (!p || !p.page_id) continue;
-      // ID profile/delegate 6155xxx-6159xxx không phải page thật -> loại luôn.
-      if (SUSPICIOUS_PAGE_ID_REGEX.test(String(p.page_id))) continue;
+      const pid = String(p.page_id);
       const norm = (p.name || '').trim().toLowerCase();
       if (!norm) continue;
-      if (!byName.has(norm)) {
-        byName.set(norm, p);
-      } else if (idScore(p) > idScore(byName.get(norm))) {
-        byName.set(norm, p);
+
+      // 1. ID profile/delegate 6155xxx-6159xxx không phải page thật -> loại luôn.
+      if (SUSPICIOUS_PAGE_ID_REGEX.test(pid)) {
+        droppedOut.push(Object.assign({}, p, { dropped: true, drop_reason: 'suspicious_id' }));
+        continue;
+      }
+      // 2. ID là profile actor của một page khác đã extract qua delegate.
+      if (profileAliases && profileAliases.has(pid)) {
+        droppedOut.push(Object.assign({}, p, { dropped: true, drop_reason: 'profile_alias' }));
+        continue;
+      }
+
+      if (!keptById.has(pid)) keptById.set(pid, p);
+      else {
+        const prev = keptById.get(pid);
+        // Cùng ID trùng lặp giữa 2 nguồn fetch: giữ bản giàu thông tin hơn.
+        if ((p.id_source === 'delegate_page' && prev.id_source !== 'delegate_page') || (p.raw_fragment && !prev.raw_fragment)) {
+          keptById.set(pid, p);
+        }
+      }
+
+      if (!nameGroups.has(norm)) nameGroups.set(norm, []);
+      const group = nameGroups.get(norm);
+      if (!group.includes(pid)) group.push(pid);
+    }
+
+    // Quy tắc 4: nhóm trùng tên có member legacy (delegate) -> loại member
+    // profile 10007xxx (Business Suite chặn ID profile này).
+    const kept = [];
+    const droppedIds = new Set();
+    for (const [norm, ids] of nameGroups.entries()) {
+      const hasLegacy = ids.some((id) => legacyIds && legacyIds.has(id));
+      if (!hasLegacy) continue;
+      for (const id of ids) {
+        if (legacyIds.has(id)) continue;
+        if (/^10007\d+$/.test(id)) {
+          const dup = keptById.get(id);
+          if (dup) {
+            droppedOut.push(Object.assign({}, dup, { dropped: true, drop_reason: 'profile_10007_with_legacy_sibling' }));
+            droppedIds.add(id);
+          }
+        }
       }
     }
-    return Array.from(byName.values());
+
+    for (const [pid, p] of keptById.entries()) {
+      if (droppedIds.has(pid)) continue;
+      const norm = (p.name || '').trim().toLowerCase();
+      const aliases = (nameGroups.get(norm) || []).filter((id) => id !== pid);
+      if (aliases.length > 1) p.alias_ids = aliases;
+      kept.push(p);
+    }
+    return kept.concat(droppedOut);
+  }
+
+  // (Phase 0 capture) Bóc các cặp asset_id= / mailbox_id= xuất hiện trong
+  // fragment thô quanh page - kênh tín hiệu phân biệt asset thật vs mailbox.
+  function extractUrlIds(fragment) {
+    const out = { asset_ids: [], mailbox_ids: [] };
+    if (!fragment || typeof fragment !== 'string') return out;
+    const re = /[?&](asset_id|mailbox_id)=(\d+)/g;
+    let m;
+    while ((m = re.exec(fragment)) !== null) {
+      const key = m[1] === 'asset_id' ? 'asset_ids' : 'mailbox_ids';
+      if (!out[key].includes(m[2])) out[key].push(m[2]);
+    }
+    return out;
+  }
+
+  function safeFragment(nodeOrText, maxLen) {
+    try {
+      const raw = typeof nodeOrText === 'string' ? nodeOrText : JSON.stringify(nodeOrText);
+      return raw ? String(raw).slice(0, maxLen || 1400) : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function attachCapture(page, idSource, fragment, sourceUrl) {
+    const frag = safeFragment(fragment);
+    if (idSource) page.id_source = idSource;
+    if (sourceUrl) page.source_url = sourceUrl;
+    if (frag) {
+      page.raw_fragment = frag;
+      page.url_params = extractUrlIds(frag);
+    }
+    return page;
   }
 
   /**
@@ -104,12 +183,12 @@
    * hoặc { delegate_page: { id: "...", name: "..." } }
    * hoặc trong viewer.actor.all_pages / launchpoint
    */
-  function extractPagesFromJsonTree(node, foundPagesMap, depth = 0, accountId = null, legacyIds = null) {
+  function extractPagesFromJsonTree(node, foundPagesMap, depth = 0, accountId = null, legacyIds = null, sourceUrl = null, profileAliases = null) {
     if (!node || depth > 25 || typeof node !== 'object') return;
 
     if (Array.isArray(node)) {
       for (let i = 0; i < node.length; i++) {
-        extractPagesFromJsonTree(node[i], foundPagesMap, depth + 1, accountId, legacyIds);
+        extractPagesFromJsonTree(node[i], foundPagesMap, depth + 1, accountId, legacyIds, sourceUrl, profileAliases);
       }
       return;
     }
@@ -118,20 +197,31 @@
 
     // 1. Kiểm tra cấu trúc delegate_page (chuyển đổi profile sang trang NPE)
     // ƯU TIÊN: Nếu có delegate_page, đây mới là Page ID thực sự -> không lấy ID profile actor bên ngoài
-    if (node.delegate_page && typeof node.delegate_page === 'object') {
-      const dp = node.delegate_page;
-      const dpId = String(dp.id || '');
-      const dpName = cleanPageName(dp.name || node.name);
+    // Hai dạng: (a) object delegate_page {id, name}; (b) CHUỖI delegate_page_id
+    // không kèm object (reproduce 2026-09-28: page "Phòng Khám Meditech"
+    // 1283058584897853 chỉ có delegate_page_id dạng chuỗi - bỏ sót làm mất
+    // cả trang vì node.id là profile 6159... bị lọc).
+    if ((node.delegate_page && typeof node.delegate_page === 'object') || node.delegate_page_id) {
+      const dpId = String((node.delegate_page && node.delegate_page.id) || node.delegate_page_id || '');
+      const dpName = cleanPageName((node.delegate_page && node.delegate_page.name) || node.name);
       if (dpId && dpName && PAGE_ID_REGEX.test(dpId) && (!safeAccountId || dpId !== safeAccountId)) {
         if (legacyIds) legacyIds.add(dpId);
-        let avatar = dp.profile_picture?.uri || `https://graph.facebook.com/${dpId}/picture?type=normal`;
+        let avatar = (node.delegate_page && node.delegate_page.profile_picture?.uri) || `https://graph.facebook.com/${dpId}/picture?type=normal`;
         if (!foundPagesMap.has(dpId)) {
-          foundPagesMap.set(dpId, {
+          const pageObj = {
             page_id: dpId,
             name: dpName,
             avatar_url: avatar,
-            category: dp.category_name || 'Trang Facebook'
-          });
+            category: (node.delegate_page && node.delegate_page.category_name) || 'Trang Facebook'
+          };
+          // ID actor ngoài (node.id) là profile ID - ghi làm alias để chặn
+          // việc entry profile cùng tên lọt vào danh sách sau này.
+          if (node.id != null && String(node.id) !== dpId) {
+            pageObj.context_id = String(node.id);
+            if (profileAliases) profileAliases.add(String(node.id));
+          }
+          attachCapture(pageObj, node.delegate_page && typeof node.delegate_page === 'object' ? 'delegate_page' : 'delegate_page_id_string', node, sourceUrl);
+          foundPagesMap.set(dpId, pageObj);
         }
       }
       // Không add thêm node.id ngoài để tránh sinh 2 ID cho cùng 1 Page
@@ -161,12 +251,14 @@
           else if (Array.isArray(node.categories) && node.categories[0]?.name) category = node.categories[0].name;
 
           if (!foundPagesMap.has(pageId)) {
-            foundPagesMap.set(pageId, {
+            const pageObj = {
               page_id: pageId,
               name: cleanedName,
               avatar_url: avatarUrl || `https://graph.facebook.com/${pageId}/picture?type=normal`,
               category: category || 'Trang Facebook'
-            });
+            };
+            attachCapture(pageObj, 'json_page', node, sourceUrl);
+            foundPagesMap.set(pageId, pageObj);
           }
         }
       }
@@ -178,7 +270,7 @@
       const k = keys[i];
       // Bỏ qua các key nhị phân hoặc chuỗi quá dài không chứa object
       if (typeof node[k] === 'object' && node[k] !== null) {
-        extractPagesFromJsonTree(node[k], foundPagesMap, depth + 1, accountId, legacyIds);
+        extractPagesFromJsonTree(node[k], foundPagesMap, depth + 1, accountId, legacyIds, sourceUrl, profileAliases);
       }
     }
   }
@@ -187,10 +279,11 @@
    * Bóc tách danh sách Fanpage từ HTML response của Facebook
    * (áp dụng cho https://www.facebook.com/pages/?category=your_pages hoặc bookmarks)
    */
-  function parsePagesFromHtml(html, accountId = null, legacyIds = null) {
+  function parsePagesFromHtml(html, accountId = null, legacyIds = null, sourceUrl = null, profileAliases = null) {
     if (!html || typeof html !== 'string') return [];
     const foundPagesMap = new Map();
     if (!legacyIds) legacyIds = new Set();
+    if (!profileAliases) profileAliases = new Set();
     const safeAccountId = accountId ? String(accountId).trim() : null;
 
     // 1. Quét các khối <script ...> chứa JSON Comet
@@ -225,7 +318,7 @@
           }
         }
         if (parsed) {
-          extractPagesFromJsonTree(parsed, foundPagesMap, 0, safeAccountId, legacyIds);
+          extractPagesFromJsonTree(parsed, foundPagesMap, 0, safeAccountId, legacyIds, sourceUrl, profileAliases);
         }
       } catch (_) {}
 
@@ -243,12 +336,15 @@
             legacyIds.add(rawId);
           }
           if (rawId && name && (!safeAccountId || rawId !== safeAccountId) && !foundPagesMap.has(rawId)) {
-            foundPagesMap.set(rawId, {
+            const pageObj = {
               page_id: rawId,
               name: name,
               avatar_url: `https://graph.facebook.com/${rawId}/picture?type=normal`,
               category: 'Trang Facebook'
-            });
+            };
+            const fragStart = Math.max(0, dpMatch.index - 400);
+            attachCapture(pageObj, 'regex_delegate_page', scriptContent.slice(fragStart, dpMatch.index + 1400), sourceUrl);
+            foundPagesMap.set(rawId, pageObj);
           }
         }
 
@@ -260,12 +356,15 @@
           const rawName = itemMatch[2];
           const name = cleanPageName(rawName);
           if (rawId && name && (!safeAccountId || rawId !== safeAccountId) && !foundPagesMap.has(rawId)) {
-            foundPagesMap.set(rawId, {
+            const pageObj = {
               page_id: rawId,
               name: name,
               avatar_url: `https://graph.facebook.com/${rawId}/picture?type=normal`,
               category: 'Trang Facebook'
-            });
+            };
+            const fragStart = Math.max(0, itemMatch.index - 400);
+            attachCapture(pageObj, 'regex_page_typename', scriptContent.slice(fragStart, itemMatch.index + 1400), sourceUrl);
+            foundPagesMap.set(rawId, pageObj);
           }
         }
       }
@@ -280,12 +379,15 @@
         const id = lpMatch[1];
         const name = cleanPageName(lpMatch[2]);
         if (id && name && (!safeAccountId || id !== safeAccountId) && !foundPagesMap.has(id)) {
-          foundPagesMap.set(id, {
+          const pageObj = {
             page_id: id,
             name: name,
             avatar_url: `https://graph.facebook.com/${id}/picture?type=normal`,
             category: 'Trang Facebook'
-          });
+          };
+          const fragStart = Math.max(0, lpMatch.index - 400);
+          attachCapture(pageObj, 'regex_launchpoint', html.slice(fragStart, lpMatch.index + 1400), sourceUrl);
+          foundPagesMap.set(id, pageObj);
         }
       }
 
@@ -296,19 +398,22 @@
         const id = tpMatch[1];
         const name = cleanPageName(tpMatch[2]);
         if (id && name && (!safeAccountId || id !== safeAccountId) && !foundPagesMap.has(id)) {
-          foundPagesMap.set(id, {
+          const pageObj = {
             page_id: id,
             name: name,
             avatar_url: `https://graph.facebook.com/${id}/picture?type=normal`,
             category: 'Trang Facebook'
-          });
+          };
+          const fragStart = Math.max(0, tpMatch.index - 400);
+          attachCapture(pageObj, 'regex_typepage', html.slice(fragStart, tpMatch.index + 1400), sourceUrl);
+          foundPagesMap.set(id, pageObj);
         }
       }
     }
 
     const allDiscovered = Array.from(foundPagesMap.values());
     const filtered = safeAccountId ? allDiscovered.filter(p => String(p.page_id) !== safeAccountId) : allDiscovered;
-    return deduplicatePages(filtered, legacyIds);
+    return deduplicatePages(filtered, legacyIds, profileAliases);
   }
 
   /**
@@ -322,6 +427,7 @@
     const seenIds = new Set();
     const safeAccountId = accountId ? String(accountId).trim() : null;
     const legacyIds = new Set();
+    const profileAliases = new Set();
 
     // Nguồn 1: your_pages
     try {
@@ -335,7 +441,7 @@
       });
       if (res.ok) {
         const html = await res.text();
-        const pages = parsePagesFromHtml(html, safeAccountId, legacyIds);
+        const pages = parsePagesFromHtml(html, safeAccountId, legacyIds, 'your_pages', profileAliases);
         for (const p of pages) {
           if (!seenIds.has(p.page_id)) {
             seenIds.add(p.page_id);
@@ -361,7 +467,7 @@
         });
         if (resBm.ok) {
           const htmlBm = await resBm.text();
-          const pagesBm = parsePagesFromHtml(htmlBm, safeAccountId, legacyIds);
+          const pagesBm = parsePagesFromHtml(htmlBm, safeAccountId, legacyIds, 'bookmarks', profileAliases);
           for (const p of pagesBm) {
             if (!seenIds.has(p.page_id)) {
               seenIds.add(p.page_id);
@@ -374,9 +480,10 @@
       }
     }
 
-    // Lọc lại lần cuối loại trừ tài khoản cá nhân và khử trùng lặp theo tên
+    // Lọc lại lần cuối loại trừ tài khoản cá nhân và khử trùng lặp
+    // (dedupe theo page-id + profile alias - KHÔNG gộp theo tên)
     const filtered = safeAccountId ? results.filter(p => String(p.page_id) !== safeAccountId) : results;
-    return deduplicatePages(filtered, legacyIds);
+    return deduplicatePages(filtered, legacyIds, profileAliases);
   }
 
   return {

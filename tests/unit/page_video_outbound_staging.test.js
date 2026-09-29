@@ -18,17 +18,25 @@ test('stageBusinessSuiteAttachment uses preferDirectInput: false to trigger trus
   );
 });
 
-test('stagePersonalMessengerAttachment preserves preferDirectInput: preferredKind !== "video"', () => {
+test('stagePersonalMessengerAttachment uses preferDirectInput: true for ALL kinds (video freeze fix 2026-09-24)', () => {
   const source = fs.readFileSync(path.resolve(__dirname, '../../src/extension/background.js'), 'utf8');
   const personalStageStart = source.indexOf('async function stagePersonalMessengerAttachment(');
   assert.ok(personalStageStart > 0, 'stagePersonalMessengerAttachment function should exist');
   const personalStageEnd = source.indexOf('async function typeAndSubmitComposer(', personalStageStart);
   const personalStageBody = source.slice(personalStageStart, personalStageEnd);
 
+  // Đường set file trực tiếp vào input là đường CHÍNH cho mọi loại (kể cả
+  // video) - chooser chỉ còn là fallback. Trước đây video bị ép đi chooser
+  // và làm chết cả 2 lượt CAMERA_STAGE (video upload freeze).
   assert.match(
     personalStageBody,
+    /preferDirectInput:\s*true/,
+    'stagePersonalMessengerAttachment must use direct input for all kinds'
+  );
+  assert.doesNotMatch(
+    personalStageBody,
     /preferDirectInput:\s*preferredKind !== 'video'/,
-    'stagePersonalMessengerAttachment must preserve personal messenger direct input rule'
+    'old per-kind rule must not come back (video freeze regression)'
   );
 });
 

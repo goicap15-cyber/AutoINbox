@@ -98,9 +98,26 @@ function isBareVietnamMobileText(text) {
 
     /^Bạn đã phản hồi ghi chú của (?:họ|họ\.|họ\.?)$/i,
     /^Bạn đã trả lời tin của .+\.$/i,
-  // Chip gợi ý trả lời của Messenger (suggested replies hiện dưới ô soạn thảo,
-  // vd 'Trao đổi thêm?') - DOM observer đọc nhầm thành bubble tin của khách.
-  /^Trao đổi thêm\??$/i,
+    // Chip gợi ý trả lời của Messenger (suggested replies hiện dưới ô soạn thảo,
+    // vd 'Trao đổi thêm?') - DOM observer đọc nhầm thành bubble tin của khách.
+    /^Trao đổi thêm\??$/i,
+
+    // AI-agent UI của Business Suite (lead campaign bot) - các chip đánh giá
+    // và system notice render trong vùng tin nhắn, crawler nuốt nhầm thành
+    // bubble (reproduce 2026-09-28: thread Thành Lê Văn #1443 bị nhân đôi
+    // chip + notice kèm timestamp NULL rơi thành cụm "Hôm Nay" ma).
+    /^Bạn đã tiếp quản đoạn chat này từ tác nhân AI\.?$/i,
+    /^Phản hồi tốt$/i,
+    /^Cải thiện phản hồi$/i,
+    /^Tác nhân AI sẽ phản hồi\.?$/i,
+    // Banner quảng cáo ghim đỉnh hội thoại lead + chip bật AI (harvest orphan
+    // dễ nhặt nhầm - 2026-09-28)
+    /^Đoạn chat này chứa tin trả lời quảng cáo/i,
+    /^Bật tính năng phản hồi bằng AI$/i,
+    /^Xem quảng cáo$/i,
+  /^Người gửi:?$/i,
+  /^Sender:?$/i,
+
     // Debug trace and junk text patterns (TRACE_ONE_1509, dsdsdsds, numeric debug strings)
     /^TRACE_[A-Z0-9_]+$/i,
     /^(?:ds){2,}$/i,
@@ -156,6 +173,11 @@ function isBareVietnamMobileText(text) {
   function cleanMessageText(rawText) {
     if (!rawText || typeof rawText !== 'string') return '';
     let text = rawText.trim();
+
+    // Zero-width / invisibile chars (chip rỗng của AI-agent chứa \u200B) -
+    // strip trước mọi check để chip rỗng về '' và bị lọc như rác.
+    text = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+    if (!text) return '';
 
     // Messenger can prepend its unread divider to the first visible bubble.
     text = text.replace(/^(?:Tin nh\u1eafn ch\u01b0a \u0111\u1ecdc|Unread messages?):\s*/iu, '').trim();

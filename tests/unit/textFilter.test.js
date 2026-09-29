@@ -113,3 +113,23 @@ test('rejects standalone middle dots, bullets, and separator noise leaking in fr
 });
 
 
+
+// ── 2026-09-28: junk UI của AI-agent (Business Suite lead bot) ─────────────
+test('AI-agent junk: chip đánh giá + notice tiếp quản + zero-width bị lọc', () => {
+  require('../../src/extension/textFilter.js'); // IIFE gán vào globalThis
+  const f = globalThis.FbCrmTextFilter;
+  const junk = ['Phản hồi tốt', 'Cải thiện phản hồi', 'Bạn đã tiếp quản đoạn chat này từ tác nhân AI.', 'Tác nhân AI sẽ phản hồi', '\u200B', ' \u200B '];
+  for (const j of junk) {
+    assert.equal(f.cleanMessageText(j), '', `junk phải về rỗng: ${JSON.stringify(j)}`);
+    // Zero-width thuần: trim() không bỏ được \u200B - pipeline thật đi qua
+    // cleanMessageText trước (về rỗng -> bị bỏ qua như rác) nên chỉ assert
+    // isSystem cho junk có nội dung nhìn thấy được.
+    const visible = j.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+    if (visible) {
+      assert.equal(f.isSystemOrMetadataText(j), true, `junk phải là system: ${JSON.stringify(j)}`);
+    }
+  }
+  // Tin thật phải giữ nguyên
+  assert.equal(f.cleanMessageText('Bao tiền 1 bo'), 'Bao tiền 1 bo');
+  assert.equal(f.cleanMessageText('0398672871 sdt zalo'), '0398672871 sdt zalo');
+});

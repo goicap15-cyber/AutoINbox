@@ -1,43 +1,49 @@
-## Kế hoạch sửa: Re-stamp giờ cào lên tin cũ + mất caption media Page
+## Kế hoạch sửa: Tin Page lần đầu ingest bị dán "giờ hôm nay" thay vì giờ thật (lỗ 2)
 
-### Chẩn đoán đã xác minh (file:line)
+### Nguyên nhân gốc — đã xác minh từng dòng (không phải suy đoán)
 
-**Bug 1 — Tin cũ bị re-stamp giờ cào rồi trôi xuống cuối thread:**
-- `shouldUpgradeTimestamp` (`ConversationRepository.js:847`): chỉ chặn drift cho `realtime_fallback/realtime_delta`; **`dom_order → dom_order` chênh ≥30s vẫn được phép upgrade** (đúng logic dòng 861-864: `Math.abs(newTs-oldTs) >= 30000 → true`). Crawl mới lúc 02:19-02:21 24/09 đã ghi đè giờ thật của tin 19/09 → sort đưa xuống cuối.
-- `sequence_order = excluded.sequence_order` (dòng ~1148, mệnh đề ON CONFLICT của page batch) — ghi đè **vô điều kiện**, không gate theo canUpgrade (timestamp thì có gate ✅).
+| # | Lỗi | Vị trí |
+|---|---|---|
+| 1 | **Tự vô hiệu hóa chính nó**: khi container hội thoại là `role="region"`, dòng lọc `el.closest('[role="region"]')` trong bộ dò separator loại bỏ **100% ứng viên** (mọi phần tử trong container đều nằm trong region đó) → mảng separator luôn rỗng → nhánh gán giờ theo separator không bao giờ chạy | `page_content.js:885` |
+| 2 | **Thiếu định dạng VN**: `26/09/2026` (DD/MM/YYYY) không khớp bộ regex nhận diện nào và `parseDateSeparator` không có rule slash-date; `"Thứ 2"` dạng số bị regex chỉ nhận chữ (Hai/Ba/Tư...) chặn ngoài | `page_content.js:891-895`, `pageTimestampParser.js:116-234` |
+| 3 | **Neo độc `Date.now()`**: không có separator → `assignOrderedTimestamps` rơi vào nhánh zero-anchor dùng `Date.now()` backfill và **ghi vĩnh viễn vào `knownMessageTimestamps`** (chỉ-set-khi-chưa-có) → mọi lần crawl sau dùng anchor sai làm chuẩn | `page_content.js:839, 1082-1084` |
+| 4 | **Upgrade không tự chạy**: `UPGRADE_MESSAGE_TIMESTAMP` chỉ phát khi **hover chuột** — crawl tự động không bao giờ trigger | `page_content.js:381-419` |
 
-**Bug 2 — Caption "ảnh"/"video" mất:**
-- Extension **có** gửi caption: `collectMountedBatchMessages` dòng 1087 `text = isMedia ? resolved.caption : resolved.text` — caption chảy vào content ✅.
-- **Server tự tay xóa**: `ConversationRepository.js` ~dòng 1169-1174 — content video mà `=== 'video'` (chữ thường) → **null**! Giết chết caption hợp lệ mang tên "video". Kèm bộ GLOC duration ở mệnh đề ON CONFLICT 1130-1140 có thể xóa thêm.
-- Ảnh: caption đi qua `cleanMessageText` (extension) — cần verify "ảnh" có bị coi là junk không; nếu container ảnh không bọc caption (caption là element sibling ngoài `[data-message-id]`) thì rawText không chứa caption → content rỗng.
+Chuỗi nhân quả: separator rỗng (1) + thiếu format (2) → zero-anchor neo giờ-cào (3) → mọi tin crawl lần đầu dán `dom_order` + giờ hôm nay → server insert nguyên bản (tin mới chưa có existing — đúng thiết kế, lỗ này đã ghi rõ trong plan 24/9) → hiển thị cả cụm lịch sử thành "Hôm Nay".
 
-**Dữ liệu hỏng**: 8 row media (seq 96-103, `dom_order`, stamp 02:19-02:21 24/09) — mid cho biết đây là tin test 19/09, giờ thật không thể phục hồi từ DB (đã drift qua nhiều lần crawl). **Giả thuyết có khả năng cao: timestamp thật được nhúng trong payload base64 của `mid.$`** (cần verify lúc implement — plan mode chặn chạy test).
+Điểm quan trọng: **không cần đụng server** — rank `separator_date_clock` (4) > `dom_order` (2), server ĐÃ cho phép upgrade đường này sẵn. Chỉ cần crawler gửi đúng giờ.
 
 ---
 
-### Fix 1 — Chặn drift `dom_order` (server, `ConversationRepository.js`)
-- `shouldUpgradeTimestamp`: thêm `dom_order` vào nhóm cấm-drift (như `realtime_fallback/delta`) — `dom_order` **không bao giờ upgrade** timestamp đã tồn tại (kể cả cùng rank, kể cả chênh >30s). Vẫn cho phép: existing `unknown`/0 → nhận `dom_order`; existing rank thấp hơn → rank cao hơn (tooltip/separator) upgrade bình thường.
-- Gate `sequence_order` theo canUpgrade: khi `canUpgrade = 0` → `sequence_order = messages.sequence_order` (giữ chỗ cũ), tránh xáo trộn giữa 2 lần normalize.
+### Phase 1 — Sửa tầng bóc timestamp (extension)
 
-### Fix 2 — Cứu caption (2 tầng)
-- **Server**: bỏ điều kiện `content.trim().toLowerCase() === 'video'` → null (giữ lại duration-GLOB vì đó là rác thật: "0:00 / 0:19"); đảm bảo caption "video"/"ảnh" được lưu vào content của media.
-- **Extension**: verify `cleanMessageText("ảnh")` không bị strip (nếu bị, thêm allowlist cho caption); nếu caption là sibling nằm NGOÀI `[data-message-id]` container — mở rộng `resolveMessageContent` đọc caption element liền kề dưới media (giới hạn 1 element kế tiếp, cùng parent) và gán vào caption thay vì bỏ qua.
-- Unit test: content "video"/"ảnh" sống sót qua ingest; duration "0:19" vẫn bị lọc.
+| # | Việc | File |
+|---|---|---|
+| 1.1 | Bỏ `[role="region"]` khỏi chuỗi `closest()` loại-trừ trong `findDateSeparatorsInContainer` (giữ video/player guards — vùng quét đã bị giới hạn trong container hội thoại nên an toàn) | `page_content.js:885` |
+| 1.2 | Thêm 2 regex nhận diện separator: DD/MM/YYYY (`26/09/2026`) + `"Thứ 2"` dạng số | `page_content.js:891-895` |
+| 1.3 | `parseDateSeparator`: thêm rule parse DD/MM/YYYY (kèm/không kèm giờ) + giờ tương đối (`N phút`, `N giờ`, `N ngày`) | `pageTimestampParser.js:116-234` |
+| 1.4 | **Chữa lành anchor map**: nhánh separator (B) ghi đè `knownMessageTimestamps` vô điều kiện (thay giá trị giờ-cào); `assignOrderedTimestamps` nhánh zero-anchor **không ghi** vào map (chỉ tính cục bộ giữ thứ tự) — để lần quét sau có separator thì tự chữa. Đồng bộ mirror `orderedTimestampAssigner.js` (KHÔNG port rule stale-anchor→now của mirror — rule đó gây drift-to-now) | `page_content.js:839-850, 1082-1084` |
 
-### Fix 3 — Repair dữ liệu đã hỏng (mở rộng `scripts/repair-thread-sequence.js`)
-- **Bước verify-first**: viết mid-decoder (decode base64 payload, quét epoch 4-byte) — **chỉ tin nếu** ≥80% các row có timestamp tin cậy cao (tooltip/separator) khớp với mid-decoded (±24h). Nếu đạt → re-stamp toàn bộ row `dom_order` bằng giờ mid-decoded (nguồn giờ thật của Facebook!).
-- Nếu verify KHÔNG đạt → fallback: chỉ re-normalize thứ tự theo giờ hiện có + log cảnh báo các row drift không phục hồi được.
-- Chạy repair trên **bản sao DB** trước, đối chiếu acceptance (5-block thread Phạm Hùng + 0 inversion + media 96-103 quay về đúng vị trí giữa hội thoại), rồi mới chạy trên DB thật (server STOP).
+### Phase 2 — Tự lành dữ liệu đã hỏng
 
-### Thứ tự triển khai & kiểm thử
-1. Fix 1 + Fix 2 (code) → unit tests → `node --test tests/unit/*.test.js` (564+) → `build:ui` không cần (không đụng client).
-2. Repair trên bản sao → verify → backup DB thật → repair thật → query acceptance cuối.
-3. `graphify update .`
+| # | Việc |
+|---|---|
+| 2.1 | Reset `history_completed=0` cho các thread còn row `dom_order` (1 lệnh SQL có backup; hoặc nút "Đồng bộ lại" từng thread — nút này đã có sẵn và có reset flag) |
+| 2.2 | Kích hoạt resync → crawl mới chạy với separator đã sửa → gửi `separator_date_clock` (rank 4) → server **tự upgrade** row `dom_order` (rank 2, đã cho phép) → `normalizeMessageSequence` sắp lại đúng |
+| 2.3 | Acceptance: thread Đặng Thanh Nhàn — tin "Chỉ xác nhận kết bạn zalo..." về nhóm 27/09 (khớp BS "14:53 T7"); không còn cả khối lịch sử nằm dưới "Hôm Nay"; 0 nghịch đảo thời gian |
+
+### Kiểm thử
+
+1. Unit test mới: `parseDateSeparator` với "26/09/2026", "26/09/2026 14:53", "14:53 T7" (regression — đã parse đúng), "Thứ 2", "Hôm Nay" (regression), "2 giờ"; finder nhận diện DD/MM/YYYY + Thứ-2-số; zero-anchor không ghi map; separator overwrite map.
+2. Full suite `node --test tests/unit/*.test.js` (574+) + mirror `orderedTimestampAssigner` test vẫn pass.
+3. Syntax check + reload extension + restart server để chạy thật.
 
 ### Files
-`ConversationRepository.js` (shouldUpgradeTimestamp + ON CONFLICT + caption null-out), `page_content.js` (caption sibling, nếu cần), `textFilter.js` extension (nếu "ảnh" bị strip), `scripts/repair-thread-sequence.js` (mid-decode + re-stamp), `tests/unit/*` (2-3 test mới).
+
+`page_content.js` (finder + Branch B + zero-anchor), `pageTimestampParser.js` (DD/MM/YYYY + relative), `orderedTimestampAssigner.js` (mirror đồng bộ), `tests/unit/*` (test mới), 1 lệnh SQL reset `history_completed`.
 
 ### Rủi ro & đường lùi
-- Fix 1 có thể làm tin mới (chưa từng có) vẫn nhận giờ cào ban đầu — chấp nhận được vì lần ingest sau khi tooltip khả dụng sẽ upgrade lên (rank cao hơn vẫn được phép).
-- Repair mid-decode có verify-first: không đạt thì không đụng dữ liệu.
-- Backup DB + dry-run bản sao như mọi lần.
+
+- Bỏ `[role="region"]` exclusion: đã phân tích — các region khác (panel phải) nằm ngoài container quét nên không bị nhặt; banner quảng cáo trong hội thoại quá dài (>50 ký tự) để lọt qua filter độ dài.
+- Zero-anchor không ghi map: tin mới lần đầu vẫn mang giờ-cào ở lần ingest đó (không tránh được — BS chưa kịp render separator), nhưng **không còn neo vĩnh viễn** — lần quét kế separator đã render sẽ tự sửa qua rank 4>2.
+- Không đụng server, không đụng DB schema; dữ liệu hỏng tự lành qua crawl lại.

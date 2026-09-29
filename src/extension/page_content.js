@@ -801,52 +801,72 @@ if (isBusiness) {
     // interpolation between their nearest known neighbors (or extrapolate past the
     // oldest/newest known anchor for scroll-back history / brand new arrivals).
     function assignOrderedTimestamps(orderedIds) {
-        let lastKnownIdx = -1;
-        let lastKnownTs = null;
+        // Trả về Map id -> timestamp. CHỈ giá trị suy ra từ anchor THẬT (đã có
+        // trong knownMessageTimestamps) mới được ghi lại vào map. Giá trị
+        // zero-anchor (Date.now() khi chưa có anchor nào - phiên mới/tabe mới)
+        // được đánh dấu synthetic: KHÔNG ghi map, để lần quét sau khi separator
+        // Business Suite render xong sẽ gán giờ thật (separator rank 4 > dom_order
+        // rank 2, server cho phép upgrade) — trước đây zero-anchor ghi vĩnh viễn
+        // giờ-cào vào map khiến cả lịch sử bị "Hôm Nay" (reproduce 2026-09-28).
+        const assigned = new Map();
+        const syntheticIds = new Set();
+        let lastIdx = -1;
+        let lastTs = null;
+        let lastReal = false;
 
         for (let i = 0; i < orderedIds.length; i++) {
             const id = orderedIds[i];
             if (!id) continue;
             if (knownMessageTimestamps.has(id)) {
-                lastKnownIdx = i;
-                lastKnownTs = knownMessageTimestamps.get(id);
+                lastIdx = i;
+                lastTs = knownMessageTimestamps.get(id);
+                lastReal = true;
+                assigned.set(id, lastTs);
                 continue;
             }
 
-            let nextKnownIdx = -1;
-            let nextKnownTs = null;
+            let nextIdx = -1;
+            let nextTs = null;
             for (let j = i + 1; j < orderedIds.length; j++) {
                 if (orderedIds[j] && knownMessageTimestamps.has(orderedIds[j])) {
-                    nextKnownIdx = j;
-                    nextKnownTs = knownMessageTimestamps.get(orderedIds[j]);
+                    nextIdx = j;
+                    nextTs = knownMessageTimestamps.get(orderedIds[j]);
                     break;
                 }
             }
 
-            let assigned;
-            if (lastKnownTs !== null && nextKnownTs !== null && nextKnownTs > lastKnownTs) {
-                const span = nextKnownIdx - lastKnownIdx;
-                const pos = i - lastKnownIdx;
-                assigned = Math.round(lastKnownTs + (nextKnownTs - lastKnownTs) * (pos / span));
-                if (assigned <= lastKnownTs) assigned = lastKnownTs + 1;
-                if (assigned >= nextKnownTs) assigned = nextKnownTs - 1;
-            } else if (lastKnownTs !== null) {
-                assigned = lastKnownTs + ORDER_GAP_MS * (i - lastKnownIdx);
-            } else if (nextKnownTs !== null) {
-                assigned = nextKnownTs - ORDER_GAP_MS * (nextKnownIdx - i);
+            let val;
+            let isSynthetic;
+            if (lastTs !== null && nextTs !== null && nextTs > lastTs) {
+                const span = nextIdx - lastIdx;
+                const pos = i - lastIdx;
+                val = Math.round(lastTs + (nextTs - lastTs) * (pos / span));
+                if (val <= lastTs) val = lastTs + 1;
+                if (val >= nextTs) val = nextTs - 1;
+                isSynthetic = !lastReal; // kế thừa tính synthetic của mốc trước
+            } else if (lastTs !== null) {
+                val = lastTs + ORDER_GAP_MS * (i - lastIdx);
+                isSynthetic = !lastReal;
+            } else if (nextTs !== null) {
+                val = nextTs - ORDER_GAP_MS * (nextIdx - i);
+                isSynthetic = false; // nội suy ngược từ anchor thật
             } else {
                 // No anchors anywhere in the currently-mounted list yet (fresh session).
-                assigned = Date.now() - ORDER_GAP_MS * (orderedIds.length - i);
+                val = Date.now() - ORDER_GAP_MS * (orderedIds.length - i);
+                isSynthetic = true;
             }
 
-            knownMessageTimestamps.set(id, assigned);
-            // This new id becomes an anchor for the rest of this pass, so a long
-            // run of consecutive unknowns still spaces out monotonically.
-            lastKnownIdx = i;
-            lastKnownTs = assigned;
+            assigned.set(id, val);
+            if (!isSynthetic) knownMessageTimestamps.set(id, val);
+            // Vẫn dùng giá trị synthetic làm mốc nội bộ cho phần còn lại của pass
+            // (giữ thứ tự đơn điệu), nhưng không ghi vào map.
+            lastIdx = i;
+            lastTs = val;
+            lastReal = !isSynthetic;
         }
 
         if (knownMessageTimestamps.size > MAX_KNOWN_TIMESTAMPS) knownMessageTimestamps.clear();
+        return assigned;
     }
 
     let threadSM = null;
@@ -882,7 +902,13 @@ if (isBusiness) {
             const el = candidates[i];
             if (el.matches('[data-message-id]') || el.querySelector('[data-message-id]')) continue;
             if (el.children.length > 2) continue;
-            if (el.closest && el.closest('video, [role="region"], [aria-label*="video" i], [aria-label*="player" i], [data-surface*="video"]')) continue;
+            // LƯU Ý: KHÔNG được đưa [role="region"] vào chuỗi closest() - container
+            // hội thoại của Business Suite chính là role="region", nên mọi phần tử
+            // trong container đều khớp closest() và bị loại toàn bộ -> mảng
+            // separator luôn rỗng -> toàn bộ tin bị dán giờ-cào (reproduce
+            // 2026-09-28: cả lịch sử page mới nằm dưới "Hôm Nay"). Chỉ loại
+            // video/player region cụ thể.
+            if (el.closest && el.closest('video, [aria-label*="video" i], [aria-label*="player" i], [data-surface*="video"]')) continue;
 
             const text = (el.textContent || '').trim();
             if (!text || text.length > 50) continue;
@@ -891,8 +917,12 @@ if (isBusiness) {
             const isSepFormat = /^\d{1,2}:\d{2}\s*(?:T[2-7]|CN|AM|PM)?$/i.test(text) ||
                                 /^\d{1,2}:\d{2}\s+\d{1,2}\s+Tháng\s+\d{1,2},?\s+\d{4}$/i.test(text) ||
                                 /^\d{1,2}\s+Tháng\s+\d{1,2}(?:,?\s*\d{4})?$/i.test(text) ||
-                                /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i.test(text) ||
-                                /^(?:T[2-7]|CN)$/i.test(text);
+                                /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Thứ [2-7]|Chủ Nhật|Chủ nhật|Hôm nay|Hôm Nay|Hôm qua|Today|Yesterday)$/i.test(text) ||
+                                /^(?:T[2-7]|CN)$/i.test(text) ||
+                                // DD/MM/YYYY (kèm giờ) - Business Suite render ngày đủ dạng này
+                                /^\d{1,2}\/\d{1,2}\/\d{4}(?:\s+\d{1,2}:\d{2})?$/i.test(text) ||
+                                /^\d{1,2}:\d{2}\s+\d{1,2}\/\d{1,2}\/\d{4}$/i.test(text) ||
+                                /^\d+\s+(?:giờ|phút|ngày)(?:\s+trước)?$/i.test(text);
 
             if (isSepFormat) {
                 const isParentAlreadyAdded = separators.some(s => s.element.contains(el) || el.contains(s.element));
@@ -995,6 +1025,52 @@ if (isBusiness) {
             });
         }
 
+        // 2.5. Harvest bubble KHÔNG có data-message-id (orphan): lời chào AI đầu
+        // hội thoại lead-quảng cáo, 👍 của khách render ngoài message container...
+        // Trước đây chỉ quét [data-message-id] nên những bubble này bị bỏ sót
+        // vĩnh viễn (reproduce 2026-09-28: thread Thành Lê Văn #1443 thiếu lời
+        // chào + 👍). Filter chặt: text 2..300 ký tự, qua cleanMessageText +
+        // isSystemOrMetadataText, loại button/banner/separator; id ổn định theo
+        // hash(thread + text) để không nhân bản qua các lượt crawl.
+        {
+            const textFilter = globalThis.FbCrmTextFilter || (typeof window !== 'undefined' && window.FbCrmTextFilter);
+            const orphanCandidates = container.querySelectorAll('div, span');
+            const orphanSeenText = new Set();
+            const unitElements = new Set(rawUnits.map(u => u.element).filter(Boolean));
+            for (const el of orphanCandidates) {
+                try {
+                    if (orphanSeenText.size >= 20) break; // giới hạn an toàn
+                    if (el.closest('[data-message-id]')) continue;
+                    if (unitElements.has(el)) continue;
+                    if (el.children.length > 2) continue;
+                    if (el.closest && el.closest('form, [role="textbox"], [data-surface*="composer"], footer, nav, header, video, [aria-label*="video" i], [data-surface*="video"]')) continue;
+                    if (el.closest && el.closest('[aria-label*="Phản hồi" i], [aria-label*="Chuyển tiếp" i], [aria-label*="bày tỏ" i], [aria-label*="Đánh dấu" i]')) continue;
+                    const raw = (el.innerText || '').trim();
+                    if (!raw || raw.length < 2 || raw.length > 300) continue;
+                    const cleaned = textFilter && typeof textFilter.cleanMessageText === 'function'
+                        ? textFilter.cleanMessageText(raw) : raw;
+                    if (!cleaned || cleaned.length < 2) continue;
+                    if (textFilter && typeof textFilter.isSystemOrMetadataText === 'function' && textFilter.isSystemOrMetadataText(cleaned)) continue;
+                    if (orphanSeenText.has(cleaned)) continue;
+                    if (rawUnits.some(u => (u.resolved && u.resolved.text) === cleaned)) continue;
+                    orphanSeenText.add(cleaned);
+
+                    const stableId = 'page_orphan_' + currentThread + '_' + (function (s) {
+                        let h = 5381;
+                        for (let i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; }
+                        return h.toString(36);
+                    })(cleaned);
+
+                    rawUnits.push({
+                        element: el,
+                        fbMessageId: stableId,
+                        resolved: { kind: 'text', text: cleaned },
+                        isStandaloneLike: false
+                    });
+                } catch (_) {}
+            }
+        }
+
         // 3. Sắp xếp rawUnits theo ĐÚNG THỨ TỰ XUẤT HIỆN TỰ NHIÊN TRONG CÂY DOM (Top-to-Bottom)
         rawUnits.sort((a, b) => {
             if (a.element === b.element) return 0;
@@ -1079,7 +1155,10 @@ if (isBusiness) {
                 tsSource = 'dom_order';
             }
 
-            if (parsedTs > 0 && !knownMessageTimestamps.has(fbMessageId)) {
+            // Separator value (rank 4) GHI ĐÈ giá trị giờ-cào đã nằm trong map
+            // (drift từ zero-anchor trước đây) - đây là cơ chế tự lành dữ liệu.
+            // Giá trị không phải separator vẫn chỉ-set-khi-chưa-có như cũ.
+            if (parsedTs > 0 && (tsSource === 'separator_date_clock' || !knownMessageTimestamps.has(fbMessageId))) {
                 knownMessageTimestamps.set(fbMessageId, parsedTs);
             }
 
@@ -1116,10 +1195,13 @@ if (isBusiness) {
 
         // 5. Nội suy đơn điệu (Monotonic Interpolation) để các tin nhắn Like xen kẽ có timestamp tăng dần chuẩn xác
         const orderedIds = list.map(item => item.fb_message_id);
-        assignOrderedTimestamps(orderedIds);
+        const assignedTs = assignOrderedTimestamps(orderedIds);
         for (let i = 0; i < list.length; i++) {
             const item = list[i];
-            if (knownMessageTimestamps.has(item.fb_message_id)) {
+            const mapped = assignedTs.get(item.fb_message_id);
+            if (mapped !== undefined) {
+                item.timestamp_ms = mapped;
+            } else if (knownMessageTimestamps.has(item.fb_message_id)) {
                 item.timestamp_ms = knownMessageTimestamps.get(item.fb_message_id);
             }
         }

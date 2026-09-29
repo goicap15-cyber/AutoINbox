@@ -161,6 +161,42 @@
       };
     }
 
+    // Giờ tương đối: "45 phút", "2 giờ", "3 ngày", "1 tuần" (kèm/cụm "trước")
+    // - Business Suite dùng cho các nhóm tin rất gần.
+    const relMatch = trimmedSep.match(/^(\d{1,3})\s*(?:phút|giờ|ngày|tuần)(?:\s+trước)?$/i);
+    if (relMatch) {
+      const n = parseInt(relMatch[1], 10);
+      const unitMs = { phút: 60000, giờ: 3600000, ngày: 86400000, tuần: 604800000 };
+      const unitKey = trimmedSep.match(/phút|giờ|ngày|tuần/i)[0].toLowerCase();
+      const target = new Date(baseDate.getTime() - n * unitMs[unitKey]);
+      return {
+        timestamp_ms: target.getTime(),
+        timestamp_source: 'separator_date_clock'
+      };
+    }
+
+    // Ngày dạng slash DD/MM/YYYY (hoặc DD/MM không năm - year rollback nếu
+    // tháng lớn hơn tháng hiện tại). Business Suite render separator cũ
+    // dạng này ("26/09/2026") - trước đây không parse được -> cả cụm lịch sử
+    // bị dán giờ-cào (reproduce 2026-09-28).
+    const slashDateMatch = trimmedSep.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?$/);
+    if (slashDateMatch) {
+      const day = parseInt(slashDateMatch[1], 10);
+      const month = parseInt(slashDateMatch[2], 10) - 1;
+      let year = slashDateMatch[3] ? parseInt(slashDateMatch[3], 10) : baseDate.getFullYear();
+      if (!slashDateMatch[3] && month > baseDate.getMonth()) {
+        year -= 1;
+      }
+      const target = new Date(year, month, day, clock.hours, clock.minutes, 0, 0);
+      // Sanity: ngày/month phải hợp lệ (VD 26/09 -> getDate phải là 26)
+      if (target.getDate() === day && target.getMonth() === month) {
+        return {
+          timestamp_ms: target.getTime(),
+          timestamp_source: 'separator_date_clock'
+        };
+      }
+    }
+
     // Thứ hai, Thứ ba... / T2, T3, T4, T5, T6, T7, CN / Monday, Tuesday...
     const dayOfWeekVi = {
       'chủ nhật': 0, 'cn': 0,
