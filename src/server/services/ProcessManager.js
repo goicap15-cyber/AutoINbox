@@ -54,26 +54,51 @@ function getPuppeteer() {
   return puppeteerPromise;
 }
 
-// Thu nhỏ window Chrome xuống taskbar bằng cách minimize bình thường:
-// nút taskbar vẫn hiện và BẤM ĐƯỢC để khôi phục, Chrome không bị đóng nên
-// extension vẫn đồng bộ ngầm. Tuyệt đối không dùng chiêuWS_EX_TOOLWINDOW +
-// SetWindowPos(-32000) nữa — nó sinh ra các nút taskbar "ma" không bấm được.
-function minimizeToTaskbar(pid, profileDir = '') {
+// Ẩn Chrome "chạy ngầm" khi toggle OFF: SW_HIDE (ShowWindow 0) — window biến
+// mất khỏi màn hình VÀ khỏi taskbar (Windows tự gỡ nút khi window hide, không
+// để lại nút ma), process vẫn sống nên extension đồng bộ ngầm bình thường
+// (launch args đã có --disable-backgrounding-occluded-windows,
+// --disable-renderer-backgrounding). Không dùng WS_EX_TOOLWINDOW +
+// SetWindowPos(-32000): đổi style lúc window đang hiển thị không update
+// taskbar -> sinh nút "ma" không bấm được (reproduced 2026-09-29).
+function hideChromeWindowFromScreen(pid, profileDir = '') {
   if (process.platform !== 'win32') return;
   const profile = String(profileDir || '').replace(/'/g, "''").replace(/\\/g, '/');
   const psScript = `
-Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class SyncWindowHelper { [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int n); [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n); [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v); }' -ErrorAction SilentlyContinue
+Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public class HideWinHelper {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int n);
+}' -ErrorAction SilentlyContinue
 $profile = '${profile}'
 $targetPids = @(${pid || 0})
 if ($profile) {
   Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue | Where-Object { ($_.CommandLine -replace '\\','/') -like "*$profile*" } | ForEach-Object { $targetPids += $_.ProcessId }
 }
-Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $targetPids -contains $_.Id -and $_.MainWindowHandle -ne 0 } | ForEach-Object {
-  $h = $_.MainWindowHandle
-  $style = [SyncWindowHelper]::GetWindowLong($h, -20)
-  $style = ($style -band -bnot 0x00000080) -bor 0x00040000
-  [SyncWindowHelper]::SetWindowLong($h, -20, $style) | Out-Null
-  [SyncWindowHelper]::ShowWindowAsync($h, 6) | Out-Null
+$targetSet = New-Object 'System.Collections.Generic.HashSet[uint32]'
+foreach ($p in $targetPids) { if ($p -gt 0) { [void]$targetSet.Add([uint32]$p) } }
+$handles = New-Object System.Collections.ArrayList
+$cb = [HideWinHelper+EnumProc]{
+  param($h, $l)
+  $procId = [uint32]0
+  [void][HideWinHelper]::GetWindowThreadProcessId($h, [ref]$procId)
+  if ($targetSet.Contains($procId)) {
+    $sbC = New-Object System.Text.StringBuilder 128
+    [void][HideWinHelper]::GetClassName($h, $sbC, 128)
+    if ($sbC.ToString().StartsWith('Chrome_WidgetWin')) {
+      [void][HideWinHelper]::ShowWindowAsync($h, 0)
+      [void]$handles.Add($h)
+    }
+  }
+  return $true
+}
+[void][HideWinHelper]::EnumWindows($cb, [IntPtr]::Zero)
+if ($handles.Count -eq 0) {
+  Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $targetSet.Contains([uint32]$_.Id) -and $_.MainWindowHandle -ne 0 } | ForEach-Object {
+    [void][HideWinHelper]::ShowWindowAsync($_.MainWindowHandle, 0)
+  }
 }`;
   const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
   execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => {});
@@ -348,7 +373,7 @@ class ProcessManager {
     const timer = setTimeout(() => {
       const current = this.processes.get(accountId);
       if (current?.pid === pid && current.displayMode === 'BACKGROUND') {
-        minimizeToTaskbar(pid, current.profileDir);
+        hideChromeWindowFromScreen(pid, current.profileDir);
       }
       const remaining = (this.hideTimers.get(key) || []).filter((item) => item !== timer);
       if (remaining.length) this.hideTimers.set(key, remaining);
@@ -809,10 +834,10 @@ class ProcessManager {
         this.processes.delete(accId);
         return { success: false, error: 'CHROME_PROCESS_DEAD' };
       }
-      minimizeToTaskbar(currentProc.pid, currentProc.profileDir);
+      hideChromeWindowFromScreen(currentProc.pid, currentProc.profileDir);
       if (this.displayOpTokens.get(accId) === opToken) {
         currentProc.displayMode = 'BACKGROUND';
-        console.log(`[ProcessManager] Đã thu nhỏ Chrome của account ${accId} xuống taskbar (vẫn chạy ngầm).`);
+        console.log(`[ProcessManager] Đã ẩn Chrome của account ${accId} chạy ngầm (vẫn sống để extension đồng bộ).`);
       }
       return { success: true };
     });
@@ -1079,8 +1104,8 @@ if ($processedCount -eq 0) {
     }
     this.cancelScheduledHides(accountId);
     procInfo.displayMode = 'SYNC_MINIMIZED';
-    minimizeToTaskbar(procInfo.pid, procInfo.profileDir);
-    console.log(`[ProcessManager] Chrome account ${accountId} minimized to taskbar for the two-minute sync window.`);
+    hideChromeWindowFromScreen(procInfo.pid, procInfo.profileDir);
+    console.log(`[ProcessManager] Chrome account ${accountId} ẩn chạy ngầm trong cửa sổ đồng bộ hai phút.`);
     return true;
   }
 
