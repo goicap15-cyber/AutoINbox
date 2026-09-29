@@ -1844,13 +1844,18 @@ wss.on('connection', (ws, req) => {
             });
             const stableCallId = m.fb_message_id;
             const callTimestamp = Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now();
+            // History sync thường đã lưu đúng dòng cuộc gọi dưới mid thật
+            // (media_type='text'). Fallback này cũng khớp dòng text cùng nội
+            // dung (có thể kèm hậu tố " • N giây") để gộp thay vì tạo bong
+            // bóng thứ hai; ưu tiên dòng mang mid thật.
             const existingCall = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(stableCallId)
               || db.prepare(`
                 SELECT id FROM messages
-                WHERE thread_id = ? AND media_type = 'call' AND content = ?
+                WHERE thread_id = ? AND media_type IN ('call', 'text')
+                  AND (content = ? OR content LIKE ? || ' • %' OR ? LIKE content || ' • %')
                   AND ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) <= 60000
-                ORDER BY id DESC LIMIT 1
-              `).get(callThreadId, m.content, callTimestamp, callTimestamp);
+                ORDER BY CASE WHEN fb_message_id LIKE 'mid.%' THEN 0 ELSE 1 END, id DESC LIMIT 1
+              `).get(callThreadId, m.content, m.content, m.content, callTimestamp, callTimestamp);
             const callSenderId = m.sender_id || (callIsOutgoing ? String(targetAccountIdForCall || 'STAFF') : 'CONTACT');
             console.log(`[CALL_DEBUG] 🧵 callThreadId=${callThreadId} | m.thread_id=${m.thread_id} | canonicalThreadId=${canonicalThreadId} | callIsOutgoing=${callIsOutgoing}`);
             if (!existingCall) {

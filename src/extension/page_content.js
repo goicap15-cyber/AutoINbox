@@ -1636,7 +1636,14 @@ if (isBusiness) {
 
                 var threadId = resolveCurrentThreadId();
                 if (!threadId || threadId === 'UNKNOWN_THREAD') continue;
-                var callId = 'call_' + threadId + '_' + spanText.replace(/\s+/g, '_');
+                // Ưu tiên data-message-id thật (mid.$) để backend gộp với dòng
+                // mà history scan đã lưu - id tổng hợp từng khiến 1 cuộc gọi
+                // thành 2 bong bóng.
+                var midCarrier = spanEl.closest('[data-message-id]');
+                var realMid = midCarrier ? midCarrier.getAttribute('data-message-id') : null;
+                var callId = (realMid && /^mid\./i.test(realMid))
+                    ? realMid
+                    : 'call_' + threadId + '_' + spanText.replace(/\s+/g, '_');
 
                 if (processedHashes.has(callId)) continue;
                 processedHashes.add(callId);

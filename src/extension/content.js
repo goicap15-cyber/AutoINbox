@@ -1886,7 +1886,17 @@ setInterval(reconcileLatestIncomingMessages, 1500);
         // can both be "Voice call - 2 seconds". Baseline/seen-counts already
         // prevent old DOM rows from being emitted again, so add this detection
         // instant to distinguish genuinely new calls across the same thread.
-        var callId = 'call_dom_' + callSignatureHash(call.signature + '|occ' + call.occurrence);
+        // Prefer Facebook's real message id when the row carries one: the DOM
+        // history scan persists this same row under that mid, so a synthetic
+        // id here used to insert a second bubble for one call (nhân 2).
+        var rowMid = canonicalCallRow.getAttribute('data-message-id');
+        if (!rowMid) {
+          var midCarrier = canonicalCallRow.querySelector('[data-message-id]');
+          rowMid = midCarrier ? midCarrier.getAttribute('data-message-id') : null;
+        }
+        var callId = (rowMid && /^mid\./i.test(rowMid))
+          ? rowMid
+          : 'call_dom_' + callSignatureHash(call.signature + '|occ' + call.occurrence);
         if (_callSentIds.has(callId)) continue;
         _callSentIds.add(callId);
 

@@ -1191,6 +1191,40 @@ const migrations = [
         console.log('[DB] Migration v64: threads.history_completed already exists, skipped.');
       }
     }
+  },
+  {
+    version: 20260929001,
+    name: 'dedupe_legacy_call_log_twins',
+    // Scanner cuộc gọi cũ tạo id tổng hợp (call_dom_/call_) cho dòng mà
+    // history scan đã lưu đúng mid thật -> 1 cuộc gọi render 2 bong bóng.
+    // Xoá dòng tổng hợp và thăng dòng mid thật lên media_type='call'.
+    allowsMessageRowReduction: true,
+    up: (db) => {
+      const synthetics = db.prepare(`
+        SELECT id, thread_id, content, timestamp_ms
+        FROM messages
+        WHERE media_type = 'call' AND (fb_message_id LIKE 'call_dom_%' OR (fb_message_id LIKE 'call_%' AND fb_message_id NOT LIKE 'call_ended_%'))
+      `).all();
+      const findTwin = db.prepare(`
+        SELECT id FROM messages
+        WHERE thread_id = ? AND media_type = 'text' AND fb_message_id LIKE 'mid.%'
+          AND (content = ? OR content LIKE ? || ' • %' OR ? LIKE content || ' • %')
+          AND ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) <= 600000
+        ORDER BY ABS(COALESCE(NULLIF(timestamp_ms, 0), ?) - ?) ASC, id ASC LIMIT 1
+      `);
+      const patchTwin = db.prepare("UPDATE messages SET media_type = 'call' WHERE id = ?");
+      const deleteSynthetic = db.prepare('DELETE FROM messages WHERE id = ?');
+      let merged = 0;
+      for (const syn of synthetics) {
+        const ts = Number(syn.timestamp_ms) || 0;
+        const twin = findTwin.get(syn.thread_id, syn.content, syn.content, syn.content, ts, ts, ts, ts);
+        if (!twin) continue;
+        patchTwin.run(twin.id);
+        deleteSynthetic.run(syn.id);
+        merged += 1;
+      }
+      console.log(`[DB] Migration v20260929001: Gộp ${merged} bong bóng cuộc gọi trùng lặp vào dòng mid thật.`);
+    }
   }
 ];
 
