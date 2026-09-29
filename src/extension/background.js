@@ -1,5 +1,5 @@
 // AutoChatbot FB Engine - Service Worker Background Script
-importScripts('tabCreationCoordinator.js', 'queueEnvelopeValidation.js', 'callTabDeduplicator.js', 'messengerTabDeduplicator.js', 'messengerTabRoles.js', 'pageVideoUploader.js', 'pageNameExtractor.js', 'pageDiscovery.js', 'pageIdentityGate.js');
+importScripts('tabCreationCoordinator.js', 'queueEnvelopeValidation.js', 'callTabDeduplicator.js', 'messengerTabDeduplicator.js', 'messengerTabRoles.js', 'pageVideoUploader.js', 'pageNameExtractor.js', 'pageDiscovery.js', 'pageIdentityGate.js', 'tabAudit.js');
 const tabCreationCoordinator = self.FbCrmTabCreationCoordinator.createTabCreationCoordinator();
 
 async function blockFacebookNativeNotifications() {
@@ -8341,6 +8341,7 @@ setInterval(maintainBackendHeartbeat, 10000);
 // for the 20-minute MV3 alarm or a history crawl.
 setInterval(() => recoverRealtimeReceiver(), 5000);
 chrome.alarms.create(KEEPALIVE_ALARM_NAME, { periodInMinutes: 20 / 60 });
+chrome.alarms.create('fb_engine_tab_audit', { periodInMinutes: 5, delayInMinutes: 2 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM_NAME) {
     console.log('[FB Engine] 💓 Keepalive alarm tick');
@@ -8349,7 +8350,51 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     maintainBackendHeartbeat();
     recoverRealtimeReceiver();
   }
+  if (alarm.name === 'fb_engine_tab_audit') {
+    // 2026-09-29: tab hygiene - dong tab rác/trùng (messenger leftover,
+    // BS trùng cùng page), giữ tab page + tab mess cá nhân dùng để quét.
+    runTabAudit();
+  }
 });
+
+// 2026-09-29: Tab hygiene - phân loại giữ/đóng qua FbCrmTabAudit (pure, đã
+// test). Giữ tab page đang dùng + tab messenger có role làm việc; đóng tab
+// messenger không registry, tab discovery/requests leftover, tab BS trùng
+// cùng page. Không đụng tab ngoài pattern extension (của người dùng).
+async function runTabAudit() {
+  try {
+    await loadTabRegistry();
+    const registrySnapshot = {};
+    for (const [role, tabId] of tabRegistry) registrySnapshot[role] = tabId;
+    const protectedIds = Array.from(markerTabIds.keys());
+    const tabs = await new Promise((resolve) => {
+      chrome.tabs.query({
+        url: ['*://business.facebook.com/*', '*://*.messenger.com/*', '*://messenger.com/*', '*://*.facebook.com/*', '*://facebook.com/*']
+      }, (result) => resolve(result || []));
+    });
+    const verdict = FbCrmTabAudit.classifyTabsForAudit({ tabs, registry: registrySnapshot, protectedIds });
+    const tabsById = new Map(tabs.map((t) => [t.id, t]));
+    const keepIds = new Set(verdict.keepIds);
+    let closed = 0;
+    for (const closeId of verdict.closeIds) {
+      const t = tabsById.get(closeId);
+      if (!t) continue;
+      if (t.active) {
+        const keeperInWindow = verdict.keepIds.find((kid) => tabsById.get(kid) && tabsById.get(kid).windowId === t.windowId);
+        if (keeperInWindow != null) {
+          await chrome.tabs.update(keeperInWindow, { active: true }).catch(() => {});
+        }
+      }
+      try { await chrome.tabs.remove(closeId); closed += 1; } catch (_) {}
+    }
+    if (closed > 0 || verdict.closeIds.length > 0) {
+      console.log(`[FB Engine] [TAB_AUDIT] keep=${verdict.keepIds.length} closed=${closed}/${verdict.closeIds.length}`);
+    }
+  } catch (error) {
+    console.warn('[FB Engine] [TAB_AUDIT] failed:', error?.message || error);
+  }
+}
+runTabAudit();
 
 // Do not wait for the first outbound CRM command. Restore the Messenger tab,
 // content observer and queued customer messages as soon as the worker starts.
