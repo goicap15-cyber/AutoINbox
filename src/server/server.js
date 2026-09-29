@@ -3351,7 +3351,16 @@ wss.on('connection', (ws, req) => {
             // flukes that usually clear up on their own; error_screen means Facebook
             // itself is blocking the content, which is permanent and must not retry.
             const TRANSIENT_REASONS = new Set(['marker_mismatch', 'sidebar_mismatch', 'no_rows', 'no_main_container', 'url_mismatch']);
-            if (TRANSIENT_REASONS.has(reason)) {
+            // 2026-09-29: thread Page CHUA TUNG CO DU LIEU (msgs=0) that bai voi
+            // thread_route_mismatch / extension_history_timeout khi xac minh
+            // danh tinh hoi thoai lanh (chua tung mo) - mark vinh vien lam hoi
+            // thoai moi treo trong mai (reproduce: Vung Vu Vuong page 768).
+            // Chi 2 reason nay duoc retry khi thread con trong; thread da co
+            // du lieu giu nguyen chinh sach cu de tranh tai quet vo ich.
+            const COLD_RETRYABLE_REASONS = new Set(['thread_route_mismatch', 'extension_history_timeout']);
+            const coldThreadNoMessages = COLD_RETRYABLE_REASONS.has(reason)
+              && db.prepare('SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?').get(thread_id).n === 0;
+            if (TRANSIENT_REASONS.has(reason) || coldThreadNoMessages) {
               const scheduled = HistorySyncRetryPolicy.scheduleRetry(account_id, thread_id, () => {
                 // A retry also performs tab navigation - if the operator has since
                 // clicked a different thread, HistorySyncRetryPolicy already cancels

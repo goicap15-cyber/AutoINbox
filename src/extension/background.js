@@ -1,5 +1,5 @@
 // AutoChatbot FB Engine - Service Worker Background Script
-importScripts('tabCreationCoordinator.js', 'queueEnvelopeValidation.js', 'callTabDeduplicator.js', 'messengerTabDeduplicator.js', 'messengerTabRoles.js', 'pageVideoUploader.js', 'pageNameExtractor.js', 'pageDiscovery.js');
+importScripts('tabCreationCoordinator.js', 'queueEnvelopeValidation.js', 'callTabDeduplicator.js', 'messengerTabDeduplicator.js', 'messengerTabRoles.js', 'pageVideoUploader.js', 'pageNameExtractor.js', 'pageDiscovery.js', 'pageIdentityGate.js');
 const tabCreationCoordinator = self.FbCrmTabCreationCoordinator.createTabCreationCoordinator();
 
 async function blockFacebookNativeNotifications() {
@@ -5949,7 +5949,15 @@ async function getVisibleBizContactNames(tabId) {
         return names;
       }
     });
-    return Array.isArray(results?.[0]?.result) ? results[0].result : [];
+    const raw = Array.isArray(results?.[0]?.result) ? results[0].result : [];
+    // 2026-09-29: bo label nut hanh dong ("Chuyen den thu muc Spam"...) khoi
+    // candidate ten - header cua hoi thoai lanh render nut truoc ten, tracker
+    // nhat nhầm label lam ten khach roi abort ca sync (thread_route_mismatch).
+    // Chi con label -> mang rong -> verifyBizHeaderIdentity roi vao nhanh
+    // "khong doc duoc header" (tin vao ID) thay vi abort.
+    return (typeof FbCrmPageIdentityGate !== 'undefined')
+      ? FbCrmPageIdentityGate.filterCandidateNames(raw)
+      : raw;
   } catch (_) { return []; }
 }
 
@@ -6412,7 +6420,16 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     releaseManualHistoryOwner();
     return;
   }
-  const currentTabThreadId = await getCurrentThreadIdInTab(tab.id);
+  let currentTabThreadId = await getCurrentThreadIdInTab(tab.id);
+  // 2026-09-29: Facebook ghi selected_item_id vao URL TRE tren hoi thoai lanh
+  // (chua tung mo) - doc 1 lan tra null va day ca sync vao nhanh header fallback.
+  // Thu lai toi da 2 lan x 1s cho page thread truoc khi cham dich.
+  if (page_id && String(currentTabThreadId || '') !== String(navigationThreadId || '')) {
+    for (let attempt = 0; attempt < 2 && String(currentTabThreadId || '') !== String(navigationThreadId || ''); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      currentTabThreadId = await getCurrentThreadIdInTab(tab.id);
+    }
+  }
   const updatedTab = await chrome.tabs.get(tab.id).catch(() => tab);
 
   console.log(`[DOM Sync Verification] requested thread: ${thread_id} | current Facebook URL: ${updatedTab?.url || tab.url} | current thread id: ${currentTabThreadId}`);
@@ -6430,7 +6447,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     if (currentTabThreadId != null && String(currentTabThreadId) === String(navigationThreadId)) {
       pageIdentityOk = true;
     } else if (contact_name) {
-      const verdict = await verifyBizHeaderIdentity(tab.id, contact_name, 3500);
+      const verdict = await verifyBizHeaderIdentity(tab.id, contact_name, 10000);
       pageIdentityOk = verdict.ok;
       routeDetail = verdict.visible || 'không đọc được';
       if (!pageIdentityOk) {
