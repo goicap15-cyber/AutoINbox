@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const processManagerModule = require('../../src/server/services/ProcessManager');
-const { ProcessManager } = processManagerModule;
+const { ProcessManager, closeChromePidsGracefullySync } = processManagerModule;
 
 function createManager() {
   // Use `new ProcessManager()` to get a fully initialized instance
@@ -290,6 +290,25 @@ test('Topbar ChatHeader toggle error handling logic alerts on API failure', asyn
 
   await simulateToggle({ ok: false, dataSuccess: false, errorText: null, isChromeHidden: false });
   assert.equal(alertedMessage, 'Không thể ẩn cửa sổ Chrome');
+});
+
+test('closeChromePidsGracefullySync trên non-win32 trả về mảng rỗng', async () => {
+  const origPlatform = process.platform;
+  try {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    const res = closeChromePidsGracefullySync([12345], 100);
+    assert.deepEqual(res, []);
+  } finally {
+    Object.defineProperty(process, 'platform', { value: origPlatform });
+  }
+});
+
+test('ProcessManager: stopAccountProcess với PID đã chết trả về true và dọn entry', () => {
+  const manager = createManager();
+  manager.processes.set('acc-dead2', { pid: 999999999, status: 'RUNNING', displayMode: 'VISIBLE' });
+  const res = manager.stopAccountProcess('acc-dead2');
+  assert.equal(res, true);
+  assert.equal(manager.processes.has('acc-dead2'), false);
 });
 
 test('ProcessManager: hideAccountProcess and unhideWindow success path updates displayMode', async () => {

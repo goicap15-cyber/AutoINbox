@@ -79,6 +79,70 @@ Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $targetP
   execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => {});
 }
 
+// Đóng Chrome bằng WM_CLOSE (tương đương bấm X) để Windows tự gỡ nút taskbar
+// sạch sẽ. taskkill /F giết process tức thì nhưng taskbar không kịp unregister
+// -> để lại nút "ma" không bấm được, chỉ mất khi đăng xuất (reproduced 2026-09-29).
+// Trả về danh sách PID còn sống sau graceMs để caller quyết định taskkill.
+function closeChromePidsGracefullySync(pids, graceMs = 3000) {
+  if (process.platform !== 'win32') return [];
+  const targetPids = [...new Set((pids || [])
+    .map((p) => Number.parseInt(p, 10))
+    .filter((p) => Number.isInteger(p) && p > 0))];
+  if (!targetPids.length) return [];
+  const psScript = `
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class GraceCloseWin {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint f, uint t, out IntPtr r);
+}' -ErrorAction SilentlyContinue
+$rawTargets = @(${targetPids.join(',')})
+$targets = New-Object 'System.Collections.Generic.HashSet[uint32]'
+foreach ($p in $rawTargets) {
+  if (Get-Process -Id $p -ErrorAction SilentlyContinue) { [void]$targets.Add([uint32]$p) }
+}
+if ($targets.Count -gt 0) {
+  $cb = [GraceCloseWin+EnumProc]{
+    param($h, $l)
+    $procId = [uint32]0
+    [void][GraceCloseWin]::GetWindowThreadProcessId($h, [ref]$procId)
+    if ($targets.Contains($procId) -and [GraceCloseWin]::IsWindowVisible($h)) {
+      $res = [IntPtr]::Zero
+      [void][GraceCloseWin]::SendMessageTimeout($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero, 0x000A, 2000, [ref]$res)
+    }
+    return $true
+  }
+  [void][GraceCloseWin]::EnumWindows($cb, [IntPtr]::Zero)
+  $deadline = [DateTime]::UtcNow.AddMilliseconds(${graceMs})
+  while ([DateTime]::UtcNow -lt $deadline) {
+    $anyAlive = $false
+    foreach ($p in $targets) {
+      if (Get-Process -Id $p -ErrorAction SilentlyContinue) { $anyAlive = $true; break }
+    }
+    if (-not $anyAlive) { break }
+    Start-Sleep -Milliseconds 150
+  }
+  foreach ($p in $targets) {
+    if (Get-Process -Id $p -ErrorAction SilentlyContinue) { Write-Output $p }
+  }
+}`;
+  const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], {
+    windowsHide: true,
+    encoding: 'utf8',
+    timeout: graceMs + 8000
+  });
+  if (result.error) {
+    console.warn('[ProcessManager] Graceful close lỗi, sẽ taskkill trực tiếp:', result.error.message);
+    return targetPids;
+  }
+  return String(result.stdout || '')
+    .split(/\r?\n/)
+    .map((line) => Number.parseInt(line.trim(), 10))
+    .filter((p) => targetPids.includes(p));
+}
+
 // Tự động cấp quyền (Micro, Camera, Popups, Notifications) cho Facebook trong Chrome Profile Preferences
 function findBundledChromePidByProfile(profileDir, chromeExecutable) {
   if (process.platform !== 'win32' || !profileDir || !chromeExecutable) return null;
@@ -97,20 +161,33 @@ $mismatchedRoots = $profileProcesses | Where-Object {
   $_.ExecutablePath -and (($_.ExecutablePath -replace '\\','/') -ne $expectedExecutable)
 }
 foreach ($proc in $mismatchedRoots) {
-  & taskkill.exe /PID $proc.ProcessId /T /F | Out-Null
+  Write-Output "MISMATCH $($proc.ProcessId)"
 }
 
 $match = $profileProcesses | Where-Object {
   $_.ExecutablePath -and (($_.ExecutablePath -replace '\\','/') -eq $expectedExecutable)
 } | Select-Object -First 1 -ExpandProperty ProcessId
-if ($match) { Write-Output $match }
+if ($match) { Write-Output "MATCH $match" }
 `;
   const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
   const result = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
     encoding: 'utf8', windowsHide: true, timeout: 5000
   });
-  const pid = Number.parseInt(String(result.stdout || '').trim(), 10);
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
+  let matchPid = null;
+  const mismatchedPids = [];
+  for (const line of String(result.stdout || '').split(/\r?\n/)) {
+    const m = line.trim().match(/^(MISMATCH|MATCH)\s+(\d+)$/);
+    if (!m) continue;
+    if (m[1] === 'MATCH') matchPid = Number.parseInt(m[2], 10);
+    else mismatchedPids.push(Number.parseInt(m[2], 10));
+  }
+  if (mismatchedPids.length) {
+    const stillAlive = closeChromePidsGracefullySync(mismatchedPids, 3000);
+    for (const pid of stillAlive) {
+      spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, encoding: 'utf8' });
+    }
+  }
+  return Number.isInteger(matchPid) && matchPid > 0 ? matchPid : null;
 }
 
 // Chrome cache bản unpacked extension trong profile (Extensions/ + Preferences)
@@ -329,12 +406,19 @@ class ProcessManager {
     if (runningProfilePid && forceExtensionReload) {
       console.log(`[ProcessManager] Chrome profile ${accountId} is alive but its extension is offline; stopping PID ${runningProfilePid}.`);
       if (process.platform === 'win32') {
-        const result = spawnSync('taskkill.exe', ['/PID', String(runningProfilePid), '/T', '/F'], {
-          windowsHide: true,
-          encoding: 'utf8'
-        });
-        if (result.error || (result.status !== 0 && result.status !== 128)) {
-          console.error(`[ProcessManager] Could not restart Chrome profile ${accountId}:`, result.error?.message || result.stderr || result.stdout);
+        const stillAlive = closeChromePidsGracefullySync([runningProfilePid], 3000);
+        let killError = null;
+        for (const pid of stillAlive) {
+          const result = spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+            windowsHide: true,
+            encoding: 'utf8'
+          });
+          if (result.error || (result.status !== 0 && result.status !== 128)) {
+            killError = result.error?.message || result.stderr || result.stdout || `taskkill exit ${result.status}`;
+          }
+        }
+        if (killError) {
+          console.error(`[ProcessManager] Could not restart Chrome profile ${accountId}:`, killError);
           return false;
         }
       }
@@ -938,13 +1022,18 @@ if ($processedCount -eq 0) {
     }
     try {
       if (process.platform === 'win32') {
-        const result = spawnSync('taskkill.exe', ['/PID', String(procInfo.pid), '/T', '/F'], {
-          windowsHide: true,
-          encoding: 'utf8'
-        });
-        if (result.error) throw result.error;
-        if (result.status !== 0 && result.status !== 128) {
-          throw new Error(String(result.stderr || result.stdout || `taskkill exit ${result.status}`).trim());
+        // Đóng nhẹ nhàng (WM_CLOSE) để taskbar gỡ nút sạch sẽ; taskkill /F
+        // chỉ dành cho Chrome bị treo sau graceMs (tạo nút taskbar "ma").
+        const stillAlive = closeChromePidsGracefullySync([procInfo.pid], 3000);
+        for (const pid of stillAlive) {
+          const result = spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+            windowsHide: true,
+            encoding: 'utf8'
+          });
+          if (result.error) throw result.error;
+          if (result.status !== 0 && result.status !== 128) {
+            throw new Error(String(result.stderr || result.stdout || `taskkill exit ${result.status}`).trim());
+          }
         }
       } else {
         try { process.kill(-procInfo.pid, 'SIGTERM'); }
@@ -1039,7 +1128,6 @@ foreach ($proc in $roots) {
   $insideManagedRoot = ($profile + '\\').StartsWith($profilesRoot, [StringComparison]::OrdinalIgnoreCase)
   $isAllowed = $allowed | Where-Object { $_.Equals($profile, [StringComparison]::OrdinalIgnoreCase) }
   if ($insideManagedRoot -and -not $isAllowed) {
-    & taskkill.exe /PID $proc.ProcessId /T /F | Out-Null
     Write-Output $proc.ProcessId
   }
 }`;
@@ -1049,7 +1137,15 @@ foreach ($proc in $roots) {
       encoding: 'utf8',
       timeout: 20000
     });
-    const stopped = String(result.stdout || '').split(/\r?\n/).filter((line) => /^\d+$/.test(line.trim())).length;
+    const orphanPids = String(result.stdout || '')
+      .split(/\r?\n/)
+      .map((line) => Number.parseInt(line.trim(), 10))
+      .filter((p) => Number.isInteger(p) && p > 0);
+    const stillAlive = closeChromePidsGracefullySync(orphanPids, 3000);
+    for (const pid of stillAlive) {
+      spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, encoding: 'utf8' });
+    }
+    const stopped = orphanPids.length;
     if (result.error) console.warn('[ProcessManager] Could not clean orphaned managed Chrome profiles:', result.error.message);
     if (stopped) console.log(`[ProcessManager] Stopped ${stopped} orphaned managed Chrome profile(s).`);
     return stopped;
@@ -1074,3 +1170,4 @@ foreach ($proc in $roots) {
 
 module.exports = new ProcessManager();
 module.exports.ProcessManager = ProcessManager;
+module.exports.closeChromePidsGracefullySync = closeChromePidsGracefullySync;

@@ -44,6 +44,7 @@ const db = require('./database/db');
 const { AuthService, AuthError } = require('./services/AuthService');
 const { CentralAuthClient, CentralAuthError } = require('./services/CentralAuthClient');
 const processManager = require('./services/ProcessManager');
+const { closeChromePidsGracefullySync } = processManager;
 const mediaDownloader = require('./services/RobustMediaDownloader');
 const assignmentManager = require('./services/AssignmentManager');
 const enterpriseAccess = require('./services/EnterpriseAccessService');
@@ -625,11 +626,20 @@ function sweepAbandonedPendingProfiles() {
       if (ageMs < PENDING_SWEEP_MIN_AGE_MS) continue;
       try {
         // Phiên bỏ hoang CÓ THỂ còn Chrome đang mở (cửa sổ BS/popup phiền) -
-        // kill tree theo profile trước rồi mới xóa, nếu không sweep sẽ bị
-        // khóa file và cửa sổ zombie sống mãi (reproduced 2026-09-19).
-        const killPs = `Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue | Where-Object { ($_.CommandLine -replace '\\','/') -like '*${entry.name.replace(/'/g, "''")}*' } | ForEach-Object { taskkill.exe /PID $_.ProcessId /T /F | Out-Null }`;
-        const encodedKill = Buffer.from(killPs, 'utf16le').toString('base64');
-        spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedKill], { timeout: 15000, windowsHide: true });
+        // đóng nhẹ nhàng (WM_CLOSE) trước để taskbar gỡ nút sạch sẽ, chỉ
+        // taskkill khi Chrome treo; xóa profile sau để tránh khóa file
+        // (reproduced 2026-09-19).
+        const findPs = `Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue | Where-Object { ($_.CommandLine -replace '\\','/') -like '*${entry.name.replace(/'/g, "''")}*' } | ForEach-Object { Write-Output $_.ProcessId }`;
+        const encodedFind = Buffer.from(findPs, 'utf16le').toString('base64');
+        const found = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedFind], { timeout: 15000, windowsHide: true, encoding: 'utf8' });
+        const chromePids = String(found.stdout || '')
+          .split(/\r?\n/)
+          .map((line) => Number.parseInt(line.trim(), 10))
+          .filter((p) => Number.isInteger(p) && p > 0);
+        const stillAlive = closeChromePidsGracefullySync(chromePids, 3000);
+        for (const pid of stillAlive) {
+          spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, encoding: 'utf8' });
+        }
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 800); // sleep dong bo (ham khong async)
         fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
         removed++;
