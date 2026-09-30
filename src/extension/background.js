@@ -6384,7 +6384,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   console.log(`[FB Engine] 🔄 Sync lịch sử tin nhắn cho thread: ${thread_id} (${contact_name || 'unknown'}, account=${account_id || user_id}) mode=${mode}`);
   if (!thread_id) return;
   const allowedReasons = new Set(['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport', 'initial_sweep', 'manual_resync', 'history_retry', 'sidebar_incoming']);
-  const baseReason = String(reason || '').replace(/(?:_replay)+$/, '');
+  const baseReason = FbCrmMessengerTabRoles.stripSyncReasonSuffix(reason);
   if (!_history_tab_id && (allow_navigation !== true || !allowedReasons.has(baseReason))) {
     sendToBackend('THREAD_MESSAGES_SYNCED', {
       account_id: account_id || user_id,

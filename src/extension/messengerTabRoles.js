@@ -39,7 +39,17 @@
     return role === 'chat' || role === 'interaction' || role === 'discovery';
   }
 
-  const api = { PERSONAL_ROLES, roleKey, legacyInteractionKey, roleForTab, canForwardRealtime, canForwardIncomingRealtime, canForwardCallRealtime };
+  // 2026-09-30: scheduler retry nối suffix "_extension_replay"/"_replay" vào
+  // reason khi dispatch lần đầu fail (SW ngủ/churn). Phép so sánh
+  // allowedReasons phía handleSyncThreadMessages phải tách SẠCH suffix này
+  // trước khi tra bảng - thiếu bước này khiến mọi item replay fail tức thì
+  // navigation_not_authorized và hàng đợi sweep churn không sync được gì
+  // (reproduce 2026-09-30: initial_sweep_extension_replay fail hàng loạt).
+  function stripSyncReasonSuffix(reason) {
+    return String(reason || '').replace(/(?:_extension)?(?:_replay)+$/g, '');
+  }
+
+  const api = { PERSONAL_ROLES, roleKey, legacyInteractionKey, roleForTab, canForwardRealtime, canForwardIncomingRealtime, canForwardCallRealtime, stripSyncReasonSuffix };
   root.FbCrmMessengerTabRoles = api;
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
