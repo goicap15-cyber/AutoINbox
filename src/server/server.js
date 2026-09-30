@@ -72,7 +72,7 @@ LinkPreviewService.onImageNeeded = (urlHash, url) => {
   }
 };
 const { isSystemOrMetadataText, cleanMessageText, isSidebarActivitySummary, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
-const { sidebarShouldSkipSweep } = require('./utils/sidebarCompare');
+const { sidebarShouldSkipSweep, isStaleThreadLastActivity } = require('./utils/sidebarCompare');
 const { isKnownPageSystemNotice } = require('./utils/pageSystemNotice');
 const { parsePageIdFromInput } = require('./utils/pageIdParser');
 const ConversationRepository = require('./repositories/ConversationRepository');
@@ -6774,7 +6774,8 @@ InitialMessageSweepService.configure({
     SELECT t.id, t.external_thread_id, t.thread_url, t.contact_name,
            t.is_unread, t.last_activity, t.last_message,
            CASE WHEN s.source_type = 'page_messenger' THEN s.external_id ELSE NULL END AS page_id,
-           (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) AS message_count
+           (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) AS message_count,
+           (SELECT MAX(m.timestamp_ms) FROM messages m WHERE m.thread_id = t.id) AS last_msg_ts
     FROM threads t
     LEFT JOIN inbox_sources s ON s.id = t.source_id
     WHERE t.account_id = ? AND t.archived_at IS NULL
@@ -6792,6 +6793,15 @@ InitialMessageSweepService.configure({
       const preview = String(thread?.last_message || '');
       if (!preview.trim()) return false;
       if (Number(thread?.is_unread) === 1) return false;
+      // 2026-09-30 (Phase 2.3): thread lạnh - tin cuối cũ hơn 30 ngày mà
+      // không unread -> defer (Tier 2 on-demand), ưu tiên thread đang hoạt
+      // động. Cấu hình qua env FB_CRM_STALE_THREAD_DAYS.
+      if (isStaleThreadLastActivity({
+        lastMsgTs: thread?.last_msg_ts,
+        staleDays: Number(process.env.FB_CRM_STALE_THREAD_DAYS || 30)
+      })) {
+        return true;
+      }
       const last = db.prepare(`
         SELECT content FROM messages
         WHERE thread_id = ? AND content IS NOT NULL AND content <> ''

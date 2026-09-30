@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { sidebarShouldSkipSweep, normalizePreviewText } = require('../../src/server/utils/sidebarCompare');
+const { sidebarShouldSkipSweep, isStaleThreadLastActivity, normalizePreviewText } = require('../../src/server/utils/sidebarCompare');
 
 // Vietnamese via unicode escapes so this source stays ASCII.
 const PREVIEW = 'H\u00f4m nay em t\u1eb7ng \u01b0u \u0111\u00e3i gi\u1ea3m gi\u00e1 mua h\u00e0ng cho anh qua s\u1ed1 zalo n\u00e0o \u0111\u01b0\u1ee3c a?';
@@ -51,4 +51,12 @@ test('never skips when preview or stored content is empty', () => {
   assert.equal(sidebarShouldSkipSweep({ sidebarPreview: PREVIEW, storedContent: '', isUnread: 0 }), false);
   assert.equal(sidebarShouldSkipSweep({ sidebarPreview: PREVIEW, storedContent: null, isUnread: 0 }), false);
   assert.equal(sidebarShouldSkipSweep({ sidebarPreview: PREVIEW, storedContent: STORED_SAME }), false);
+});
+
+test('isStaleThreadLastActivity: old last message and not unread -> defer', () => {
+  const now = Date.now();
+  assert.equal(isStaleThreadLastActivity({ lastMsgTs: now - 40 * 86400000, nowMs: now, staleDays: 30 }), true);
+  assert.equal(isStaleThreadLastActivity({ lastMsgTs: now - 5 * 86400000, nowMs: now, staleDays: 30 }), false);
+  assert.equal(isStaleThreadLastActivity({ lastMsgTs: 0, nowMs: now, staleDays: 30 }), false); // chua co tin -> khong stale
+  assert.equal(isStaleThreadLastActivity({ lastMsgTs: now - 40 * 86400000, nowMs: now, staleDays: 60 }), false);
 });

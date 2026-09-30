@@ -25,6 +25,16 @@ function normalizePreviewText(text) {
 
 const MIN_PREVIEW_CHARS = 12;
 
+// 2026-09-30 (Phase 2.3): thread lạnh - tin cuối cũ hơn staleDays ngày và
+// không unread -> defer (Tier 2: on-demand khi operator cuộn / backfill nền).
+// Unread luôn thắng (khách chờ phản hồi thì phải sync dù cũ).
+function isStaleThreadLastActivity({ lastMsgTs, nowMs = Date.now(), staleDays = 30 } = {}) {
+  const ts = Number(lastMsgTs || 0);
+  if (!(ts > 0)) return false;
+  const days = Number(staleDays || 30);
+  return (Number(nowMs) - ts) > days * 86400000;
+}
+
 function sidebarShouldSkipSweep({ sidebarPreview, storedContent, isUnread } = {}) {
   // isUnread không xác định (undefined/null) -> không chắc trạng thái đọc
   // -> không skip (nguyên tắc: không chắc thì sync).
@@ -37,4 +47,4 @@ function sidebarShouldSkipSweep({ sidebarPreview, storedContent, isUnread } = {}
   return stored.startsWith(preview) || preview.startsWith(stored);
 }
 
-module.exports = { normalizePreviewText, sidebarShouldSkipSweep, MIN_PREVIEW_CHARS };
+module.exports = { normalizePreviewText, sidebarShouldSkipSweep, isStaleThreadLastActivity, MIN_PREVIEW_CHARS };
