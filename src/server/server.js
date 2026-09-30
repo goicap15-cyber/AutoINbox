@@ -3350,7 +3350,13 @@ wss.on('connection', (ws, req) => {
             // marker_mismatch/sidebar_mismatch/no_rows/no_main_container are DOM-timing
             // flukes that usually clear up on their own; error_screen means Facebook
             // itself is blocking the content, which is permanent and must not retry.
-            const TRANSIENT_REASONS = new Set(['marker_mismatch', 'sidebar_mismatch', 'no_rows', 'no_main_container', 'url_mismatch']);
+            const TRANSIENT_REASONS = new Set(['marker_mismatch', 'sidebar_mismatch', 'no_rows', 'no_main_container', 'url_mismatch', 'navigation_superseded']);
+            // Navigation-lock rejections are temporary by design: the extension
+            // holds the history/Business Suite tab on the thread the operator just
+            // clicked for a 30s window. Retrying while that window is still open
+            // is pointless, so these use a backoff that lands after it expires.
+            const LOCK_WINDOW_REASONS = new Set(['navigation_locked_by_user_selection', 'page_locked_by_user_action']);
+            const LOCK_WINDOW_BACKOFF_MS = [35000, 45000, 60000];
             // 2026-09-29: thread Page CHUA TUNG CO DU LIEU (msgs=0) that bai voi
             // thread_route_mismatch / extension_history_timeout khi xac minh
             // danh tinh hoi thoai lanh (chua tung mo) - mark vinh vien lam hoi
@@ -3360,12 +3366,13 @@ wss.on('connection', (ws, req) => {
             const COLD_RETRYABLE_REASONS = new Set(['thread_route_mismatch', 'extension_history_timeout']);
             const coldThreadNoMessages = COLD_RETRYABLE_REASONS.has(reason)
               && db.prepare('SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?').get(thread_id).n === 0;
-            if (TRANSIENT_REASONS.has(reason) || coldThreadNoMessages) {
+            if (TRANSIENT_REASONS.has(reason) || coldThreadNoMessages || LOCK_WINDOW_REASONS.has(reason)) {
               const scheduled = HistorySyncRetryPolicy.scheduleRetry(account_id, thread_id, () => {
-                // A retry also performs tab navigation - if the operator has since
-                // clicked a different thread, HistorySyncRetryPolicy already cancels
-                // this before it fires, so reaching here means this thread is still
-                // the one being looked at.
+                // A retry also performs tab navigation. Default transient retries
+                // are cancelled when the operator has since clicked a different
+                // thread (navigated_away guard). Lock-window retries bypass that
+                // guard: the extension's own 30s navigation lock protects the
+                // just-clicked thread, and their backoff lands after it expires.
                 const extWs = extensionConnections.get(account_id);
                 if (!extWs || extWs.readyState !== WebSocket.OPEN) {
                   console.warn(`[HISTORY_SYNC_RETRY_SKIPPED] thread=${thread_id} reason=extension_not_ready`);
@@ -3388,7 +3395,7 @@ wss.on('connection', (ws, req) => {
                   }
                 }));
                 console.log(`[WS] Retry sync tin nhắn cho thread ${thread_id} (account ${account_id}) mode=${mode}`);
-              });
+              }, LOCK_WINDOW_REASONS.has(reason) ? LOCK_WINDOW_BACKOFF_MS : null, LOCK_WINDOW_REASONS.has(reason));
               if (!scheduled) {
                 console.log(`[WS] Không retry điều hướng thread ${thread_id} (reason=${reason}, đã hết lượt); chờ click/yêu cầu mới.`);
               }

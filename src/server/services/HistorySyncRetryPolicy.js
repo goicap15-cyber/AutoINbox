@@ -29,26 +29,41 @@ class HistorySyncRetryPolicy {
     HistorySyncRetryPolicy.cancelRetry(tId);
   }
 
-  static scheduleRetry(accountId, threadId, retryFn) {
+  static scheduleRetry(accountId, threadId, retryFn, customBackoffMs = null, skipNavigatedAwayGuard = false) {
     const accId = String(accountId || '');
     const tId = String(threadId || '');
     if (!accId || !tId) return false;
 
-    const state = retryState.get(tId) || { attempts: 0, timer: null };
-    if (state.attempts >= MAX_ATTEMPTS) {
+    // Lock-window rejections (navigation_locked_by_user_selection, ...) need
+    // their first attempt to land after the extension's 30s navigation lock
+    // expires, so callers can pass a per-reason backoff schedule.
+    const backoff = Array.isArray(customBackoffMs) && customBackoffMs.length > 0
+      ? customBackoffMs
+      : BACKOFF_MS;
+    const maxAttempts = backoff.length;
+
+    const state = retryState.get(tId) || { attempts: 0, timer: null, skipNavigatedAwayGuard };
+    if (state.attempts >= maxAttempts) {
       console.warn(`[HISTORY_SYNC_RETRY_EXHAUSTED] thread=${tId} attempts=${state.attempts}`);
       retryState.delete(tId);
       return false;
     }
 
-    const delay = BACKOFF_MS[state.attempts];
+    const delay = backoff[state.attempts];
     state.attempts += 1;
     if (state.timer) clearTimeout(state.timer);
     state.timer = setTimeout(() => {
       const current = retryState.get(tId);
       if (!current) return; // cancelled in the meantime
 
-      if (latestThreadByAccount.has(accId) && latestThreadByAccount.get(accId) !== tId) {
+      // Background syncs of threads the operator is NOT viewing must not die
+      // just because the operator clicked some other thread in the CRM - the
+      // extension's own 30s navigation lock already protects the clicked
+      // thread, and a retry that still lands inside that window is simply
+      // rejected again and escalates to the next backoff attempt.
+      if (!current.skipNavigatedAwayGuard
+        && latestThreadByAccount.has(accId)
+        && latestThreadByAccount.get(accId) !== tId) {
         console.log(`[HISTORY_SYNC_RETRY_SKIPPED] thread=${tId} reason=navigated_away`);
         retryState.delete(tId);
         return;

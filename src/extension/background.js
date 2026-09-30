@@ -1550,13 +1550,18 @@ function connectWebSocket() {
                 console.log(`[FB Engine] [PAGE_NAV_LOCK] Business Suite tab for page=${pid} locked to thread=${tid}`);
               } else {
                 // Lock the personal history tab to the thread the user just clicked.
-                // Background sync for any other personal thread is now blocked.
+                // Background sync for any other personal thread is blocked only for
+                // the 30s click window (same as the Page lock). A lock without
+                // expiry permanently blocked background syncs of every other
+                // thread, so customer images/videos never synced until the
+                // operator clicked that thread themselves.
                 userNavigationLockThreadId = String(message.data?.thread_id || '');
+                userNavigationLockUntil = Date.now() + 30000;
                 if (bulkHistorySyncInFlight) {
                   bulkHistorySyncAbortRequested = true;
                   console.log('[FB Engine] [BULK_HISTORY] Abort requested by user-click navigation.');
                 }
-                console.log('[FB Engine] [NAV_LOCK] History tab locked to thread:', userNavigationLockThreadId);
+                console.log('[FB Engine] [NAV_LOCK] History tab locked to thread:', userNavigationLockThreadId, 'until', new Date(userNavigationLockUntil).toISOString());
               }
             }
             const laneKey = message.data?.page_id
@@ -6340,10 +6345,13 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     return;
   }
   // If user has explicitly clicked a thread, the history tab is locked to it.
-  // Background sync for any OTHER thread must not navigate the history tab.
+  // Background sync for any OTHER thread must not navigate the history tab —
+  // but only during the 30s click window, otherwise threads the operator never
+  // clicks would never sync their messages (images/videos included).
   const isUserDrivenReason = ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].includes(baseReason);
   if (!_history_tab_id && !page_id && !isUserDrivenReason
     && userNavigationLockThreadId
+    && Date.now() < userNavigationLockUntil
     && userNavigationLockThreadId !== String(thread_id || '')) {
     console.log(`[FB Engine] [NAV_LOCK] Skipping background sync for thread=${thread_id} — history tab locked to ${userNavigationLockThreadId}`);
     sendToBackend('THREAD_MESSAGES_SYNCED', {
@@ -7834,9 +7842,11 @@ let bulkHistorySyncInFlight = false;
 let bulkHistorySyncAbortRequested = false;
 
 // Tracks the thread the user last explicitly clicked in the CRM.
-// While set, the history tab is LOCKED to this thread — no background
-// sync is allowed to navigate it elsewhere until the user clicks again.
+// While the 30s window below is active, the history tab is LOCKED to this
+// thread — background syncs must not navigate it elsewhere. After expiry the
+// shared history tab is free again for other threads (mirrors Page lock).
 let userNavigationLockThreadId = null;
+let userNavigationLockUntil = 0;
 
 async function handleBulkHistorySync({ account_id, job_id, threads = [] } = {}) {
   const targetAcc = account_id || user_id;

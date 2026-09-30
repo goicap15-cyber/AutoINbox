@@ -1169,14 +1169,16 @@ const migrations = [
     }
   },
   {
-    version: 63,
+    // Version gốc 63 đã bị migrations table chứa row rác 'add_lead_statuses'
+    // (old build) chiếm chỗ -> đổi sang version tự do để runner chạy được.
+    version: 20260930001,
     name: 'add_profile_url_to_contacts',
     up: (db) => {
       try {
         db.exec('ALTER TABLE contacts ADD COLUMN profile_url TEXT;');
-        console.log('[DB] Migration v63: Added contacts.profile_url column.');
+        console.log('[DB] Migration v20260930001: Added contacts.profile_url column.');
       } catch (e) {
-        console.log('[DB] Migration v63: contacts.profile_url already exists, skipped.');
+        console.log('[DB] Migration v20260930001: contacts.profile_url already exists, skipped.');
       }
     }
   },
@@ -1229,14 +1231,15 @@ const migrations = [
   {
     // 2026-09-29: lưu agent gửi tin page ("Người gửi: <agent>" trong BS DOM)
     // làm metadata hiển thị trong CRM - KHÔNG còn lưu thành nội dung tin nhắn.
-    version: 65,
+    // Version gốc 65 cũng bị row rác 'add_lead_statuses' chiếm -> dùng version tự do.
+    version: 20260930002,
     name: 'add_messages_sent_by_agent',
     up: (db) => {
       try {
         db.exec('ALTER TABLE messages ADD COLUMN sent_by_agent TEXT;');
-        console.log('[DB] Migration v65: Added messages.sent_by_agent column.');
+        console.log('[DB] Migration v20260930002: Added messages.sent_by_agent column.');
       } catch (e) {
-        console.log('[DB] Migration v65: messages.sent_by_agent already exists, skipped.');
+        console.log('[DB] Migration v20260930002: messages.sent_by_agent already exists, skipped.');
       }
     }
   }
