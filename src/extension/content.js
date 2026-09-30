@@ -220,24 +220,33 @@
   window.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'FB_NETWORK_MESSAGE') {
       const netMsg = event.data.data;
-      if (!netMsg || !netMsg.thread_id || !netMsg.content) return;
-      
+      if (!netMsg || !netMsg.thread_id || !netMsg.fb_message_id) return;
+      // MQTT frames for image/video carry the CDN URL with no text. Dropping
+      // them forced every incoming media to wait for the slow history sweep.
+      if (!netMsg.content && !netMsg.media_url) return;
+
       capturedUserId = capturedUserId || sanitizeUserId(document.cookie.match(/c_user=(\d+)/)?.[1]);
       let sender_id = netMsg.sender_id || (netMsg.is_outgoing ? capturedUserId : null);
       let is_outgoing = netMsg.is_outgoing || false;
        // Ignore incomplete main-world fragments; DOM/history will provide the canonical row.
-       if (!sender_id || !netMsg.fb_message_id) return;
-      
+       if (!sender_id) return;
+
       if (sender_id && capturedUserId && String(sender_id) === String(capturedUserId)) {
         is_outgoing = true;
       }
-      if (is_outgoing) markObservedOutgoing(netMsg.thread_id, netMsg.content);
+      if (is_outgoing && netMsg.content) markObservedOutgoing(netMsg.thread_id, netMsg.content);
 
       const finalTsMs = normalizeTimestampMs(netMsg.timestamp_ms);
 
       try {
         if (chrome?.runtime?.id) {
-          recentNetworkEmits.set(`${netMsg.thread_id}:${netMsg.content}`, Date.now());
+          // Several facebook tabs relay the same account-wide MQTT frame; the
+          // mid is the message identity (server INSERT OR IGNORE dedupes too).
+          const midKey = `${netMsg.thread_id}_${netMsg.fb_message_id}`;
+          if (relayedNetworkMids.has(midKey)) return;
+          relayedNetworkMids.add(midKey);
+          if (relayedNetworkMids.size > 3000) relayedNetworkMids.delete(relayedNetworkMids.values().next().value);
+          recentNetworkEmits.set(`${netMsg.thread_id}:${netMsg.content || netMsg.fb_message_id}`, Date.now());
           chrome.runtime.sendMessage({
             type: 'NEW_MESSAGE_FROM_FB',
             data: {
@@ -245,12 +254,15 @@
               fb_message_id: netMsg.fb_message_id || null,
               sender_id: sender_id,
               sender_name: netMsg.sender_name || (is_outgoing ? 'Bạn' : ''),
-              content: netMsg.content,
+              content: netMsg.content || '',
               is_outgoing: is_outgoing,
               source: 'network_interceptor',
               timestamp_ms: finalTsMs || null,
               timestamp_source: finalTsMs ? 'facebook_payload' : 'realtime_fallback',
-              created_at: finalTsMs ? new Date(finalTsMs).toISOString() : (netMsg.created_at || new Date().toISOString())
+              created_at: finalTsMs ? new Date(finalTsMs).toISOString() : (netMsg.created_at || new Date().toISOString()),
+              media_type: netMsg.media_type || (netMsg.media_url ? 'image' : 'text'),
+              media_url: netMsg.media_url || null,
+              poster_url: netMsg.poster_url || null
             }
           });
         }
@@ -298,6 +310,7 @@
     return `${prefix}_${String(threadId || '')}_${Number(timestampMs) || Date.now()}_${fallbackNetworkObservation}`;
   }
   const recentNetworkEmits = new Map();
+  const relayedNetworkMids = new Set();
   const recentDomEmits = new Map();
   const isDedicatedBackgroundTab = /(?:[?&])crm_tab_role=(?:history|discovery|requests|request_action)/i.test(window.location.search);
   // Direction ledger: Messenger may replay a rendered outgoing bubble as an

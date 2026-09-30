@@ -351,7 +351,7 @@
           fb_message_id: msgId,
           sender_id: senderId,
           content: content,
-          media_type: (foundVid || foundPoster) ? 'video' : 'text',
+          media_type: foundVid ? 'video' : (foundPoster ? 'image' : 'text'),
           media_url: foundVid || foundPoster || null,
           poster_url: foundPoster || null,
           is_outgoing: obj.is_outgoing || false,

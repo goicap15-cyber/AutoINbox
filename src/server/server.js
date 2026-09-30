@@ -882,6 +882,7 @@ function isRecentOutgoingTextEcho(threadId, message = {}, database = db) {
 const inboundMediaHydration = new InboundMediaHydrationService({
   database: db,
   downloader: mediaDownloader,
+  maxConcurrency: 4,
   onHydrated: (stored) => io.emit('THREAD_MESSAGES_UPDATED', {
     thread_id: String(stored.thread_id),
     messages: [withAttachmentAccessUrl(stored)]

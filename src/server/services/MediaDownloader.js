@@ -36,22 +36,38 @@ class MediaDownloader {
       return new Promise((resolve) => {
         const client = mediaUrl.startsWith('https') ? https : http;
         const fileStream = fs.createWriteStream(localFilePath);
-
-        client.get(mediaUrl, (response) => {
+        let settled = false;
+        const finish = (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(stallTimer);
+          try { fileStream.destroy(); } catch (_) {}
+          if (!value) { try { fs.unlinkSync(localFilePath); } catch (_) {} }
+          resolve(value);
+        };
+        // A hung CDN connection must never occupy a hydration slot forever;
+        // the hydration pool is small and one stuck download stalls the queue.
+        const stallTimer = setTimeout(() => {
+          console.warn('[MediaDownloader] Timeout tải media (90s)');
+          try { request.destroy(new Error('stall timeout')); } catch (_) {}
+          finish(null);
+        }, 90000);
+        const request = client.get(mediaUrl, (response) => {
           if (response.statusCode === 200) {
             response.pipe(fileStream);
             fileStream.on('finish', () => {
               fileStream.close();
               console.log(`[MediaDownloader] Đã tải media local: ${localFilePath}`);
-              resolve(`/data/media/${threadId}/${fileName}`);
+              finish(`/data/media/${threadId}/${fileName}`);
             });
           } else {
             console.warn(`[MediaDownloader] Lỗi HTTP status ${response.statusCode} khi tải media`);
-            resolve(null);
+            response.resume?.();
+            finish(null);
           }
         }).on('error', (err) => {
           console.error('[MediaDownloader] Lỗi kết nối tải media:', err.message);
-          resolve(null);
+          finish(null);
         });
       });
     } catch (err) {
