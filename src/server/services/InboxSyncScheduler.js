@@ -41,6 +41,10 @@ class InboxSyncScheduler {
     // sweep bay vào extension cá nhân, lane page kẹt busy vĩnh viễn).
     this.readyPages = new Map(); // pageId -> accountId
     this.pageGateTimers = new Map();
+    // 2026-09-30 (Phase 1): cap số lane Page quét đồng thời - máy 8GB bão hòa
+    // CPU khi mọi lane chạy cùng lúc (reproduce 2026-09-29: 20 page => CPU 100%).
+    this.pageCapTimers = new Map();
+    this.maxConcurrentPageLanes = Math.max(1, Number(process.env.FB_CRM_MAX_PAGE_SYNC_LANES || 3));
     this.getConnection = null;
     this.dispatchThreadMessagesSync = null;
   }
@@ -574,6 +578,26 @@ class InboxSyncScheduler {
         this.pageGateTimers.set(laneKey, gateTimer);
       }
       return;
+    }
+
+    // 2026-09-30 (Phase 1): cap số lane Page quét đồng thời. Job giữ nguyên
+    // ở đầu queue, thử lại mỗi giây khi có lane nhả slot.
+    if (pageGateId) {
+      let busyPageLanes = 0;
+      for (const busyKey of this.accountThreadBusy) {
+        if (String(busyKey).startsWith('page:')) busyPageLanes += 1;
+      }
+      if (busyPageLanes >= this.maxConcurrentPageLanes) {
+        if (!this.pageCapTimers.has(laneKey)) {
+          const capTimer = setTimeout(() => {
+            this.pageCapTimers.delete(laneKey);
+            this.drainThreadQueue(laneKey);
+          }, 1000);
+          if (typeof capTimer.unref === 'function') capTimer.unref();
+          this.pageCapTimers.set(laneKey, capTimer);
+        }
+        return;
+      }
     }
 
     const queue = this.threadQueues.get(laneKey) || [];

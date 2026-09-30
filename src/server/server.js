@@ -72,6 +72,7 @@ LinkPreviewService.onImageNeeded = (urlHash, url) => {
   }
 };
 const { isSystemOrMetadataText, cleanMessageText, isSidebarActivitySummary, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
+const { sidebarShouldSkipSweep } = require('./utils/sidebarCompare');
 const { isKnownPageSystemNotice } = require('./utils/pageSystemNotice');
 const { parsePageIdFromInput } = require('./utils/pageIdParser');
 const ConversationRepository = require('./repositories/ConversationRepository');
@@ -6711,7 +6712,7 @@ function startServer() {
 InitialMessageSweepService.configure({
   listThreads: (accountId) => db.prepare(`
     SELECT t.id, t.external_thread_id, t.thread_url, t.contact_name,
-           t.is_unread, t.last_activity,
+           t.is_unread, t.last_activity, t.last_message,
            CASE WHEN s.source_type = 'page_messenger' THEN s.external_id ELSE NULL END AS page_id,
            (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) AS message_count
     FROM threads t
@@ -6723,6 +6724,27 @@ InitialMessageSweepService.configure({
       CASE WHEN (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) = 0 THEN 0 ELSE 1 END ASC,
       t.last_activity DESC
   `).all(String(accountId)),
+  // 2026-09-30 (Phase 1): bỏ qua sweep của thread không có gì mới - preview
+  // sidebar (threads.last_message, cập nhật liên tục từ BS) trùng tin cuối đã
+  // lưu. Tiết kiệm hàng trăm navigate cho thread cũ, máy 8GB hết bão CPU.
+  shouldSkipSweep: (thread) => {
+    try {
+      const preview = String(thread?.last_message || '');
+      if (!preview.trim()) return false;
+      if (Number(thread?.is_unread) === 1) return false;
+      const last = db.prepare(`
+        SELECT content FROM messages
+        WHERE thread_id = ? AND content IS NOT NULL AND content <> ''
+        ORDER BY timestamp_ms DESC, id DESC
+        LIMIT 1`).get(String(thread?.id || ''));
+      if (!last || !String(last.content || '').trim()) return false;
+      return sidebarShouldSkipSweep({
+        sidebarPreview: preview,
+        storedContent: last.content,
+        isUnread: thread.is_unread
+      });
+    } catch (_) { return false; }
+  },
   enqueue: (job) => InboxSyncScheduler.enqueueThreadSync(job),
   isBusy: (laneKey, accountId) => InboxSyncScheduler.isLaneBusy(laneKey),
   isReady: (accountId) => {

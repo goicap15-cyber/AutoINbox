@@ -106,6 +106,7 @@ class InitialMessageSweepService {
         processedIds: processed,
         done: (old && !force) ? Number(old.done || 0) : 0,
         suspendedUntil: (old && !force) ? Number(old.suspendedUntil || 0) : 0,
+        force: Boolean(force),
         timer: null
       };
 
@@ -173,6 +174,23 @@ class InitialMessageSweepService {
     const state = this.states.get(laneKey);
     if (!state?.running) return;
     state.timer = null;
+
+    // 2026-09-30 (Phase 1 - plan dom-fast-sync): bỏ qua thread không có gì mới
+    // - preview sidebar trùng tin cuối đã lưu. Xử lý loạt ngay tại đây để các
+    // thread bị skip không tốn tick 600ms/thread. `force` bỏ qua bộ lọc này
+    // (operator yêu cầu sync đầy đủ thì quét hết).
+    if (!state.force && typeof this.callbacks.shouldSkipSweep === 'function') {
+      while (state.queue.length > 0) {
+        let skip = false;
+        try { skip = this.callbacks.shouldSkipSweep(state.queue[0], state.accountId) === true; } catch (_) { skip = false; }
+        if (!skip) break;
+        const skipped = state.queue.shift();
+        state.done += 1;
+        state.processedIds?.add(String(skipped.id));
+      }
+      this._emit(laneKey);
+    }
+
     if (state.queue.length === 0) {
       state.running = false;
       state.completed = true;
