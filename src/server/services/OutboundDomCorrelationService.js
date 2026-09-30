@@ -353,8 +353,11 @@ class OutboundDomCorrelationService {
     }
     database.prepare(`
       UPDATE messages SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL,
-        timestamp_ms = CASE WHEN ? > 0 THEN ? ELSE timestamp_ms END,
-        timestamp_source = CASE WHEN ? <> 'unknown' THEN ? ELSE timestamp_source END
+        -- The pending row was stamped at send time. A confirmation echo may
+        -- arrive late carrying only an observation time; confirming transport
+        -- must not move the already-visible bubble below newer messages.
+        timestamp_ms = CASE WHEN timestamp_ms > 0 THEN timestamp_ms WHEN ? > 0 THEN ? ELSE timestamp_ms END,
+        timestamp_source = CASE WHEN timestamp_ms > 0 THEN timestamp_source WHEN ? <> 'unknown' THEN ? ELSE timestamp_source END
       WHERE id = ?
     `).run(confirmedId, tsMs, tsMs, tsSource, tsSource, pendingRow.id);
 

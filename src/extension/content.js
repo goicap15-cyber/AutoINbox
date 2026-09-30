@@ -396,6 +396,11 @@
       }
     }    return '';
   }
+  // Every facebook.com tab re-runs extraction every 3s. Reporting identical
+  // tokens each tick made the background SW see name/avatar "changes" (tabs
+  // scrape different profile-picture variants) and re-register the account
+  // forever - server measured REGISTER_ACCOUNT every ~3s, 3000+ per session.
+  let lastReportedTokens = '';
   function reportTokens(fb_dtsg, user_id) {
     if (!user_id) return;
     try {
@@ -403,9 +408,15 @@
         if (chrome?.storage?.local) {
           chrome.storage.local.get(['crm_pending_key'], (res) => {
             const pending_key = res?.crm_pending_key || pendingKeyFromUrl || null;
+            const fingerprint = JSON.stringify([fb_dtsg || '', String(user_id), pending_key || '', capturedAccountName || '', capturedAccountAvatarUrl || '']);
+            if (fingerprint === lastReportedTokens) return;
+            lastReportedTokens = fingerprint;
             chrome.runtime.sendMessage({ type: 'FB_TOKENS_EXTRACTED', data: { fb_dtsg: fb_dtsg || '', user_id, pending_key, name: capturedAccountName || null, avatar_url: capturedAccountAvatarUrl || null } });
           });
         } else {
+          const fingerprint = JSON.stringify([fb_dtsg || '', String(user_id), pendingKeyFromUrl || '', capturedAccountName || '', capturedAccountAvatarUrl || '']);
+          if (fingerprint === lastReportedTokens) return;
+          lastReportedTokens = fingerprint;
           chrome.runtime.sendMessage({ type: 'FB_TOKENS_EXTRACTED', data: { fb_dtsg: fb_dtsg || '', user_id, pending_key: pendingKeyFromUrl || null, name: capturedAccountName || null, avatar_url: capturedAccountAvatarUrl || null } });
         }
       }

@@ -1335,7 +1335,13 @@ wss.on('connection', (ws, req) => {
           } else {
             newAccountBootstrapSyncs.set(String(account_id), { awaitingSetup: true, attempt: 0, timer: null });
           }
-          domReplaySuppressUntil.set(account_id, Date.now() + 8000);
+          // Only arm the replay-suppression window on a genuinely NEW socket.
+          // Content scripts re-extract tokens (with rotating avatar CDN query
+          // params) and re-register every few seconds on the SAME connection;
+          // resetting the window each time kept the suppress gate permanently
+          // active, silently eating outgoing confirmation echoes (measured
+          // 2026-09-30: REGISTER_ACCOUNT every ~3s, 3000+ in one session).
+          if (!isSameConnection) domReplaySuppressUntil.set(account_id, Date.now() + 8000);
           ws.accountId = account_id;
 
           // profileDir: use pending_key path (new account setup), or keep existing from DB,
@@ -1960,6 +1966,35 @@ wss.on('connection', (ws, req) => {
             }
           }
 
+          // Composer confirmations for attachment sends carry only the real
+          // Facebook message id with EMPTY content - the file itself never
+          // appears in the composer text. The junk guard below used to discard
+          // that event, and with the DOM echo also suppressed during sync
+          // windows the send got no confirmation at all: after 3 minutes the
+          // attachment watchdog marked it failed and DELETED the CRM's own
+          // bubble (reproduced 2026-09-30 - image + video sent from the
+          // composer vanished minutes later, attachments stuck at
+          // CONFIRMATION_TIMEOUT).
+          if (m.source === 'composer_confirmation' && m.fb_message_id && !hasMediaPayload && !cleanedContent) {
+            const pendingMedia = OutboundDomCorrelationService.matchPendingImageOutbound(db, canonicalThreadId, 'any');
+            if (pendingMedia) {
+              const confirmed = OutboundDomCorrelationService.confirmPendingOutbound(db, io, pendingMedia, {
+                fbMessageId: m.fb_message_id,
+                tsMs: m.timestamp_ms || 0,
+                tsSource: m.timestamp_source || 'composer',
+                rawMessage: m
+              });
+              console.log('[OUTBOUND_TRACE]', JSON.stringify({
+                stage: confirmed ? 'BACKEND_COMPOSER_MEDIA_CONFIRMED' : 'BACKEND_COMPOSER_MEDIA_CONFIRM_CONFLICT',
+                thread_id: String(canonicalThreadId),
+                client_message_id: pendingMedia.client_message_id,
+                fb_message_id: String(m.fb_message_id),
+                at: new Date().toISOString()
+              }));
+            }
+            break;
+          }
+
           // Meta Page can inject this lead-activity notice repeatedly while a
           // thread reloads. It is never customer content, even when it arrives
           // without an FB message id, so reject it before persistence/capture.
@@ -2051,13 +2086,18 @@ wss.on('connection', (ws, req) => {
             // A wide video's geometry often reads as incoming, but if we already own that
             // exact CDN URL as a sent item, this is our own echo — never create a duplicate.
             if (m.media_url) {
+              // Identity compare only: an unqualified `local_media_path IS NOT
+              // NULL` here matched ANY outgoing media that had a local file,
+              // forcing genuine customer media to is_outgoing=1 (direction
+              // flip, reproduced 2026-09-30 - "Blocked duplicate incoming
+              // media" logged for a message the customer actually sent).
               const sameUrlOutgoing = db.prepare(`
                 SELECT id, fb_message_id FROM messages
                 WHERE thread_id = ? AND is_outgoing = 1
-                  AND (media_url = ? OR local_media_path IS NOT NULL)
+                  AND (media_url = ? OR (? IS NOT NULL AND local_media_path = ?))
                   AND (media_type IS NOT NULL AND media_type != 'text')
                 LIMIT 1
-              `).get(canonicalThreadId, m.media_url);
+              `).get(canonicalThreadId, m.media_url, m.local_media_path || null, m.local_media_path || null);
               if (sameUrlOutgoing) {
                 console.log(`[WS] 🛡️ Blocked duplicate incoming media: same media_url already stored as outgoing #${sameUrlOutgoing.id} in thread ${canonicalThreadId}`);
                 finalIsOutgoing = 1;
@@ -2124,7 +2164,7 @@ wss.on('connection', (ws, req) => {
               WHERE thread_id = ? AND is_outgoing = 1 AND delivery_status = 'pending'
                 AND datetime(created_at) >= datetime('now', '-10 seconds')
               LIMIT 1
-            `).get(threadId);
+            `).get(canonicalThreadId);
             const suppressUntil = domReplaySuppressUntil.get(targetAccountId) || 0;
             if (!hasRecentPending && Date.now() < suppressUntil) {
               console.log(`[WS] ℹ️ Suppress outgoing DOM replay during startup/sync window: thread=${threadId} content="${sanitizeLog(m.content, 40)}"`);
@@ -3130,12 +3170,19 @@ wss.on('connection', (ws, req) => {
                 const canonicalThreadId = String(storedThread?.id || existingInternalThreadId);
 
                 if (incomingPreviewChanged) {
+                  // Page thread bắt buộc phải mang page_id vào job, nếu không
+                  // scheduler route nhầm sang lane cá nhân (tab Messenger cá
+                  // nhân không mở được hội thoại Page -> thread_route_mismatch
+                  // / page_locked_by_user_action lặp vô hạn, khách Page không
+                  // bao giờ sync - reproduce 2026-09-30).
+                  const boundPageSource = ConversationRepository.getThreadSource(canonicalThreadId);
                   changedUnreadThreads.push({
                     account_id,
                     thread_id: canonicalThreadId,
                     external_thread_id: t.external_thread_id || threadId,
                     thread_url: t.thread_url || previousThread?.thread_url || null,
                           contact_name: name || previousThread?.contact_name || null,
+                    page_id: threadPageId || (boundPageSource?.pageId ?? null),
                     preview_content: cleanLastMsg,
                     preview_is_like: t.is_like === true
                   });
@@ -3204,7 +3251,19 @@ wss.on('connection', (ws, req) => {
                     AND timestamp_ms >= ?
                   LIMIT 1
                 `).get(canonicalThreadId, previewContent, previewTimestamp - 24 * 60 * 60 * 1000);
-                if (!alreadyRealIncoming) {
+                // The sidebar scanner re-reports an OLD operator bubble as
+                // fresh customer activity whenever the thread preview flips
+                // back to it after a CRM send (reproduced 2026-09-30:
+                // 'sldsldsldl' sent 2026-09-22 reappeared the same day as a
+                // left-side bubble stamped now). Content that already exists
+                // in this thread in ANY direction is never a new message.
+                const contentAlreadyInThread = db.prepare(`
+                  SELECT 1 FROM messages
+                  WHERE thread_id = ? AND content = ?
+                    AND fb_message_id NOT LIKE 'sidebar_preview_%'
+                  LIMIT 1
+                `).get(canonicalThreadId, previewContent);
+                if (!alreadyRealIncoming && !contentAlreadyInThread) {
                 const previewPersistence = ConversationRepository.saveMessagesTransaction(canonicalThreadId, [{
                   fb_message_id: previewId,
                   content: previewContent,
@@ -6821,6 +6880,10 @@ InboxSyncScheduler.configure({
   }
 });
 
+// Declared even though nothing currently assigns it: referencing an undeclared
+// identifier here threw a ReferenceError that aborted stopManagedProcesses()
+// before stopAllAccountProcesses() could run (Chrome outlived app quit).
+let extensionHealthMonitor = null;
 function stopManagedProcesses() {
   if (extensionHealthMonitor) {
     clearInterval(extensionHealthMonitor);

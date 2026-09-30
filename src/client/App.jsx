@@ -51,15 +51,25 @@ const messageTime = (message) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+// Facebook labels only carry minute precision while CRM sends stamp exact
+// seconds, so comparing raw milliseconds re-sorts a just-sent operator text
+// below customer replies that Messenger shows BEFORE it (label 10:59:00 vs
+// client_submit 10:59:14). Minutes are the finest trustworthy granularity;
+// sequence_order (server-assigned arrival order) settles the same minute.
+const messageMinuteMs = (message) => {
+  const t = messageTime(message);
+  return t > 0 ? Math.floor(t / 60000) : 0;
+};
+
 const sortMessagesChronologically = (items = []) => items
   .map((message, originalIndex) => ({ message, originalIndex }))
   .sort((left, right) => {
-    // Thời gian là tiêu chí chính (ngày trước, trong ngày theo giờ).
-    // sequence_order chỉ dùng để xếp các tin cùng phút hoặc không có thời gian.
-    const timeA = messageTime(left.message);
-    const timeB = messageTime(right.message);
-    if (timeA > 0 && timeB > 0 && timeA !== timeB) return timeA - timeB;
-    if ((timeA > 0) !== (timeB > 0)) return timeA > 0 ? -1 : 1;
+    // Thời gian là tiêu chí chính (ngày trước, trong ngày theo giờ, tối thiểu
+    // theo phút). sequence_order xếp các tin cùng phút theo đúng thứ tự đến.
+    const minuteA = messageMinuteMs(left.message);
+    const minuteB = messageMinuteMs(right.message);
+    if (minuteA > 0 && minuteB > 0 && minuteA !== minuteB) return minuteA - minuteB;
+    if ((minuteA > 0) !== (minuteB > 0)) return minuteA > 0 ? -1 : 1;
     const sequenceA = Number(left.message?.sequence_order ?? left.message?.id);
     const sequenceB = Number(right.message?.sequence_order ?? right.message?.id);
     if (Number.isFinite(sequenceA) && Number.isFinite(sequenceB) && sequenceA !== sequenceB) {
@@ -315,11 +325,17 @@ const reconcileOutgoingTextEchoes = (items = []) => {
       return;
     }
     const officialRow = [previous, message].find((row) => String(row?.fb_message_id || '').startsWith('mid.'));
+    // The Messenger DOM echo only confirms transport. Its observation time
+    // must not move the already-visible bubble below newer messages (same
+    // rule as the media companion merge), so the stable row owns display time.
+    const stableTimeRow = !isSyntheticId(clientRow) ? clientRow : (!isSyntheticId(observedRow) ? observedRow : clientRow);
     result[matchIndex] = {
       ...clientRow,
       ...observedRow,
       client_message_id: clientRow.client_message_id,
       fb_message_id: officialRow?.fb_message_id || observedRow.fb_message_id || clientRow.fb_message_id,
+      timestamp_ms: stableTimeRow.timestamp_ms || clientRow.timestamp_ms || observedRow.timestamp_ms,
+      created_at: stableTimeRow.created_at || clientRow.created_at || observedRow.created_at,
       order_anchor_ms: clientRow.order_anchor_ms,
       sequence_order: previous.sequence_order ?? message.sequence_order,
       status: observedRow.status || observedRow.delivery_status || clientRow.status || 'sent',

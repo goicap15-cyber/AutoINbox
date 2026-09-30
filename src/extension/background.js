@@ -1898,8 +1898,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     const hadUser = Boolean(user_id && fb_dtsg);
     const userChanged = newUserId !== user_id;
-    const accountNameChanged = Boolean(incomingAccountName && incomingAccountName !== account_name);
-    const accountAvatarChanged = Boolean(incomingAccountAvatarUrl && incomingAccountAvatarUrl !== account_avatar_url);
     fb_dtsg = newDtsg;
     user_id = newUserId;
     if (incomingAccountName) account_name = incomingAccountName;
@@ -1909,7 +1907,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     persistFacebookSessionCookies().catch(() => {});
     if (ws && ws.readyState === WebSocket.OPEN) {
       const isNewPendingKey = Boolean(incomingPendingKey && incomingPendingKey !== pending_key);
-      if (!hadUser || userChanged || !backendAccountRegistered || isNewPendingKey || accountNameChanged || accountAvatarChanged) {
+      // Name/avatar are cosmetic updates (server COALESCEs them into
+      // accounts). They must NOT force a re-register: tabs scrape different
+      // profile-picture/name variants, so treating them as changes made the
+      // SW re-register every ~3s forever (3000+ registrations per session).
+      // They ride along on the next natural register instead.
+      if (!hadUser || userChanged || !backendAccountRegistered || isNewPendingKey) {
         // Do not flush realtime messages under the previous WebSocket account
         // while this profile is being rebound to a newly detected Facebook user.
         backendAccountRegistered = false;
@@ -2590,6 +2593,28 @@ async function ensureRoleMessengerTab(accountId, role) {
         : null;
     },
     async () => {
+      // Ưu tiên tái sử dụng tab Messenger hiện có của account thay vì tạo
+      // tab mới - registry stale trước đây khiến mỗi chu kỳ sync spawn thêm
+      // tab /messages trùng lặp (reproduce 2026-09-30).
+      const allTabs = await chrome.tabs.query({});
+      const candidates = allTabs.filter((candidate) =>
+        MessengerTabDeduplicator.isMessagesUrl(candidate.url || candidate.pendingUrl)
+        && !isBusinessSuiteUrl(candidate.url)
+      );
+      for (const candidate of candidates) {
+        if (await isReservedByAnotherRole(candidate.id)) continue;
+        try {
+          const result = await chrome.scripting.executeScript({
+            target: { tabId: candidate.id },
+            func: () => document.cookie.match(/c_user=(\d+)/)?.[1] || null
+          });
+          if (String(result?.[0]?.result || '') === String(accountId || '')) {
+            await registerTab(roleKey, candidate.id);
+            console.log(`[FB Engine] [BACKGROUND_TAB] Tái sử dụng tab Messenger ${candidate.id} cho role=${roleKey} (không tạo tab mới).`);
+            return chrome.tabs.get(candidate.id).catch(() => candidate);
+          }
+        } catch (_) {}
+      }
       const created = await new Promise((resolve) => {
         chrome.tabs.create({
           url: `https://www.facebook.com/messages?crm_tab_role=${encodeURIComponent(normalizedRole)}`,
@@ -4566,22 +4591,49 @@ async function handleSendQueuedMessage(data) {
 async function getBusinessSuiteTab(pageId) {
   const role = `page:${pageId}`;
   const registered = await getRegisteredTab(role);
-  if (registered && isBusinessSuiteUrl(registered.url) && (String(registered.url || '').includes(`asset_id=${pageId}`) || String(registered.url || '').includes(`mailbox_id=${pageId}`))) {
+  const matchesPage = (url) => {
+    const u = String(url || '');
+    return u.includes(`asset_id=${pageId}`) || u.includes(`mailbox_id=${pageId}`);
+  };
+  if (registered && isBusinessSuiteUrl(registered.url) && matchesPage(registered.url)) {
     return registered;
   }
   if (registered) await unregisterTab(role);
 
-  return new Promise((resolve) => {
-    chrome.tabs.query({ url: ['*://business.facebook.com/*'] }, async (tabs) => {
-      if (!tabs || tabs.length === 0) return resolve(null);
-      let tab = tabs.find((t) => t.url && (t.url.includes(`asset_id=${pageId}`) || t.url.includes(`mailbox_id=${pageId}`)));
-      if (!tab && tabs.length > 0) {
-        tab = tabs.find((t) => isBusinessSuiteUrl(t.url));
-      }
-      if (tab?.id) await registerTab(role, tab.id);
-      resolve(tab || null);
-    });
-  });
+  const tabs = await chrome.tabs.query({ url: ['*://business.facebook.com/*'] });
+  if (!tabs || tabs.length === 0) return null;
+
+  // 1) Tab BS đã trỏ đúng page (registry stale) -> nhận lại, không tạo mới.
+  const exact = tabs.find((t) => t.url && matchesPage(t.url)) || null;
+  if (exact) {
+    if (exact.id) await registerTab(role, exact.id);
+    return exact;
+  }
+
+  // 2) Tab BS chưa thuộc page nào khác -> điều hướng sang inbox page này
+  // thay vì tạo tab mới. Registry stale trước đây khiến mỗi chu kỳ sync
+  // spawn thêm 1 tab BS, Chrome phình ra nhiều tab và tab tin nhắn không
+  // cố định (reproduce 2026-09-30).
+  await loadTabRegistry();
+  const pageOwnedTabIds = new Set();
+  for (const [key, tabId] of tabRegistry.entries()) {
+    if (String(key).startsWith('page:') && String(key) !== role) pageOwnedTabIds.add(String(tabId));
+  }
+  const adoptable = tabs.find((t) => !pageOwnedTabIds.has(String(t.id)) && !t.active) || null;
+  if (adoptable?.id) {
+    const targetUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(pageId)}&mailbox_id=${encodeURIComponent(pageId)}`;
+    try {
+      const loadPromise = waitForTabComplete(adoptable.id, 10000);
+      await chrome.tabs.update(adoptable.id, { url: targetUrl });
+      await Promise.race([loadPromise, delay(3500)]);
+    } catch (e) {
+      console.warn(`[FB Engine] [PAGE_TAB] Không điều hướng được BS tab ${adoptable.id} sang page ${pageId}: ${e.message}`);
+    }
+    await registerTab(role, adoptable.id);
+    console.log(`[FB Engine] [PAGE_TAB] Tái sử dụng BS tab ${adoptable.id} cho page=${pageId} (không tạo tab mới).`);
+    return chrome.tabs.get(adoptable.id).catch(() => adoptable);
+  }
+  return null;
 }
 
 // ── Đồng bộ danh sách threads từ sidebar Facebook ──────────────────────────
@@ -6440,7 +6492,12 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   // conversation is being synced.
   if (page_id && tab && tab.id != null) {
     chrome.tabs.update(tab.id, { active: true }).catch(() => {});
-    if (tab.windowId != null) {
+    // Chỉ bật cửa sổ Chrome lên trên CRM khi người dùng chủ động click
+    // thread. Sync nền (sidebar_incoming/initial_sweep/retry) không được
+    // giật cửa sổ Chrome mỗi lần khách nhắn - tab vẫn active trong cửa sổ
+    // nên Chrome render đầy đủ, không bị throttle (reproduce 2026-09-30:
+    // khách nhắn là Chrome nhảy lên che mất CRM).
+    if (isUserDrivenReason && tab.windowId != null) {
       chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
     }
   }

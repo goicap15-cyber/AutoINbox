@@ -319,6 +319,8 @@ if (isBusiness) {
 
     // Lắng nghe URL video đã giải mã từ MAIN world (injected.js)
     const reportedResolvedMedia = new Set();
+    // Dedup tin nhắn relay từ websocket BS (injected.js -> page_content)
+    const relayedNetworkMids = new Set();
     window.addEventListener('message', (event) => {
         if (event.data?.type === 'CRM_RESOLVE_PAGE_VIDEO_RESPONSE') {
             const { fb_message_id, videoUrl, posterUrl } = event.data || {};
@@ -365,6 +367,58 @@ if (isBusiness) {
                     cachedBizThreadsFromMain.set(String(t.threadId), t);
                 }
             }
+        }
+
+        // Tin nhắn realtime bắt từ websocket/mạng của Business Suite (injected.js
+        // MAIN world). Bắt được cả khi khung chat đang mở thread KHÁC hoặc ngồi
+        // ở inbox list - không cần điều hướng tab, đồng bộ nhanh hơn hẳn.
+        if (event.data?.type === 'FB_NETWORK_MESSAGE') {
+            const netMsg = event.data?.data || {};
+            if (!netMsg || !netMsg.thread_id || !netMsg.fb_message_id) return;
+            if (!netMsg.content && !netMsg.media_url) return;
+            if (typeof location === 'undefined' || location.hostname !== 'business.facebook.com') return;
+
+            const dedupeKey = String(netMsg.thread_id) + '_' + String(netMsg.fb_message_id);
+            if (relayedNetworkMids.has(dedupeKey)) return;
+            relayedNetworkMids.add(dedupeKey);
+            if (relayedNetworkMids.size > 3000) {
+                const first = relayedNetworkMids.values().next().value;
+                relayedNetworkMids.delete(first);
+            }
+
+            const pageId = resolveCurrentPageId();
+            const cUser = document.cookie.match(/c_user=(\d+)/)?.[1] || null;
+            const senderId = netMsg.sender_id ? String(netMsg.sender_id) : null;
+            let isOutgoing = null;
+            if (senderId) {
+                if ((pageId && String(senderId) === String(pageId)) || (cUser && String(senderId) === String(cUser))) {
+                    isOutgoing = true;
+                } else {
+                    isOutgoing = false;
+                }
+            }
+
+            const ts = Number(netMsg.timestamp_ms);
+            chrome.runtime.sendMessage({
+                type: 'NEW_PAGE_MESSAGE_FROM_DOM',
+                data: {
+                    thread_id: String(netMsg.thread_id),
+                    fb_message_id: netMsg.fb_message_id,
+                    content: String(netMsg.content || ''),
+                    is_outgoing: isOutgoing,
+                    direction_status: isOutgoing === null ? 'pending' : 'confirmed',
+                    direction_source: 'bs_network_ws',
+                    direction_confidence: isOutgoing === null ? 'unknown' : 'high',
+                    page_id: pageId || null,
+                    page_name: lastReportedPageName || null,
+                    sender_id: senderId,
+                    source: 'page_network_interceptor',
+                    timestamp_ms: ts > 0 ? ts : Date.now(),
+                    timestamp_source: ts > 0 ? 'facebook_payload' : 'realtime_fallback',
+                    media_type: netMsg.media_type || 'text',
+                    media_url: netMsg.media_url || null
+                }
+            }).catch(() => {});
         }
     });
 

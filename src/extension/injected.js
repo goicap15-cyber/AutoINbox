@@ -275,13 +275,17 @@
     }
 
     // Direct message node matching Facebook GraphQL schema
-    const msgId = obj.message_id || obj.offline_threading_id || obj.messageId ||
-      (typeof obj.id === 'string' && obj.id.startsWith('mid.') ? obj.id : null);
+    const msgId = obj.message_id || obj.offline_threading_id || obj.messageId
+      || obj.metadata?.messageId || obj.messageMetadata?.messageId
+      || (typeof obj.id === 'string' && obj.id.startsWith('mid.') ? obj.id : null);
 
     if (msgId) {
-      const threadId = obj.thread_id || obj.thread_fbid || obj.other_user_id || obj.threadKey?.thread_fbid || obj.thread_key?.thread_fbid;
+      const threadId = obj.thread_id || obj.thread_fbid || obj.other_user_id || obj.threadFbId
+        || obj.threadKey?.thread_fbid || obj.threadKey?.threadFbId || obj.threadKey?.otherUserFbId
+        || obj.thread_key?.thread_fbid || obj.metadata?.threadKey?.threadFbId;
       const content = obj.text || obj.body || obj.message?.text || '';
-      const senderId = obj.sender_id || obj.sender_fbid || obj.author || obj.message_sender?.id;
+      const senderId = obj.sender_id || obj.sender_fbid || obj.author || obj.senderFbId
+        || obj.actorFbId || obj.message_sender?.id || obj.metadata?.actorFbId;
 
       // Quét bóc tách link CDN video và poster thumbnail từ GraphQL payload
       let foundVid = null;

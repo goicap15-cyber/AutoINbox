@@ -413,9 +413,21 @@ class ConversationRepository {
         media_url = COALESCE(excluded.media_url, messages.media_url),
         -- Một lần quét lại thiếu thông tin thời gian (ts <= 0) không được xóa
         -- timestamp đã lưu - tin cũ bị "mất thời gian" sẽ bị normalize xếp nhầm ngày.
-        timestamp_ms = CASE WHEN excluded.timestamp_ms > 0 THEN excluded.timestamp_ms ELSE messages.timestamp_ms END,
-        timestamp_source = CASE WHEN excluded.timestamp_ms > 0 THEN excluded.timestamp_source ELSE messages.timestamp_source END,
-        created_at = CASE WHEN excluded.timestamp_ms > 0 THEN excluded.created_at ELSE messages.created_at END,
+        -- Quét lại cũng không được đẩy timestamp đã lưu tiến lên: DOM/sidebar
+        -- quét tin cũ vẫn mount dán giờ quan sát (Date.now()) làm bubble cũ
+        -- rơi xuống dưới tin mới hơn. Chỉ điền giờ cho hàng chưa có giờ, hoặc
+        -- nhận giờ thật đến SỚM hơn (tự lành row trước đây bị dán giờ quét).
+        -- created_at giữ nguyên giá trị lúc insert (đồng hồ đối chiếu echo).
+        timestamp_ms = CASE
+          WHEN messages.timestamp_ms IS NULL OR messages.timestamp_ms <= 0
+            THEN CASE WHEN excluded.timestamp_ms > 0 THEN excluded.timestamp_ms ELSE messages.timestamp_ms END
+          WHEN excluded.timestamp_ms > 0 AND excluded.timestamp_ms < messages.timestamp_ms THEN excluded.timestamp_ms
+          ELSE messages.timestamp_ms END,
+        timestamp_source = CASE
+          WHEN messages.timestamp_ms IS NULL OR messages.timestamp_ms <= 0
+            THEN CASE WHEN excluded.timestamp_ms > 0 THEN excluded.timestamp_source ELSE messages.timestamp_source END
+          WHEN excluded.timestamp_ms > 0 AND excluded.timestamp_ms < messages.timestamp_ms THEN excluded.timestamp_source
+          ELSE messages.timestamp_source END,
         is_outgoing = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.is_outgoing ELSE messages.is_outgoing END,
         sender_role = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.sender_role ELSE messages.sender_role END,
         -- Once a bubble is stored its visible position is immutable. A later
