@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { classifyTabsForAudit } = require('../../src/extension/tabAudit');
+const { classifyTabsForAudit, pickPageTabEviction } = require('../../src/extension/tabAudit');
 
 const bs = (id, pageId, extra = {}) => ({
   id, url: `https://business.facebook.com/latest/inbox/all/?asset_id=${pageId}&mailbox_id=${pageId}`, active: false, ...extra
@@ -84,4 +84,24 @@ test('unregistered BS tab of an already-covered page is closed, other page kept'
   // Tab 41 active nhưng page 768 đã có tab registry 40 -> 41 là trùng.
   assert.deepEqual(verdict.closeIds, [41]);
   assert.equal(verdict.keepIds.includes(42), true);
+});
+
+test('pickPageTabEviction: evicts oldest-synced inactive page tab when budget reached', () => {
+  const tabs = [bs(50, '768461266361443'), bs(51, '981379718397264'), bs(52, '1308827048971701')];
+  const verdict = pickPageTabEviction({
+    tabs,
+    targetPageId: '760493137151902',
+    budget: 3,
+    lastSyncAtMs: { '768461266361443': 900, '981379718397264': 100, '1308827048971701': 500 }
+  });
+  // 981 lau nhat khong duoc sync -> bi đuổi
+  assert.equal(verdict.pageId, '981379718397264');
+});
+
+test('pickPageTabEviction: under budget / target has tab / all active -> no eviction', () => {
+  const tabs = [bs(60, '768461266361443'), bs(61, '981379718397264')];
+  assert.equal(pickPageTabEviction({ tabs, targetPageId: '760493137151902', budget: 5, lastSyncAtMs: {} }), null);
+  assert.equal(pickPageTabEviction({ tabs: [bs(62, '760493137151902')], targetPageId: '760493137151902', budget: 5, lastSyncAtMs: {} }), null);
+  const activeAll = [bs(63, '768461266361443', { active: true }), bs(64, '981379718397264', { active: true }), bs(65, '1308827048971701', { active: true })];
+  assert.equal(pickPageTabEviction({ tabs: activeAll, targetPageId: '760493137151902', budget: 3, lastSyncAtMs: {} }), null);
 });

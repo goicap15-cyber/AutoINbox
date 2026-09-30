@@ -135,5 +135,24 @@
     return { keepIds, closeIds };
   }
 
-  return { classifyTabsForAudit, categoryOf, pageKeyOf };
+  // 2026-09-30 (Phase 2 - ngân sách tab page cho máy ít RAM): trước khi tạo
+  // tab page mới, chọn tab page cũ nhất KHÔNG active để đuổi (LRU theo thời
+  // gian sync gần nhất). Tab page đích đang mở -> không đuổi (reuse). Tab
+  // active -> không đuổi (user đang nhìn); tất cả active -> cho phép overflow
+  // thay vì đóng tab người dùng đang xem.
+  function pickPageTabEviction({ tabs, targetPageId, budget = 5, lastSyncAtMs = {} } = {}) {
+    const target = String(targetPageId || '');
+    const inbox = (Array.isArray(tabs) ? tabs : []).filter((t) => t && t.id != null && categoryOf(t.url) === 'bs_inbox');
+    const samePage = inbox.filter((t) => pageKeyOf(t.url) === target);
+    if (samePage.length > 0) return null;          // đích đã có tab -> reuse
+    if (inbox.length < budget) return null;        // còn under budget
+    const candidates = inbox.filter((t) => !t.active);
+    if (candidates.length === 0) return null;      // tất cả đang hiển thị -> overflow
+    const lastSync = (t) => Number(lastSyncAtMs[pageKeyOf(t.url)] || 0);
+    candidates.sort((a, b) => lastSync(a) - lastSync(b));
+    const victim = candidates[0];
+    return { tabId: victim.id, pageId: pageKeyOf(victim.url) };
+  }
+
+  return { classifyTabsForAudit, categoryOf, pageKeyOf, pickPageTabEviction };
 });

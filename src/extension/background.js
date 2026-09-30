@@ -6380,6 +6380,11 @@ async function handleMessageRequestAction(data) {
   }
 }
 
+// 2026-09-30 (Phase 2 - ngân sách tab page cho máy 8GB): track thời gian sync
+// gần nhất từng page + ngân sách tab page mở đồng thời (env chỉnh được).
+const lastPageSyncAt = new Map(); // pageId -> ms
+const PAGE_TAB_BUDGET = Math.max(2, Number(process.env.FB_CRM_MAX_OPEN_PAGE_TABS || 5));
+
 async function handleSyncThreadMessages({ account_id, thread_id, external_thread_id = null, thread_url, page_id = null, mode = 'initial', cursor = null, contact_name = null, reason = null, allow_navigation = false, scroll_delta = 0, _history_tab_id = null }) {
   console.log(`[FB Engine] 🔄 Sync lịch sử tin nhắn cho thread: ${thread_id} (${contact_name || 'unknown'}, account=${account_id || user_id}) mode=${mode}`);
   if (!thread_id) return;
@@ -6435,6 +6440,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     }
   }
   const targetAcc = account_id || user_id;
+  if (page_id) lastPageSyncAt.set(String(page_id), Date.now());
   const navigationThreadId = extractBareThreadId(external_thread_id || thread_id);
   const usesVisibleCrmTab = !page_id && !_history_tab_id
     && ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].includes(baseReason);
@@ -6452,6 +6458,25 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
       : await ensureRoleMessengerTab(targetAcc, 'history');
 
   if (!tab && page_id) {
+    // 2026-09-30 (Phase 2): ngân sách tab page - trước khi tạo tab mới, đuổi
+    // tab page idle lâu nhất không được sync (không đuổi tab đang hiển thị).
+    // Tab bị đuổi sẽ tự mở lại khi lượt quét của page đó tới.
+    try {
+      const bsTabs = await new Promise((resolve) => {
+        chrome.tabs.query({ url: ['*://business.facebook.com/*'] }, (result) => resolve(result || []));
+      });
+      const eviction = FbCrmTabAudit.pickPageTabEviction({
+        tabs: bsTabs,
+        targetPageId: page_id,
+        budget: PAGE_TAB_BUDGET,
+        lastSyncAtMs: Object.fromEntries(lastPageSyncAt)
+      });
+      if (eviction?.tabId != null) {
+        await unregisterTab(`page:${eviction.pageId}`).catch(() => {});
+        await chrome.tabs.remove(eviction.tabId).catch(() => {});
+        console.log(`[FB Engine] [PAGE_TAB_BUDGET] Evicted page ${eviction.pageId} tab=${eviction.tabId} (budget=${PAGE_TAB_BUDGET})`);
+      }
+    } catch (_) {}
     const pageTargetUrl = thread_url || `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(page_id)}&mailbox_id=${encodeURIComponent(page_id)}&selected_item_id=${encodeURIComponent(navigationThreadId)}&thread_type=FB_MESSAGE`;
     tab = await new Promise((resolve) => {
       chrome.tabs.create({ url: pageTargetUrl, active: false }, (createdTab) => {
