@@ -504,7 +504,11 @@ class ProcessManager {
         profileDir: absProfileDir,
         pid: child.pid,
         status: 'RUNNING',
-        displayMode: 'VISIBLE'
+        displayMode: 'VISIBLE',
+        // 2026-09-30: đánh dấu Chrome do chính server run này khởi tạo - lần
+        // auto-reconnect (+4s) KHÔNG được force-kill nó (trước đây kill rồi
+        // mở lại 13 tab => spike CPU/RAM gấp đôi lúc khởi động).
+        launchedByThisRun: true
       });
 
       const pages = await browser.pages();
@@ -514,11 +518,11 @@ class ProcessManager {
       // Chính sách "1 account = 1 Chrome": mở thêm tab Business Suite cho từng
       // Page ACTIVE của account ngay trong Chrome này (không còn Chrome riêng
       // cho từng Page - đã gỡ 2026-09-19).
+      // 2026-09-30: mở THEO ĐỢT (3 tab / 4 giây) thay vì 13 tab cùng lúc -
+      // 13 tab Facebook tải đồng thời lúc khởi động = spike CPU/RAM làm máy đơ.
       if (!String(accountId || '').startsWith('pending_')) {
         const activePageIds = this.getActivePageIdsForAccount(accountId);
-        for (const pid of activePageIds) {
-          try { await this.openBusinessTabForPage(pid, accountId); } catch (_) {}
-        }
+        this.schedulePageTabBatches(accountId, activePageIds);
       }
 
       console.log(`[ProcessManager] Chrome Stable [PID ${child.pid}] đã tự cài extension cho account ${accountId}.`);
@@ -539,6 +543,39 @@ class ProcessManager {
     } catch (_) {
       return [];
     }
+  }
+
+  // 2026-09-30: Chrome này có phải do chính server run hiện tại khởi tạo không?
+  // - launchedByThisRun=true -> extension mới tinh, auto-reconnect KHÔNG force-reload.
+  // - Chrome mồ côi từ run trước (flag thiếu) -> force-reload để cập nhật extension.
+  wasLaunchedByThisRun(accountId) {
+    return Boolean(this.processes.get(String(accountId || ''))?.launchedByThisRun);
+  }
+
+  // 2026-09-30: mở tab page THEO ĐỢT (3 tab / 4 giây) thay vì 13 tab tải đồng
+  // thời lúc khởi động - spike CPU/RAM đầu giờ đến từ đây (reproduce: mở app
+  // 20 page đơ vài giây). Tab đã tồn tại thì openBusinessTabForPage tự
+  // kích hoạt lại (không mở trùng).
+  schedulePageTabBatches(accountId, pageIds) {
+    const ids = (Array.isArray(pageIds) ? pageIds : []).filter(Boolean);
+    if (ids.length === 0) return 0;
+    const BATCH_SIZE = 3;
+    const BATCH_DELAY_MS = 4000;
+    const batches = [];
+    for (let i = 0; i < ids.length; i += BATCH_SIZE) batches.push(ids.slice(i, i + BATCH_SIZE));
+    let delay = 0;
+    for (const batch of batches) {
+      const timer = setTimeout(async () => {
+        const entry = this.processes.get(String(accountId || ''));
+        if (!entry || entry.status !== 'RUNNING') return; // Chrome đã tắt -> bỏ lô
+        for (const pid of batch) {
+          try { await this.openBusinessTabForPage(pid, String(accountId || '')); } catch (_) {}
+        }
+      }, delay);
+      if (typeof timer.unref === 'function') timer.unref();
+      delay += BATCH_DELAY_MS;
+    }
+    return batches.length;
   }
 
   // Mở (hoặc kích hoạt) tab Business Suite cho 1 Page TRONG Chrome cá nhân của

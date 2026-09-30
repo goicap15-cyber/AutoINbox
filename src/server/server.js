@@ -6726,7 +6726,11 @@ function startServer() {
         const requestedAt = Date.now();
         try {
           backgroundAfterConnectRequests.set(accountId, requestedAt);
-          const started = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: true });
+          // 2026-09-30: Chrome do chính server vừa khởi tạo thì KHÔNG force-reload
+          // (trước đây force=true kill Chrome mới launch 4s + mở lại 13 tab = spike
+          // gấp đôi). Chỉ force khi Chrome là mồ côi từ run trước (extension cũ).
+          const forceReload = !processManager.wasLaunchedByThisRun(accountId);
+          const started = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: forceReload });
           if (!started) {
             backgroundAfterConnectRequests.delete(accountId);
             continue;
