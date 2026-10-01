@@ -34,6 +34,7 @@ const PhoneCaptureService = require('./services/PhoneCaptureService');
 const CampaignPhoneCaptureService = require('./services/CampaignPhoneCaptureService');
 const GlobalPhoneAutomationService = require('./services/GlobalPhoneAutomationService');
 const HistorySyncRetryPolicy = require('./services/HistorySyncRetryPolicy');
+const { DispatchStallWatchdog } = require('./services/DispatchStallWatchdog');
 const SidebarSyncCooldown = require('./services/SidebarSyncCooldown');
 const CallEventDeduplicator = require('./services/CallEventDeduplicator');
 const { resolveInternalThreadId } = require('./utils/threadIdResolver');
@@ -1271,6 +1272,20 @@ wss.on('connection', (ws, req) => {
           ws.lastHeartbeatAt = Date.now();
           break;
 
+        case 'COMMAND_PROBE_ACK': {
+          // Phase C (2026-10-01): extension tra loi probe cua watchdog kenh
+          // dispatch - kenh song 2 chieu, huy bo viec dong socket.
+          const ackProbeId = String(msg.data?.probe_id || '');
+          const ackProbe = pendingDispatchProbes.get(ackProbeId);
+          if (ackProbe) {
+            clearTimeout(ackProbe.timer);
+            pendingDispatchProbes.delete(ackProbeId);
+            dispatchStallWatchdog.noteProbeAck(ackProbe.account_id);
+            console.log(`[WS] COMMAND_PROBE_ACK account=${ackProbe.account_id} probe=${ackProbeId} - dispatch channel alive`);
+          }
+          break;
+        }
+
         case 'REGISTER_ACCOUNT': {
           const { account_id, name, pending_key, avatar_url } = msg.data;
           // Facebook sets c_user=0 as a placeholder while a page is mid-login;
@@ -1341,6 +1356,8 @@ wss.on('connection', (ws, req) => {
           extensionConnections.set(account_id, ws);
           const isSameConnection = previousExtension === ws;
           ws.lastHeartbeatAt = Date.now();
+          // Phase C (2026-10-01): socket moi = kenh tin cay moi, reset watchdog.
+          dispatchStallWatchdog.noteRegistered(String(account_id));
           // A pending account is still inside Facebook's interactive login /
           // encrypted-history PIN setup. Do not start background sidebar
           // polling until the operator finishes setup and reconnects it as an
@@ -3403,6 +3420,9 @@ wss.on('connection', (ws, req) => {
           const { account_id, thread_id, messages, reason, mode, cursor, checkpoint, fetched_count, scroll_delta, page_id } = msg.data;
           const routeDetail = msg.data?.route_detail ? ` | header="${String(msg.data.route_detail).slice(0, 80)}"` : '';
           console.log(`[WS] THREAD_MESSAGES_SYNCED: thread=${thread_id} mode=${mode||'full'} count=${messages?.length || 0}${reason ? ` reason=${reason}` : ''}${reason === 'thread_route_mismatch' ? routeDetail : ''}`);
+          // Phase C (2026-10-01): ket qua ve = kenh dispatch song 2 chieu, reset
+          // bo dem stall (ca count=0 deu tinh - diem quan trong la tin di va ve).
+          dispatchStallWatchdog.noteResult(String(account_id || ws.accountId || ''));
           InboxSyncScheduler.markThreadSyncResult(account_id, thread_id, reason || null, page_id || null);
 
           if (reason) {
@@ -6908,6 +6928,35 @@ HistorySyncRetryPolicy.configure({
   }
 });
 
+// Phase C (ke hoach ws-socket-adoption 2026-10-01): watchdog kenh dispatch.
+// Socket zombie thi ws.send van "thanh cong" nhung extension khong nhan - do
+// so dispatch lien tiep khong co ket qua, vuot nguong thi COMMAND_PROBE;
+// khong ACK trong 5s thi dong socket de extension tu dong ky lai.
+const dispatchStallWatchdog = new DispatchStallWatchdog({
+  stallLimit: Number(process.env.FB_CRM_DISPATCH_STALL_LIMIT || 20)
+});
+const pendingDispatchProbes = new Map(); // probe_id -> { account_id, timer }
+function sendDispatchProbe(accountId, extWs) {
+  const accId = String(accountId || '');
+  if (!accId || !extWs || extWs.readyState !== WebSocket.OPEN) return;
+  const probeId = `probe_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const probeTimer = setTimeout(() => {
+    pendingDispatchProbes.delete(probeId);
+    dispatchStallWatchdog.probeTimedOut(accId);
+    const suspectWs = extensionConnections.get(accId);
+    if (suspectWs && suspectWs.readyState === WebSocket.OPEN) {
+      console.warn(`[WS] Dispatch channel suspect account=${accId} probe=${probeId} no ACK in 5s - closing socket to force re-register`);
+      try { suspectWs.close(4000, 'DISPATCH_CHANNEL_STALL'); } catch (_) {}
+      if (extensionConnections.get(accId) === suspectWs) extensionConnections.delete(accId);
+      io.emit('EXTENSION_CONNECTION_CHANGED', { account_id: accId, is_connected: false });
+    }
+  }, 5000);
+  if (typeof probeTimer.unref === 'function') probeTimer.unref();
+  pendingDispatchProbes.set(probeId, { account_id: accId, timer: probeTimer });
+  console.warn(`[WS] Dispatch stall account=${accId} - ${dispatchStallWatchdog.stallLimit} dispatches without result, probing socket ${probeId}`);
+  extWs.send(JSON.stringify({ type: 'COMMAND_PROBE', data: { probe_id: probeId } }));
+}
+
 InboxSyncScheduler.configure({
   getConnection: (accountId) => extensionConnections.get(String(accountId)),
   dispatchThreadMessagesSync: ({ account_id, thread_id, external_thread_id, thread_url, page_id, contact_name, reason, allow_navigation, sync_mode, scroll_delta }) => {
@@ -6943,6 +6992,12 @@ InboxSyncScheduler.configure({
         scroll_delta: Number(scroll_delta) || 0
       }
     }));
+    // Phase C (2026-10-01): dem dispatch khong ket qua; cham nguong thi probe
+    // socket (zombie thi ws.send van thanh cong nhung extension khong nhan).
+    dispatchStallWatchdog.noteDispatch(String(account_id));
+    if (dispatchStallWatchdog.shouldProbe(String(account_id)) && extensionConnections.get(String(account_id)) === extWs) {
+      sendDispatchProbe(String(account_id), extWs);
+    }
     return true;
 
     console.log(`[HISTORY_SYNC_DISABLED] Scheduler request ignored account=${account_id} thread=${thread_id}`);
