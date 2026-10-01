@@ -17,7 +17,8 @@ class InboxSyncScheduler {
     // Messenger virtualized history regularly needs longer than 20s to
     // mount older rows. Expiring it early dispatches a replay while the first
     // extension job is still alive, and the replay supersedes that navigation.
-    threadTimeoutMs = 120000
+    threadTimeoutMs = 120000,
+    preemptRequeueDelayMs = 1500
   } = {}) {
     this.sidebarIntervalMs = sidebarIntervalMs;
     this.sidebarCooldownMs = sidebarCooldownMs;
@@ -25,6 +26,9 @@ class InboxSyncScheduler {
     this.sidebarTimeoutMs = sidebarTimeoutMs;
     this.threadCooldownMs = threadCooldownMs;
     this.threadTimeoutMs = threadTimeoutMs;
+    // Phase 2 (2026-10-01): delay truoc khi re-dispatch job nen bi preempt
+    // (de click moi cua operator kip unshift dau hang truoc).
+    this.preemptRequeueDelayMs = Math.max(0, Number(preemptRequeueDelayMs) || 1500);
 
     this.accounts = new Map();
     this.threadInFlight = new Set();
@@ -539,6 +543,7 @@ class InboxSyncScheduler {
   preemptActiveThreadSync(accountId, predicate = () => true) {
     const accId = String(accountId || '');
     let removed = 0;
+    let requeued = 0;
     for (const key of [...this.threadInFlight]) {
       if (!key.startsWith(`${accId}:`)) continue;
       const threadId = key.slice(accId.length + 1);
@@ -554,9 +559,26 @@ class InboxSyncScheduler {
       this.accountThreadBusy.delete(laneKey);
       this.accountThreadBusy.delete(accId);
       removed += 1;
+      // Phase 2 (ke hoach 2026-10-01): job NEN (initial_sweep/history_retry)
+      // bi gian doan phai duoc tra lai hang doi thay vi mat trang. Di dung
+      // path replay san co (pendingThreadSyncs -> replayPendingThread ->
+      // enqueue cuoi hang doi) voi delay nho de khong drain tranh lane ngay
+      // tai cho: click moi cua operator (high, unshift dau hang) luon di
+      // truoc. Job do operator dieu huong (crm_navigation*/crm_scroll*) giu
+      // hanh vi cu - click moi thay the click cu. Thread da quet xong
+      // (loop terminator) thi khong quet lai.
+      const preemptedReason = String(activeJob.reason || '');
+      if (/^(initial_sweep|history_retry)/.test(preemptedReason)
+        && !this.isThreadHistoryCompleted(threadId, accId)) {
+        this.pendingThreadSyncs.set(key, { ...activeJob });
+        const replayTimer = setTimeout(() => this.replayPendingThread(key), this.preemptRequeueDelayMs);
+        if (typeof replayTimer.unref === 'function') replayTimer.unref();
+        requeued += 1;
+        console.log(`[INBOX_SYNC_MESSAGES_PREEMPT_REQUEUED] account=${accId} lane=${laneKey} thread=${threadId} reason=${preemptedReason}`);
+      }
     }
     if (removed) {
-      console.log(`[INBOX_SYNC_MESSAGES_PREEMPTED] account=${accId} removed=${removed}`);
+      console.log(`[INBOX_SYNC_MESSAGES_PREEMPTED] account=${accId} removed=${removed} requeued=${requeued}`);
     }
     return removed;
   }
