@@ -6787,7 +6787,16 @@ function startServer() {
               }
             }
           }
-          console.log(`[AUTO_RECONNECT] Đã tự kết nối account ${accountId} khi khởi động.`);
+          // Phase 4 (2026-10-01): log nay truoc day in VO DIEU KIEN sau moi vong
+          // lap - ke ca khi extension chua bao gio noi WS - gay hieu nham "da
+          // ket noi" khi dang that (reproduce 2026-10-01: SW chet vi process.env
+          // nhung log van bao "Da tu ket noi"). Chi bao thanh cong khi extension
+          // that su da dang ky; nguoc lai in canh bao ro rang.
+          if (extensionConnections.has(accountId)) {
+            console.log(`[AUTO_RECONNECT] Đã tự kết nối account ${accountId} khi khởi động.`);
+          } else {
+            console.warn(`[AUTO_RECONNECT] account=${accountId} CHUA thay extension dang ky sau khoi dong - "Chưa kết nối" là đúng thực tế, xem log watchdog/force-reload phía trên.`);
+          }
         } catch (err) {
           backgroundAfterConnectRequests.delete(accountId);
           console.warn(`[AUTO_RECONNECT] Lỗi tự kết nối account ${accountId}:`, err.message);
