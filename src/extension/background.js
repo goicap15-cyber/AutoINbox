@@ -6381,9 +6381,16 @@ async function handleMessageRequestAction(data) {
 }
 
 // 2026-09-30 (Phase 2 - ngân sách tab page cho máy 8GB): track thời gian sync
-// gần nhất từng page + ngân sách tab page mở đồng thời (env chỉnh được).
+// gần nhất từng page + ngân sách tab page mở đồng thời.
 const lastPageSyncAt = new Map(); // pageId -> ms
-const PAGE_TAB_BUDGET = Math.max(2, Number(process.env.FB_CRM_MAX_OPEN_PAGE_TABS || 5));
+// CHẶN process.env ở đây (2026-10-01): service worker chạy trong Chrome nên
+// KHÔNG có biến process - dòng `Number(process.env...)` cũ làm SW chết ngay
+// lúc nạp với "process is not defined" => extension không bao giờ nối được
+// WebSocket, account kẹt "Chưa kết nối" vĩnh viễn dù restart server (đã để
+// lọt qua vì node --check/unit test đều chạy trong Node - nơi có process).
+// Giữ hằng số; nếu cần cấu hình động thì server đọc env rồi đẩy xuống
+// extension bằng message (mẫu sẵn có: SET_SIDEBAR_SYNC_WINDOW).
+const PAGE_TAB_BUDGET = 5;
 
 async function handleSyncThreadMessages({ account_id, thread_id, external_thread_id = null, thread_url, page_id = null, mode = 'initial', cursor = null, contact_name = null, reason = null, allow_navigation = false, scroll_delta = 0, _history_tab_id = null }) {
   console.log(`[FB Engine] 🔄 Sync lịch sử tin nhắn cho thread: ${thread_id} (${contact_name || 'unknown'}, account=${account_id || user_id}) mode=${mode}`);
