@@ -6739,6 +6739,33 @@ function startServer() {
           for (const source of pageSources) {
             try { await processManager.startPageProcess(source.page_id, accountId, { skipUnhide: true }); } catch (_) {}
           }
+          // Watchdog 2026-10-01: nhanh "reuse" (Chrome do server vua launch, khong
+          // force-reload) khong co co che tu chua - neu service worker cua extension
+          // khong bao gio noi duoc WS thi account nam im o "Chua ket noi" mai khong
+          // he lay lai (reproduce 2026-10-01: 13 tab mo dung, Facebook dang nhap OK,
+          // nhung khong co mot dong "[WS] Extension connected" nao trong log server).
+          // Cho mot cua co han (env FB_CRM_EXTENSION_WATCHDOG_MS, mac dinh 45s);
+          // het cua ma van chua thay extension dang ky thi force-reload extension
+          // DUNG MOT LAN - dung luong cu tu-nhan-duoc cua kich ban 4s truoc day.
+          // startAccountProcess(force) tu mo lai tab Messenger + cac tab Business
+          // Suite theo dot nen khong can mo lai trang o day.
+          if (!forceReload) {
+            const watchdogMs = Number(process.env.FB_CRM_EXTENSION_WATCHDOG_MS || 45000);
+            const watchdogDeadline = Date.now() + watchdogMs;
+            while (Date.now() < watchdogDeadline
+              && backgroundAfterConnectRequests.get(accountId) === requestedAt
+              && !extensionConnections.has(accountId)) {
+              await new Promise((resolve) => setTimeout(resolve, 5000));
+            }
+            if (!extensionConnections.has(accountId)
+              && backgroundAfterConnectRequests.get(accountId) === requestedAt) {
+              console.warn(`[AUTO_RECONNECT] account=${accountId} extension chua dang ky sau ${watchdogMs}ms - force-reload extension 1 lan (watchdog).`);
+              const reloaded = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: true });
+              if (reloaded) {
+                console.log(`[AUTO_RECONNECT] account=${accountId} watchdog force-reload xong - cho extension dang ky lai.`);
+              }
+            }
+          }
           // Ẩn Chrome chạy ngầm sau khi các tab Page đã mở xong (mở tab thủ công
           // unhide ngay, phải ẩn lại sau cùng). Retry nhiều nhịp phòng extension
           // đăng ký chậm; dừng khi user bấm Bật hiển thị / Kết nối thủ công
