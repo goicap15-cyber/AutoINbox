@@ -14,7 +14,22 @@ const MAX_ATTEMPTS = BACKOFF_MS.length;
 const retryState = new Map(); // thread_id -> { attempts, timer }
 const latestThreadByAccount = new Map(); // account_id -> thread_id
 
+// Phase 1 (ke hoach 2026-10-01): khi guard navigated_away chan mot retry,
+// thay vi huy mat trang thi goi handler do server.js wire qua configure() de
+// re-queue thread ve DUOI hang doi quet (reason history_retry - khong phai
+// user-driven nen tu dong xep cuoi). Cap so lan moi thread de thread loi
+// cuu huong khong lap vo han; nguoi den luot quet that (retry fire) thi
+// reset ngan sach.
+const MAX_NAVIGATED_AWAY_REQUEUES = 3;
+const navigatedAwayRequeues = new Map(); // thread_id -> so lan da re-queue
+let navigatedAwayRequeueHandler = null;
+
 class HistorySyncRetryPolicy {
+  // server.js wire: onNavigatedAwayRequeue(accountId, threadId) -> enqueueThreadSync.
+  static configure({ onNavigatedAwayRequeue } = {}) {
+    navigatedAwayRequeueHandler = typeof onNavigatedAwayRequeue === 'function' ? onNavigatedAwayRequeue : null;
+  }
+
   static noteManualRequest(accountId, threadId) {
     const accId = String(accountId || '');
     const tId = String(threadId || '');
@@ -64,11 +79,28 @@ class HistorySyncRetryPolicy {
       if (!current.skipNavigatedAwayGuard
         && latestThreadByAccount.has(accId)
         && latestThreadByAccount.get(accId) !== tId) {
-        console.log(`[HISTORY_SYNC_RETRY_SKIPPED] thread=${tId} reason=navigated_away`);
+        // Phase 1 (2026-10-01): re-queue thay vi huy - job roi vao hang doi
+        // quet nen se duoc thu lai khi operator ranh tay, khong bi mat trang.
+        const requeues = navigatedAwayRequeues.get(tId) || 0;
+        if (typeof navigatedAwayRequeueHandler === 'function' && requeues < MAX_NAVIGATED_AWAY_REQUEUES) {
+          navigatedAwayRequeues.set(tId, requeues + 1);
+          retryState.delete(tId);
+          console.log(`[HISTORY_SYNC_RETRY_REQUEUED] thread=${tId} reason=navigated_away requeue=${requeues + 1}/${MAX_NAVIGATED_AWAY_REQUEUES}`);
+          try {
+            navigatedAwayRequeueHandler(accId, tId);
+          } catch (err) {
+            console.error(`[HISTORY_SYNC_RETRY_REQUEUE_ERROR] thread=${tId}:`, err.message);
+          }
+          return;
+        }
+        console.log(`[HISTORY_SYNC_RETRY_SKIPPED] thread=${tId} reason=navigated_away requeues_exhausted=${requeues}`);
         retryState.delete(tId);
         return;
       }
 
+      // Retry fire that = mot luot quet that xay ra; reset ngan sach re-queue
+      // cua thread de chu ky fail-moi sau nay van duoc cuu neu guard chan tiep.
+      navigatedAwayRequeues.delete(tId);
       console.log(`[HISTORY_SYNC_RETRY_FIRE] thread=${tId} attempt=${current.attempts}/${MAX_ATTEMPTS}`);
       try {
         retryFn();
@@ -101,6 +133,7 @@ class HistorySyncRetryPolicy {
     }
     retryState.clear();
     latestThreadByAccount.clear();
+    navigatedAwayRequeues.clear();
   }
 }
 

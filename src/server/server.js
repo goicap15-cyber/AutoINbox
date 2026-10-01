@@ -6855,6 +6855,34 @@ InitialMessageSweepService.configure({
   emit: (progress) => io.emit('INITIAL_MESSAGE_SYNC_PROGRESS', progress)
 });
 
+// Phase 1 (ke hoach 2026-10-01): retry bi guard navigated_away chan thi
+// re-queue ve DUOI hang doi quet thay vi huy mat trang - kho no initial_sweep
+// tu roi dan khi operator ranh tay. Cap 3 lan/thread nam trong policy; thread
+// da quet xong (loop terminator) thi bo qua. reason history_retry khong phai
+// user-driven nen enqueueThreadSync tu xep cuoi hang doi lane.
+HistorySyncRetryPolicy.configure({
+  onNavigatedAwayRequeue: (accountId, threadId) => {
+    try {
+      const retryRow = db.prepare('SELECT thread_url, contact_name FROM threads WHERE id = ?').get(String(threadId));
+      if (!retryRow) return;
+      if (InboxSyncScheduler.isThreadHistoryCompleted(String(threadId), String(accountId))) return;
+      const retrySource = ConversationRepository.getThreadSource(String(threadId));
+      InboxSyncScheduler.enqueueThreadSync({
+        account_id: String(accountId),
+        thread_id: String(threadId),
+        external_thread_id: String(threadId),
+        thread_url: retryRow.thread_url || null,
+        page_id: (retrySource && retrySource.sourceType === 'page_messenger') ? retrySource.pageId : null,
+        contact_name: retryRow.contact_name || null,
+        reason: 'history_retry',
+        allow_navigation: true
+      });
+    } catch (requeueErr) {
+      console.warn(`[HISTORY_SYNC_RETRY_REQUEUE_ERROR] thread=${threadId}:`, requeueErr.message);
+    }
+  }
+});
+
 InboxSyncScheduler.configure({
   getConnection: (accountId) => extensionConnections.get(String(accountId)),
   dispatchThreadMessagesSync: ({ account_id, thread_id, external_thread_id, thread_url, page_id, contact_name, reason, allow_navigation, sync_mode, scroll_delta }) => {
