@@ -1317,12 +1317,28 @@ wss.on('connection', (ws, req) => {
             db.prepare('DELETE FROM removed_accounts WHERE account_id = ?').run(String(account_id));
           }
           const previousExtension = extensionConnections.get(account_id);
-          // A Page Chrome has the same Facebook account id as Personal
-          // Messenger. Preserve the personal socket instead of closing it;
-          // Page identifies itself immediately afterwards with PAGE_CONTEXT_READY.
-          if (!previousExtension || previousExtension.readyState !== WebSocket.OPEN) {
-            extensionConnections.set(account_id, ws);
+          // 2026-10-01 (Phase A - ke hoach ws-socket-adoption): LUON nhan socket
+          // moi nhat. Truoc day socket moi bi tu choi khi socket cu van "OPEN"
+          // phia server - nhung socket cu co the la zombie half-open sau khi
+          // Chrome bi kill trong force-reload: close event khong bao gio den thi
+          // readyState van OPEN mai -> server giu socket ma, ban
+          // SYNC_THREAD_MESSAGES vao cho khong (reproduce 2026-10-01: 252
+          // DISPATCHED / 0 THREAD_MESSAGES_SYNCED / SW console khong thay mot
+          // log xu ly sync nao trong khi chieu nguoc van chay binh thuong).
+          // Extension ngay nay chi co DUNG MOT WebSocket cho ca ca nhan + page
+          // (page danh dau qua PAGE_CONTEXT_READY tren cung socket) nen khong
+          // con kich ban nao can giu socket cu. Close cua socket cu den tre
+          // cung khong xoa nham socket moi - close-handler co guard
+          // `extensionConnections.get(ws.accountId) !== ws` (return som).
+          if (previousExtension && previousExtension !== ws) {
+            if (previousExtension.readyState === WebSocket.OPEN) {
+              console.log(`[WS] REGISTER account=${account_id} socket replaced (previous still OPEN - zombie/superseded)`);
+            } else {
+              console.log(`[WS] REGISTER account=${account_id} socket replaced (previous was ${previousExtension.readyState})`);
+            }
+            try { previousExtension.close(1000, 'SUPERSEDED_CONNECTION'); } catch (_) {}
           }
+          extensionConnections.set(account_id, ws);
           const isSameConnection = previousExtension === ws;
           ws.lastHeartbeatAt = Date.now();
           // A pending account is still inside Facebook's interactive login /
