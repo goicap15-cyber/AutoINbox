@@ -171,6 +171,14 @@
     })();
   }
 
+        if (msg.type === 'CRM_FETCH_THREAD') {
+          try { window.postMessage({ type: 'CRM_FETCH_THREAD', data: msg.data || {} }, '*'); } catch (e) {}
+          return;
+        }
+        if (msg.type === 'CRM_QUERY_TEMPLATE_RESTORE') {
+          try { window.postMessage({ type: 'CRM_QUERY_TEMPLATE_RESTORE', data: msg.data || {} }, '*'); } catch (e) {}
+          return;
+        }
         if (msg.type === 'FB_CRM_HEALTH_CHECK') {
           if (globalThis.__FB_CRM_CONTENT_ACTIVE__ !== contentInstance) return;
           contentInstance.last_health_at = Date.now();
@@ -218,18 +226,54 @@
 
   // Lắng nghe tin nhắn từ injected.js (MAIN World Interceptor)
   window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'CRM_MQTT_DEBUG') {
+      try {
+        if (chrome?.runtime?.id) {
+          chrome.runtime.sendMessage({ type: 'CONTENT_DEBUG', data: { kind: 'mqtt', ...event.data.data } });
+        }
+      } catch (e) {}
+      return;
+    }
+    if (event.data && (event.data.type === 'CRM_QUERY_TEMPLATE' || event.data.type === 'CRM_FETCH_RESULT')) {
+      try {
+        if (chrome?.runtime?.id) {
+          chrome.runtime.sendMessage({ type: event.data.type, data: event.data.data });
+        }
+      } catch (e) {}
+      return;
+    }
     if (event.data && event.data.type === 'FB_NETWORK_MESSAGE') {
       const netMsg = event.data.data;
-      if (!netMsg || !netMsg.thread_id || !netMsg.fb_message_id) return;
-      // MQTT frames for image/video carry the CDN URL with no text. Dropping
-      // them forced every incoming media to wait for the slow history sweep.
-      if (!netMsg.content && !netMsg.media_url) return;
+      let netDbgCount = 0;
+      let netDbgWindow = Date.now();
+      const netDbg = (stage, extra) => {
+        try {
+          if (Date.now() - netDbgWindow > 60000) { netDbgCount = 0; netDbgWindow = Date.now(); }
+          if (netDbgCount++ > 60) return;
+          if (chrome?.runtime?.id) {
+            chrome.runtime.sendMessage({ type: 'CONTENT_DEBUG', data: { kind: 'netmsg', stage, ...(extra || {}) } });
+          }
+        } catch (e) {}
+      };
+      if (!netMsg || !netMsg.thread_id || !netMsg.fb_message_id) {
+        netDbg('NO_THREAD_OR_MID', { hasThread: Boolean(netMsg?.thread_id), hasMid: Boolean(netMsg?.fb_message_id), hasContent: Boolean(netMsg?.content), hasUrl: Boolean(netMsg?.media_url), mediaType: netMsg?.media_type });
+        return;
+      }
+      // MQTT frames for image/video carry the CDN URL with no text. Frames
+      // whose URL Facebook has not granted yet still name the attachment type;
+      // relaying them lets the server hold the message slot by mid until the
+      // history pass fills the URL - otherwise every incoming media waits for
+      // the slow history sweep.
+      if (!netMsg.content && !netMsg.media_url && (netMsg.media_type || 'text') === 'text') return;
 
       capturedUserId = capturedUserId || sanitizeUserId(document.cookie.match(/c_user=(\d+)/)?.[1]);
       let sender_id = netMsg.sender_id || (netMsg.is_outgoing ? capturedUserId : null);
       let is_outgoing = netMsg.is_outgoing || false;
        // Ignore incomplete main-world fragments; DOM/history will provide the canonical row.
-       if (!sender_id) return;
+       if (!sender_id) {
+        netDbg('NO_SENDER', { mid: String(netMsg.fb_message_id).substring(0, 30), isOutgoing: netMsg.is_outgoing, cookieUser: capturedUserId ? String(capturedUserId).substring(0, 12) : null });
+        return;
+      }
 
       if (sender_id && capturedUserId && String(sender_id) === String(capturedUserId)) {
         is_outgoing = true;
@@ -243,9 +287,14 @@
           // Several facebook tabs relay the same account-wide MQTT frame; the
           // mid is the message identity (server INSERT OR IGNORE dedupes too).
           const midKey = `${netMsg.thread_id}_${netMsg.fb_message_id}`;
-          if (relayedNetworkMids.has(midKey)) return;
-          relayedNetworkMids.add(midKey);
-          if (relayedNetworkMids.size > 3000) relayedNetworkMids.delete(relayedNetworkMids.values().next().value);
+          const relayedHadUrl = relayedNetworkMids.get(midKey);
+          if (relayedHadUrl === true) { netDbg('DEDUP_FULL', { midKey }); return; }
+          // Placeholder không URL đã đi trước: frame sau mang CDN URL phải
+          // được relay tiếp để server enrich đúng mid thay vì giữ placeholder.
+          if (relayedHadUrl === false && !netMsg.media_url) { netDbg('DEDUP_PLACEHOLDER', { midKey }); return; }
+          relayedNetworkMids.set(midKey, Boolean(netMsg.media_url));
+          if (relayedNetworkMids.size > 3000) relayedNetworkMids.delete(relayedNetworkMids.keys().next().value);
+          netDbg('RELAYED', { midKey: midKey.substring(0, 60), mediaType: netMsg.media_type, hasUrl: Boolean(netMsg.media_url), isOutgoing });
           recentNetworkEmits.set(`${netMsg.thread_id}:${netMsg.content || netMsg.fb_message_id}`, Date.now());
           chrome.runtime.sendMessage({
             type: 'NEW_MESSAGE_FROM_FB',
@@ -267,6 +316,49 @@
           });
         }
       } catch (e) {}
+    }
+    if (event.data && event.data.type === 'CRM_BLOB_DATA') {
+      const pending = videoBlobHydration.pending.get(event.data.rid);
+      if (!pending) return;
+      videoBlobHydration.pending.delete(event.data.rid);
+      const dataUrl = String(event.data.dataUrl || '');
+      if (!dataUrl.startsWith('data:video/')) return;
+      let tsMs = null;
+      const timeMatch = String(pending.effectiveLabel || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
+      if (timeMatch) {
+        let hours = Number(timeMatch[1]);
+        const minutes = Number(timeMatch[2]);
+        const ampm = String(timeMatch[3] || '').toUpperCase();
+        if ((ampm === 'PM' || ampm === 'CH') && hours < 12) hours += 12;
+        if ((ampm === 'AM' || ampm === 'SA') && hours === 12) hours = 0;
+        const observed = new Date();
+        observed.setHours(hours, minutes, 0, 0);
+        if (observed.getTime() > Date.now() + 60000) observed.setDate(observed.getDate() - 1);
+        tsMs = observed.getTime();
+      }
+      try {
+        if (chrome?.runtime?.id) {
+          console.log(`[DOM Observer] video blob hydrated: thread=${pending.threadId} mid=${pending.nativeId} bytes=${dataUrl.length}`);
+          chrome.runtime.sendMessage({
+            type: 'NEW_MESSAGE_FROM_FB',
+            data: {
+              thread_id: pending.threadId,
+              sender_id: null,
+              sender_name: pending.senderName || '',
+              content: pending.caption || '',
+              is_outgoing: false,
+              sender_role: 'customer',
+              fb_message_id: pending.nativeId,
+              media_type: 'video',
+              media_url: dataUrl,
+              timestamp_ms: tsMs,
+              timestamp_source: tsMs ? 'facebook_label' : 'realtime_fallback',
+              created_at: new Date(tsMs || Date.now()).toISOString(),
+              source: 'dom_video_hydration'
+            }
+          });
+        }
+      } catch (_) {}
     }
     if (event.data && event.data.type === 'FB_READ_RECEIPT') {
       // Read receipt MQTT từ injected.js: khách đã đọc tới watermark - dữ
@@ -310,8 +402,32 @@
     return `${prefix}_${String(threadId || '')}_${Number(timestampMs) || Date.now()}_${fallbackNetworkObservation}`;
   }
   const recentNetworkEmits = new Map();
-  const relayedNetworkMids = new Set();
+  const relayedNetworkMids = new Map();
   const recentDomEmits = new Map();
+
+  // E2EE video hydration: the playable bytes live in a page-scoped blob URL
+  // that dies outside the tab. injected.js (MAIN world) fetches the blob and
+  // returns a data: URL; this side schedules, dedupes and relays the row.
+  const videoBlobHydration = { done: new Map(), pending: new Map(), ridSeq: 0 };
+  function scheduleVideoBlobHydration(meta) {
+    try {
+      if (!chrome?.runtime?.id || !meta?.blobUrl) return;
+      const threadId = extractThreadIdFromUrl();
+      if (!threadId || !/^\d+$/.test(threadId)) return;
+      // Require Facebook's durable id: React remounts rows freely and a blob
+      // URL is per-mount, so deduping by native id is the only stable key.
+      // Without it one video could hydrate into several CRM rows.
+      if (!meta.nativeId) return;
+      const key = `${threadId}_${meta.nativeId}`;
+      if (videoBlobHydration.done.has(key)) return;
+      videoBlobHydration.done.set(key, Date.now());
+      if (videoBlobHydration.done.size > 500) videoBlobHydration.done.delete(videoBlobHydration.done.keys().next().value);
+      const rid = `vb${++videoBlobHydration.ridSeq}`;
+      videoBlobHydration.pending.set(rid, { ...meta, threadId, at: Date.now() });
+      window.postMessage({ type: 'CRM_FETCH_BLOB', rid, url: meta.blobUrl }, '*');
+      setTimeout(() => videoBlobHydration.pending.delete(rid), 45000);
+    } catch (_) {}
+  }
   const isDedicatedBackgroundTab = /(?:[?&])crm_tab_role=(?:history|discovery|requests|request_action)/i.test(window.location.search);
   // Direction ledger: Messenger may replay a rendered outgoing bubble as an
   // incoming DOM row while React hydrates its aria metadata.
@@ -877,6 +993,7 @@
     let isPhotoMessage = false;
     let isVideoMessage = false;
     let mediaUrl = null;
+    let videoBlobSource = null;
     const rowImgs = messageRow.querySelectorAll?.('img[src]') || [];
     for (const img of rowImgs) {
       if (img.closest(COMPOSER_EXCLUDE)) continue;
@@ -884,7 +1001,9 @@
       const alt = (img.getAttribute('alt') || '').trim();
       if (src && OPEN_PHOTO_ALT_PATTERN.test(alt)) {
         isPhotoMessage = true;
-        mediaUrl = /^https?:\/\/.*(?:fbcdn\.net|scontent)/i.test(src) ? src : null;
+        // E2EE threads only ever expose an inline data: URL (no CDN link),
+        // so accept it as media_url; http CDN links stay preferred.
+        mediaUrl = /^(?:https?:\/\/.*(?:fbcdn\.net|scontent)|data:image\/)/i.test(src) ? src : null;
         break;
       }
     }
@@ -928,6 +1047,9 @@
         mediaUrl = /^https?:\/\//i.test(source)
           ? source
           : (/^(?:https?:\/\/|data:image\/)/i.test(poster) ? poster : null);
+        // E2EE video rows never get a CDN URL - the playable bytes live in a
+        // page-scoped blob. Remember it so the hydration path can convert it.
+        if (!mediaUrl && /^blob:/i.test(source)) videoBlobSource = source;
         break;
       }
     }
@@ -1170,6 +1292,15 @@
         if (filter?.isSystemOrMetadataText && filter.isSystemOrMetadataText(cleaned)) continue;
         caption = cleaned;
         break;
+      }
+      if (isVideoMessage && !mediaUrl && videoBlobSource && !is_outgoing) {
+        scheduleVideoBlobHydration({
+          blobUrl: videoBlobSource,
+          nativeId: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
+          senderName: sender_name || '',
+          caption: caption || '',
+          effectiveLabel
+        });
       }
       return [{
         sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),

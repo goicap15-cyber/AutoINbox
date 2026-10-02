@@ -117,19 +117,52 @@ class InboxSyncScheduler {
         lastResultAt: 0,
         pending: false,
         timeout: null,
-        interval: null
+        interval: null,
+        // Universal realtime sync: khi extension còn nối, cửa sổ lightweight
+        // (2s/scan, chỉ đọc sidebar) tự gia hạn mà không cần operator bấm
+        // nút sync 120s. operatorDisabled giữ quyền tắt hẳn cho nút OFF.
+        operatorDisabled: false,
+        autoRealtimeOnly: false,
+        // Phân biệt cửa sổ do tick tự gia hạn (always_on) với cửa sổ operator
+        // bấm icon (operator). Không có cờ này, tick kế tiếp thấy window active
+        // do chính mình renew -> tưởng operator bấm -> bật lịch full + Requests
+        // chạy tự động (reproduce 2026-10-01: tab /messages/requests tự mở
+        // mỗi ~60s dù chưa bấm sync).
+        windowSource: null
       };
       this.accounts.set(accId, state);
     }
 
     if (!state.interval) {
       state.interval = setInterval(() => {
-        if (!this.isSyncWindowActive(accId)) return;
+        const extensionLive = this.getConnection?.(accId)?.readyState === 1;
+        if (!this.isSyncWindowActive(accId)) {
+          // Không có cửa sổ operator: tự gia hạn cửa sổ lightweight để tin
+          // khách mới mọi thread đẩy lên cột trái trong ~2s thay vì chờ ai đó
+          // bấm sync. Chỉ quét sidebar, không đụng full discovery/Requests.
+          if (!extensionLive || state.operatorDisabled) return;
+          state.syncEnabledUntil = Date.now() + 60000;
+          state.autoRealtimeOnly = true;
+          state.windowSource = 'always_on';
+          // Timer cửa sổ operator cũ còn treo sẽ bắn CANCEL_THREADS_SYNC khi
+          // hết hạn - clear để không tự cản luồng quét always-on.
+          if (state.syncWindowTimer) {
+            clearTimeout(state.syncWindowTimer);
+            state.syncWindowTimer = null;
+          }
+        } else if (extensionLive && state.windowSource === 'operator') {
+          state.autoRealtimeOnly = false;
+        }
         console.log(`[INBOX_SYNC_TICK] account=${accId}`);
         state.quickTickCount = Number(state.quickTickCount || 0) + 1;
         // Preserve periodic full discovery while polling Inbox quickly for replies.
         // Keep the previous five-minute cadence for the expensive full scan
         // even though lightweight realtime ticks now run once per second.
+        if (state.autoRealtimeOnly) {
+          const dispatchedAlwaysOn = this.requestSidebarSync(accId, 'scheduler_realtime_always_on', { scanMode: 'realtime' });
+          if (dispatchedAlwaysOn) state.lastRequestsSyncAt = Date.now();
+          return;
+        }
         const fullDiscoveryTicks = Math.max(1, Math.round(300000 / this.sidebarIntervalMs));
         const fullDiscoveryDue = state.quickTickCount % fullDiscoveryTicks === 0;
         const requestsDue = !fullDiscoveryDue
@@ -172,6 +205,9 @@ class InboxSyncScheduler {
     if (!accId) return { enabled: false, expires_at: 0 };
     if (!this.accounts.has(accId)) this.registerAccount(accId);
     const state = this.accounts.get(accId);
+    state.operatorDisabled = false;
+    state.windowSource = 'operator';
+    state.autoRealtimeOnly = false;
     const boundedDuration = Math.max(5000, Math.min(Number(durationMs) || 120000, 120000));
     state.syncEnabledUntil = Date.now() + boundedDuration;
     if (state.syncWindowTimer) clearTimeout(state.syncWindowTimer);
@@ -196,7 +232,12 @@ class InboxSyncScheduler {
     const accId = String(accountId || '');
     const state = this.accounts.get(accId);
     if (!state) return { enabled: false, expires_at: 0 };
+    // Chỉ lệnh OFF chủ động của operator mới chặn auto-renew; window hết hạn
+    // tự nhiên (timer 'window_expired') phải trả lại chế độ always-on realtime.
+    if (reason === 'operator_toggle') state.operatorDisabled = true;
     state.syncEnabledUntil = 0;
+    state.autoRealtimeOnly = false;
+    state.windowSource = null;
     state.pending = false;
     state.pendingRequestScan = false;
     if (state.syncWindowTimer) clearTimeout(state.syncWindowTimer);
@@ -505,9 +546,26 @@ class InboxSyncScheduler {
       return false;
     }
 
-    if (effectivePriority === 'high') queue.unshift({ key, ...jobData, queuedAt: now });
-    else queue.push({ key, ...jobData, queuedAt: now });
+    if (effectivePriority === 'high' && userDriven) {
+      // Click của operator trong CRM phải thấy tin ngay -> chen đầu hàng.
+      queue.unshift({ key, ...jobData, queuedAt: now });
+    } else if (effectivePriority === 'high') {
+      // Tin mới tự detect (sidebar_incoming/media hint): giữ FIFO theo thứ tự
+      // tin đến - không chen hàng nhau - nhưng vẫn đứng trước job thường.
+      let insertAt = 0;
+      while (insertAt < queue.length && queue[insertAt].priority === 'high') insertAt += 1;
+      queue.splice(insertAt, 0, { key, ...jobData, queuedAt: now });
+    } else {
+      queue.push({ key, ...jobData, queuedAt: now });
+    }
     this.threadQueues.set(resolvedLane, queue);
+    // Tin khách vừa tới phải hydrate ngay: giải phóng lane đang bị job sweep
+    // thường chiếm (slot tới 45-60s) thay vì để tin chờ hết lượt. Job high
+    // (click operator, tin khách khác đang chạy) không bị đụng - nhiều khách
+    // nhắn cùng lúc vẫn giữ FIFO, không giành tab lẫn nhau.
+    if (String(reason || '').startsWith('sidebar_incoming')) {
+      this.preemptActiveThreadSync(accId, (job) => String(job.priority || '') !== 'high');
+    }
     this.threadCooldownUntil.set(key, now + this.threadCooldownMs);
     console.log(`[INBOX_SYNC_MESSAGES_QUEUED] account=${accId} lane=${resolvedLane} thread=${threadId} reason=${reason} queue_depth=${queue.length}`);
     this.drainThreadQueue(resolvedLane);

@@ -1470,8 +1470,9 @@ export default function App() {
       if (next && String(activeThreadIdRef.current) === tid) return;
       // Sort lại ngay: tin mới -> thread nhảy lên đầu nhóm chưa đọc,
       // đánh dấu đã đọc -> thread tụt về vị trí theo last_activity như Messenger.
+      const nextActivity = typeof payload?.last_activity === 'string' ? payload.last_activity : null;
       setThreads((prev) => sortThreadsByActivity(prev.map((t) => (String(t.id) === tid
-        ? { ...t, is_unread: next ? 1 : 0, unread_manual: next ? 1 : -1 }
+        ? { ...t, is_unread: next ? 1 : 0, unread_manual: next ? 1 : -1, ...(nextActivity ? { last_activity: nextActivity } : {}) }
         : t))));
     });
     socket.on('THREAD_COMPLETED', () => loadThreadsRef.current());

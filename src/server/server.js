@@ -94,7 +94,17 @@ const FollowupService = require('./services/FollowupService');
 const InboxSourceService = require('./services/InboxSourceService');
 const InboxSyncScheduler = require('./services/InboxSyncScheduler');
 const InitialMessageSweepService = require('./services/InitialMessageSweepService');
-const { isChangedIncomingSidebarPreview } = require('./utils/sidebarIncomingDetection');
+const { isChangedIncomingSidebarPreview, isFreshRowTimeText } = require('./utils/sidebarIncomingDetection');
+
+// Dedupe media-hint theo thread: dòng thời gian sidebar giữ trạng thái "Bây
+// giờ"/fresh ~1 phút và quét 2s vẫn thấy -> không cho bắn sync lặp.
+const mediaHintLastSeen = new Map();
+// threadKey -> row_time_text của lần quét TRƯỚC: phân biệt "Bây giờ" MỚI
+// (tin vừa đến, row vừa chuyển sang fresh) với nhịp quét tiếp diễn của
+// cùng message - không có cái này thì bump unread nổ lại mỗi 8s trong
+// ~60s row còn "Bây giờ", badge hiện đi hiện lại sau khi operator đọc
+// (báo lỗi 2026-10-02).
+const rowTimePrevSeen = new Map();
 const licenseChecker = require('./services/LicenseChecker');
 
 // Remote License Server URL – must match CentralAuthClient / LicenseChecker
@@ -760,6 +770,17 @@ function sanitizeLog(str, maxLen = 120) {
   return cleaned.length > maxLen ? cleaned.substring(0, maxLen) + '...' : cleaned;
 }
 
+// Đo từng chặng đường realtime hint (observer -> bg -> server) trong
+// composer-debug.log để so latency với bgDebug/obsDebug phía extension.
+function syncDebug(stage, data = {}) {
+  try {
+    fs.appendFileSync(
+      path.join(APP_DATA_ROOT, 'composer-debug.log'),
+      JSON.stringify({ at: new Date().toISOString(), source: 'SYNC_DEBUG', stage, ...data }) + '\n'
+    );
+  } catch (_) {}
+}
+
 const richContentSecret = crypto.randomBytes(32);
 
 function requireLocalCrmRequest(req, res, next) {
@@ -1100,7 +1121,7 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
         thread_url: thread.thread_url || null,
         expected_contact_name: thread.contact_name || null,
         content: text,
-        client_message_id: clientMsgId
+        client_message_id: clientMsgId,
       }
     }));
     trace('BACKEND_DISPATCHED_EXTENSION');
@@ -1331,6 +1352,7 @@ wss.on('connection', (ws, req) => {
           if (pending_key) {
             db.prepare('DELETE FROM removed_accounts WHERE account_id = ?').run(String(account_id));
           }
+          ws.lastRegisterAt = Date.now();
           const previousExtension = extensionConnections.get(account_id);
           // 2026-10-01 (Phase A - ke hoach ws-socket-adoption): LUON nhan socket
           // moi nhat. Truoc day socket moi bi tu choi khi socket cu van "OPEN"
@@ -3079,6 +3101,15 @@ wss.on('connection', (ws, req) => {
           }
           const isRealtimeSidebarHint = sync_status === 'realtime_hint' || sync_status === 'realtime_requests';
           console.log(`[WS] Nhận ${threads?.length || 0} threads từ extension tài khoản: ${account_id}`);
+          if (isRealtimeSidebarHint) {
+            const observedAtMs = Number(msg.data?.observed_at || 0);
+            syncDebug('REALTIME_HINT', {
+              account: account_id,
+              origin: msg.data?.origin || null,
+              threads: threads?.length || 0,
+              age_ms: observedAtMs ? Date.now() - observedAtMs : null
+            });
+          }
           // Progressive UI batches are not the end of the combined Inbox +
           // Requests scan. Only its final aggregate frame releases inFlight.
           if (partial !== true) {
@@ -3126,6 +3157,10 @@ wss.on('connection', (ws, req) => {
                 if (!name || isInvalidContactName(name)) {
                   name = existingName || 'Khách hàng';
                 }
+                // Preview RAW từ sidebar trước khi bị thay bằng tin cũ trong DB:
+                // tin ảnh/video thuần cho preview rỗng, cleanLastMsg dưới đây sẽ
+                // lấy lại text cũ trong DB nên KHÔNG dùng được cho phát hiện media.
+                const rawSidebarPreview = cleanMessageText(t.last_message);
                 let cleanLastMsg = cleanMessageText(t.last_message);
                 if (!cleanLastMsg || isSystemOrMetadataText(cleanLastMsg) || cleanLastMsg === 'Đang tải...') {
                   const dbMsgs = db.prepare(`
@@ -3149,6 +3184,19 @@ wss.on('connection', (ws, req) => {
                     : 'Chưa có tin nhắn';
                 }
 
+                // Phải tính TRƯỚC isChangedIncomingSidebarPreview: bypass
+                // same-preview chỉ được nổ ở nhịp CHUYỂN ĐỔI sang "Bây giờ"
+                // (rowFreshNew), nếu dùng raw fresh thì MỖI nhịp quét 2s
+                // trong ~60s row còn "Bây giờ" đều tính là tin mới -> ngập
+                // hàng đợi sync 177 sidebar_incoming/9 phút -> app lag, bắt
+                // chậm (reproduce 2026-10-02 14:27-14:36).
+                const rowFresh = isFreshRowTimeText(t.row_time_text);
+                const rowTimeNow = String(t.row_time_text || '');
+                const rowBumpKey = account_id + ':' + existingInternalThreadId;
+                const rowTimePrev = rowTimePrevSeen.get(rowBumpKey) || '';
+                rowTimePrevSeen.set(rowBumpKey, rowTimeNow);
+                if (rowTimePrevSeen.size > 800) rowTimePrevSeen.clear();
+                const rowFreshNew = rowFresh && !isFreshRowTimeText(rowTimePrev);
                 const normalizedPreviousThread = previousThread
                   ? { ...previousThread, last_message: cleanMessageText(previousThread.last_message) }
                   : null;
@@ -3175,7 +3223,8 @@ wss.on('connection', (ws, req) => {
                   incomingThread: t,
                   cleanLastMessage: cleanLastMsg,
                   isActivitySummary,
-                  hasRecentMatchingOutbound
+                  hasRecentMatchingOutbound,
+                  rowFreshNew
                 });
                 const pageSourceId = (threadPageId || t.source_type === 'page_messenger') ? ('src_page_' + (threadPageId || '')) : null;
                 // Cờ đánh tay phải sống qua mọi lần sync, CẢ HAI CHIỀU:
@@ -3203,13 +3252,20 @@ wss.on('connection', (ws, req) => {
                 });
                 const canonicalThreadId = String(storedThread?.id || existingInternalThreadId);
 
+                // Page thread bắt buộc phải mang page_id vào job, nếu không
+                // scheduler route nhầm sang lane cá nhân (tab Messenger cá
+                // nhân không mở được hội thoại Page -> thread_route_mismatch
+                // / page_locked_by_user_action lặp vô hạn, khách Page không
+                // bao giờ sync - reproduce 2026-09-30).
+                const boundPageSource = ConversationRepository.getThreadSource(canonicalThreadId);
+                // rowFresh/rowFreshNew đã tính ở trên (trước bộ dò). Flip
+                // unread 0->1/thread mới cũng là bằng chứng tin vừa đến;
+                // cả hai gắn vào push để nhánh bubble biết phải bump thread
+                // cả khi bong bóng provisional bị chặn.
+                const unreadFlippedToIncoming = previousThread
+                  ? Number(previousThread.is_unread) !== 1
+                  : true;
                 if (incomingPreviewChanged) {
-                  // Page thread bắt buộc phải mang page_id vào job, nếu không
-                  // scheduler route nhầm sang lane cá nhân (tab Messenger cá
-                  // nhân không mở được hội thoại Page -> thread_route_mismatch
-                  // / page_locked_by_user_action lặp vô hạn, khách Page không
-                  // bao giờ sync - reproduce 2026-09-30).
-                  const boundPageSource = ConversationRepository.getThreadSource(canonicalThreadId);
                   changedUnreadThreads.push({
                     account_id,
                     thread_id: canonicalThreadId,
@@ -3218,8 +3274,56 @@ wss.on('connection', (ws, req) => {
                           contact_name: name || previousThread?.contact_name || null,
                     page_id: threadPageId || (boundPageSource?.pageId ?? null),
                     preview_content: cleanLastMsg,
-                    preview_is_like: t.is_like === true
+                    preview_is_like: t.is_like === true,
+                    row_fresh: rowFresh,
+                    row_fresh_new: rowFreshNew,
+                    unread_flipped: unreadFlippedToIncoming
                   });
+                }
+
+                // Ảnh/video thuần: sidebar chỉ hiện thumbnail (0 text preview)
+                // nên isChangedIncomingSidebarPreview luôn false - nếu chỉ chạy
+                // theo bubble thì history sync không bao giờ được enqueue và
+                // media của khách chỉ vào CRM khi ai đó bấm vào hội thoại.
+                // Unread flip + preview rỗng = khách vừa gửi media: vẫn đẩy vào
+                // hàng sync (không tạo bubble text giả). Guard tin thật 90s chặn
+                // re-enqueue sau khi media đã về DB; flip tự tắt khi is_unread=1
+                // được ghi lại nên sweep không bắn lặp.
+                // Thread đã unread sẵn thì không còn flip để bắt - dòng thời
+                // gian "Bây giờ" trên row là bằng chứng tin vừa đến.
+                const mediaHintKey = `${account_id}:${canonicalThreadId}`;
+                const mediaHintLastAt = mediaHintLastSeen.get(mediaHintKey) || 0;
+                if (mediaHintLastSeen.size > 600) mediaHintLastSeen.clear();
+                if (!incomingPreviewChanged
+                  && (!rawSidebarPreview || isSystemOrMetadataText(rawSidebarPreview))
+                  && t.preview_is_outgoing !== true
+                  && (Number(t.is_unread) === 1 || t.is_like === true)
+                  && (unreadFlippedToIncoming || rowFresh)
+                  && Date.now() - mediaHintLastAt > 90 * 1000) {
+                  const recentRealIncoming = db.prepare(`
+                    SELECT 1 FROM messages
+                    WHERE thread_id = ? AND is_outgoing = 0
+                      AND fb_message_id NOT LIKE 'sidebar_preview_%'
+                      AND timestamp_ms >= ?
+                    LIMIT 1
+                  `).get(existingInternalThreadId, Date.now() - 90 * 1000);
+                  if (!recentRealIncoming) {
+                    mediaHintLastSeen.set(mediaHintKey, Date.now());
+                    changedUnreadThreads.push({
+                      account_id,
+                      thread_id: canonicalThreadId,
+                      external_thread_id: t.external_thread_id || threadId,
+                      thread_url: t.thread_url || previousThread?.thread_url || null,
+                      contact_name: name || previousThread?.contact_name || null,
+                      page_id: threadPageId || (boundPageSource?.pageId ?? null),
+                      preview_content: '',
+                      preview_is_like: t.is_like === true,
+                      media_only_hint: true,
+                      row_time_text: t.row_time_text || null,
+                      row_fresh: rowFresh,
+                      unread_flipped: unreadFlippedToIncoming
+                    });
+                  }
                 }
 
                 // Auto-bind Page source nếu thread đến từ Business Suite
@@ -3255,6 +3359,7 @@ wss.on('connection', (ws, req) => {
               }
             });
             txn(account_id, threads);
+            syncDebug('PREVIEW_CHANGED', { status: sync_status || null, changed: changedUnreadThreads.length });
 
             // Render the trusted unread/sidebar-Like preview immediately.
             // The repository later promotes this sidebar_preview_* row to
@@ -3313,12 +3418,18 @@ wss.on('connection', (ws, req) => {
                 if (previewPersistence.insertedIds.includes(previewId)) {
                   // CHỈ tin mới thật sự (chưa có trong DB) mới được gắn cờ dính
                   // chưa đọc + đẩy lên đầu. Tin cũ bị quét lại không được phép.
-                  db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
+                  db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: new Date().toISOString() });
                   const previewRow = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(previewId);
                   if (previewRow) {
                     io.emit('NEW_MESSAGE', { ...previewRow, account_id: changed.account_id, provisional: true });
                     io.emit('THREAD_MESSAGES_UPDATED', { thread_id: canonicalThreadId, account_id: changed.account_id });
+                    syncDebug('PREVIEW_BUBBLE', {
+                      thread: String(canonicalThreadId).substring(0, 24),
+                      content: sanitizeLog(previewContent, 60),
+                      status: sync_status || null,
+                      latency_ms: msg.data?.observed_at ? Date.now() - Number(msg.data.observed_at) : null
+                    });
                     const { threadId: capturedThreadId, createdCaptures } = PhoneCaptureService.processIncomingMessage({
                       threadId: canonicalThreadId,
                       accountId: changed.account_id,
@@ -3352,9 +3463,36 @@ wss.on('connection', (ws, req) => {
                     });
                   }
                 }
+                } else if (changed.row_fresh_new || changed.unread_flipped) {
+                  // Tin lặp nội dung cũ ("ok", "dạ") không được tạo bong bóng
+                  // provisional, nhưng khi tin THẬT vừa đến thì thread vẫn
+                  // phải nhảy + badge ngay (reproduce 2026-10-02: khách nhắn
+                  // "ok" lần 2, CRM im lặng 1p47s).
+                  // Chỉ bump khi thread còn unread trong DB hoặc preview khác
+                  // last_message đã lưu - row "Bây giờ" + chấm unread của tab
+                  // ẩn LAG sau khi operator đọc, bump theo nó thì badge hiện
+                  // đi hiện lại vô hạn (báo lỗi 2026-10-02).
+                  const readState = db.prepare('SELECT is_unread, last_message FROM threads WHERE id = ?').get(String(canonicalThreadId));
+                  const isUnreadNow = Number(readState?.is_unread) === 1;
+                  const lastMsgMatches = cleanMessageText(readState?.last_message) === previewContent;
+                  if (isUnreadNow || !lastMsgMatches) {
+                    const bumpedAtIso = new Date().toISOString();
+                    db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: bumpedAtIso });
+                    syncDebug('PREVIEW_BUMP_REPEAT', { thread: String(canonicalThreadId).substring(0, 24), content: sanitizeLog(previewContent, 40), status: sync_status || null });
+                  }
                 }
 
-                InboxSyncScheduler.enqueueThreadSync({
+                if (!previewContent && changed.media_only_hint) {
+                // Media-only: không có bubble để render, nhưng tin thật đã đến
+                // - bump hội thoại lên đầu cột trái + gắn chưa đọc ngay.
+                const bumpedAtIso = new Date().toISOString();
+                db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: bumpedAtIso });
+                syncDebug('MEDIA_HINT', { thread: String(canonicalThreadId).substring(0, 24), status: sync_status || null });
+              }
+
+              InboxSyncScheduler.enqueueThreadSync({
                   ...changed,
                   thread_id: canonicalThreadId,
                   reason: 'sidebar_incoming',
@@ -6961,7 +7099,10 @@ InboxSyncScheduler.configure({
   getConnection: (accountId) => extensionConnections.get(String(accountId)),
   dispatchThreadMessagesSync: ({ account_id, thread_id, external_thread_id, thread_url, page_id, contact_name, reason, allow_navigation, sync_mode, scroll_delta }) => {
     const extWs = extensionConnections.get(String(account_id));
-    if (!extWs || extWs.readyState !== WebSocket.OPEN) return false;
+    if (!extWs || extWs.readyState !== WebSocket.OPEN) {
+      syncDebug('SYNC_DISPATCH_FAIL', { thread: String(thread_id || '').substring(0, 20), reason: reason || null, why: 'no_extension_ws' });
+      return false;
+    }
     const syncState = require('./services/HistorySyncManager').getSyncState(thread_id);
     const pageSource = ConversationRepository.getThreadSource(thread_id);
     const persisted = db.prepare('SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?').get(thread_id);
@@ -6992,6 +7133,7 @@ InboxSyncScheduler.configure({
         scroll_delta: Number(scroll_delta) || 0
       }
     }));
+    syncDebug('SYNC_DISPATCH', { thread: String(thread_id || '').substring(0, 20), reason: reason || null, mode });
     // Phase C (2026-10-01): dem dispatch khong ket qua; cham nguong thi probe
     // socket (zombie thi ws.send van thanh cong nhung extension khong nhan).
     dispatchStallWatchdog.noteDispatch(String(account_id));

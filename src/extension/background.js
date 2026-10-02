@@ -151,6 +151,77 @@ function waitForPendingSetupCompletion(accountId, attempt = 0) {
 }
 let fb_dtsg = null;
 const TRUSTED_SEND_ADAPTER_VERSION = "trusted-send-v1";
+
+// ── GraphQL template replay: bắt tin nhắn thread không cần mở tab ──
+// Messenger trang đẩy delta tin nhắn xuống transport không thấy được từ
+// trang, nên intercept WebSocket luôn cụt. Thay vào đó ghi lại body query
+// GraphQL messenger.com dùng khi mở thread (CRM_QUERY_TEMPLATE từ injected),
+// rồi phát lại cho thread sidebar vừa báo có tin mới — tin + URL media về
+// trong ~1s, không điều hướng, server dedup theo mid + promote preview.
+let crmGraphqlTemplate = null;
+const crmFastFetchLastAt = new Map();
+
+function bgDebug(data) {
+  try { sendToBackend('CONTENT_DEBUG', { kind: 'bg', ...data }); } catch (_) {}
+}
+
+function handleCrmQueryTemplate(data) {
+  if (!data || !data.doc_id || !data.variables || !Array.isArray(data.slots) || !data.slots.length) return;
+  crmGraphqlTemplate = data;
+  try { chrome.storage.session.set({ crmGraphqlTemplate: data }).catch(() => {}); } catch (_) {}
+  console.log(`[FB Engine] 🧩 Bắt được GraphQL thread-messages template: doc_id=${data.doc_id} slots=${data.slots.join(',')}`);
+  bgDebug({ stage: 'TEMPLATE_CAPTURED', doc_id: data.doc_id, slots: data.slots, page: data.page || '' });
+}
+
+function triggerGraphqlFastFetch(tabId, threads, senderUrl) {
+  const list = (Array.isArray(threads) ? threads : []).filter((t) => t && t.thread_id);
+  bgDebug({ stage: 'HINT', tab: tabId != null ? String(tabId) : null, url: String(senderUrl || '').substring(0, 80), template: Boolean(crmGraphqlTemplate), threads: list.slice(0, 8).map((t) => ({ id: String(t.thread_id).substring(0, 20), unread: Boolean(t.is_unread), out: Boolean(t.preview_is_outgoing), e2ee: Boolean(t.is_e2ee) })) });
+  if (!crmGraphqlTemplate || !tabId) return;
+  const now = Date.now();
+  if (crmFastFetchLastAt.size > 400) crmFastFetchLastAt.clear();
+  for (const t of list) {
+    const key = String(t.thread_id);
+    const last = crmFastFetchLastAt.get(key) || 0;
+    if (now - last < 4000) continue;
+    crmFastFetchLastAt.set(key, now);
+    bgDebug({ stage: 'FAST_FETCH_DISPATCH', thread_id: key.substring(0, 20) });
+    chrome.tabs.sendMessage(tabId, { type: 'CRM_FETCH_THREAD', data: { thread_id: key } }).catch(() => {});
+  }
+}
+
+// Phát lại query thread-messages trên tab chat đang có sẵn thay vì navigate
+// tab để scrape DOM: tin + URL ảnh/video về trong ~1s kể cả khi tab nền.
+// Server giao SYNC_THREAD_MESSAGES (preview đổi / media hint) là bắn ngay;
+// pass DOM history vẫn chạy sau như nguồn chuẩn, mid trùng bị dedupe.
+function dispatchPersonalGraphqlFastFetch(threadId) {
+  if (!crmGraphqlTemplate) return;
+  const bare = extractBareThreadId(threadId);
+  if (!bare) return;
+  const now = Date.now();
+  const last = crmFastFetchLastAt.get(bare) || 0;
+  if (now - last < 4000) return;
+  crmFastFetchLastAt.set(bare, now);
+  (async () => {
+    try {
+      const accId = String(user_id || '');
+      if (!accId) return;
+      const chatTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(accId, 'chat'))
+        || await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(accId, 'interaction'));
+      if (!chatTab?.id) return;
+      // Bộ nhớ trang mất template sau mỗi lần navigate; trả lại trước khi
+      // giao việc để fetch đầu tiên sau reload vẫn chạy được.
+      chrome.tabs.sendMessage(chatTab.id, { type: 'CRM_QUERY_TEMPLATE_RESTORE', data: crmGraphqlTemplate }).catch(() => {});
+      bgDebug({ stage: 'FAST_FETCH_DISPATCH', thread_id: bare.substring(0, 24), tab: String(chatTab.id) });
+      chrome.tabs.sendMessage(chatTab.id, { type: 'CRM_FETCH_THREAD', data: { thread_id: bare } }).catch(() => {});
+    } catch (_) {}
+  })();
+}
+
+try {
+  chrome.storage.session.get('crmGraphqlTemplate').then((res) => {
+    if (res?.crmGraphqlTemplate) crmGraphqlTemplate = res.crmGraphqlTemplate;
+  }).catch(() => {});
+} catch (_) {}
 let user_id = null;
 let account_name = null;
 let account_avatar_url = null;
@@ -176,6 +247,10 @@ const QUEUED_DISPATCH_IDEMPOTENCY_MS = 10 * 60 * 1000;
 // account so repeated wheel events wait for the active scrape instead of
 // invalidating its navigation token and returning navigation_superseded.
 const personalHistoryChains = new Map();
+// Job cua operator (click/cuon) dang chiem tab history: job tin khach (priority)
+// khong duoc gianh tab giua chung, neu khong navigation cua no keo tab di lam
+// job cuon cua operator bi abort url_mismatch (log 2026-10-01 10:27:27-38).
+const personalHistoryUserJobActive = new Map();
 // A failed upload can leave Messenger's hidden attachment draft mounted in
 // Track active Page tab navigation locks so background sweeps do not navigate
 // the single Business Suite tab away while the user is chatting or sending messages.
@@ -200,15 +275,39 @@ function runPersonalSendSerialized(accountId, operation) {
   }).catch(() => {});
   return current;
 }
-function runPersonalHistorySerialized(accountId, operation, isPriority = false) {
+function runPersonalHistorySerialized(accountId, operation, isPriority = false, isUserJob = false) {
   const key = String(accountId || user_id || 'default');
-  if (isPriority) {
+  const userJobOccupiesLane = !isUserJob && personalHistoryUserJobActive.get(key) === true;
+  let incomingTakeoverTimer = null;
+  if (isPriority && userJobOccupiesLane) {
+    // Tin khach toi khi operator dang click/cuon: xep hang sau, khong gianh tab.
+    bgDebug({ stage: 'SYNC_DEFERRED', lane: key, why: 'user_job_occupies_history_lane' });
+  } else if (isPriority) {
     personalHistoryChains.delete(key);
   }
   const previous = personalHistoryChains.get(key) || Promise.resolve();
   const current = previous.catch(() => {}).then(operation);
   personalHistoryChains.set(key, current);
+  if (isUserJob) personalHistoryUserJobActive.set(key, true);
+  if (isPriority && userJobOccupiesLane && !key.startsWith('page:')) {
+    // 2026-10-02: sau 15s doi, tin khach GIANH lane ca nhan - kick token
+    // navigation (cung key "<acc>:history" voi token cua job click/cuon)
+    // lam job do tu huy (navigation_superseded, server retry lai qua
+    // TRANSIENT_REASONS), thay vi de tin khach doi ca 45-65s cua job
+    // operator (reproduce 2026-10-02: tin Khang den 12:42:26, chay
+    // 12:44:13 sau 3 job click/scroll chiem lane). Lane Page bo qua:
+    // job Page khong tao navigation token de kick.
+    incomingTakeoverTimer = setTimeout(() => {
+      if (personalHistoryUserJobActive.get(key) !== true) return;
+      if (personalHistoryChains.get(key) !== current) return;
+      beginPersonalNavigation(key);
+      personalHistoryChains.delete(key);
+      bgDebug({ stage: 'SYNC_LANE_TAKEOVER', lane: key, why: 'incoming_grace_15s' });
+    }, 15000);
+  }
   current.finally(() => {
+    if (incomingTakeoverTimer) clearTimeout(incomingTakeoverTimer);
+    if (isUserJob) personalHistoryUserJobActive.delete(key);
     if (personalHistoryChains.get(key) === current) personalHistoryChains.delete(key);
   }).catch(() => {});
   return current;
@@ -1320,6 +1419,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 let wsConnectingTimer = null;
+const wsRecvLogAt = new Map(); // type -> last WS_RECV log time (chan lo log)
+let staleReRegisterUntil = 0;
 
 function connectWebSocket() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
@@ -1373,9 +1474,27 @@ function connectWebSocket() {
   };
 
   socket.onmessage = async (event) => {
-    if (ws !== socket) return;
+    if (ws !== socket) {
+      // Server van ban message vao socket NAY tuc la mapping ben server
+      // con tro socket cu. Neu khong dang ky lai, SYNC_THREAD_MESSAGES se
+      // roi vao socket chet yen tinh - khach nhan khong bao gio duoc hydrate.
+      let staleType = 'unparsed';
+      try { staleType = JSON.parse(event.data)?.type || 'unknown'; } catch (_) {}
+      bgDebug({ stage: 'WS_RECV_STALE', type: staleType });
+      if (ws && ws.readyState === WebSocket.OPEN && user_id && Date.now() > staleReRegisterUntil) {
+        staleReRegisterUntil = Date.now() + 10000;
+        sendToBackend('REGISTER_ACCOUNT', { account_id: user_id, fb_dtsg: fb_dtsg || '', pending_key, name: account_name || null, avatar_url: account_avatar_url || null });
+        bgDebug({ stage: 'WS_RE_REGISTER', why: 'stale_socket_recv' });
+      }
+      return;
+    }
     try {
       const message = JSON.parse(event.data);
+      const recvKey = String(message.type || 'unknown');
+      if (Date.now() - (wsRecvLogAt.get(recvKey) || 0) > 5000) {
+        wsRecvLogAt.set(recvKey, Date.now());
+        bgDebug({ stage: 'WS_RECV', type: recvKey });
+      }
       console.log('[FB Engine] 📩 Nhận từ Backend:', message.type, '| raw:', event.data.substring(0, 300));
 
       switch (message.type) {
@@ -1441,6 +1560,7 @@ function connectWebSocket() {
           const ackAccountId = String(message.data?.account_id || '');
           if (user_id && ackAccountId && ackAccountId !== String(user_id)) {
             console.warn('[FB Engine] Ignore stale REGISTER_ACCOUNT_ACK:', ackAccountId, 'expected:', user_id);
+            bgDebug({ stage: 'WS_STALE_ACK', ack: ackAccountId.substring(0, 20), expected: String(user_id || '').substring(0, 20) });
             backendAccountRegistered = false;
             break;
           }
@@ -1541,6 +1661,7 @@ function connectWebSocket() {
           console.log("[FB Engine] 🔄 Đang sync lịch sử tin nhắn thread:", message.data);
           {
             const isUserClick = ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].includes(String(message.data?.reason || ''));
+            bgDebug({ stage: 'SYNC_JOB', thread: String(message.data?.thread_id || '').substring(0, 24), reason: message.data?.reason || null, page: Boolean(message.data?.page_id), click: isUserClick });
             if (isUserClick) {
               if (message.data?.page_id) {
                 const pid = String(message.data.page_id);
@@ -1548,13 +1669,17 @@ function connectWebSocket() {
                 pageNavigationLockThreadId.set(pid, tid);
                 pageNavigationLockUntil.set(pid, Date.now() + 30000);
                 console.log(`[FB Engine] [PAGE_NAV_LOCK] Business Suite tab for page=${pid} locked to thread=${tid}`);
-              } else {
+              } else if (String(message.data?.reason || '') === 'crm_navigation') {
                 // Lock the personal history tab to the thread the user just clicked.
                 // Background sync for any other personal thread is blocked only for
                 // the 30s click window (same as the Page lock). A lock without
                 // expiry permanently blocked background syncs of every other
                 // thread, so customer images/videos never synced until the
                 // operator clicked that thread themselves.
+                // CHI click chuyen hoi thoai that su moi khoa: crm_scroll_older
+                // client tu ban moi vai giay khi thread dang mo - neu tinh la
+                // click thi khoa 30s duoc gia han mai mai, sync nen (ca tin
+                // khach) bi chan vinh vien (do log 2026-10-01 09:38-09:44).
                 userNavigationLockThreadId = String(message.data?.thread_id || '');
                 userNavigationLockUntil = Date.now() + 30000;
                 if (bulkHistorySyncInFlight) {
@@ -1567,11 +1692,24 @@ function connectWebSocket() {
             const laneKey = message.data?.page_id
               ? `page:${message.data.page_id}`
               : `${message.data?.account_id || user_id}:history`;
+            if (message.data?.page_id) lastPageSyncJobStartAt = Date.now();
+            if (!message.data?.page_id) {
+              // Job history/media cá nhân giữ slot active suốt job (deadline
+              // 45-60s + dư địa): Page không được giành tab giữa chừng, nếu
+              // không media render đứng lại -> ảnh/video chậm hoặc mất.
+              setPersonalSyncBusy(65000);
+              dispatchPersonalGraphqlFastFetch(message.data?.thread_id);
+            }
+            // Tin khach vua toi nhay hang serialized nhu click cua operator:
+            // khong cho job sweep dang chay (45-60s) moi hydrate media.
+            const incomingBoost = String(message.data?.reason || '').startsWith('sidebar_incoming');
             await runPersonalHistorySerialized(
               laneKey,
               () => runPersonalHistoryWithDeadline(laneKey, message.data, () => handleSyncThreadMessages(message.data)),
+              isUserClick || incomingBoost,
               isUserClick
             );
+            if (message.data?.page_id) scheduleReturnToMessengerTab();
           }
           break;
         case 'PAGE_BATCH_ACK': {
@@ -1626,6 +1764,7 @@ function connectWebSocket() {
     clearTimeout(wsConnectingTimer);
     wsConnectingTimer = null;
     console.log(`[FB Engine] WebSocket đóng (code=${event.code}). Thử lại sau ${reconnectDelay / 1000}s...`);
+    bgDebug({ stage: 'WS_CLOSED', code: event.code });
     ws = null;
     backendAccountRegistered = false;
     scheduleReconnect();
@@ -1731,7 +1870,118 @@ async function isRealtimeSidebarTab(tab) {
   return FbCrmMessengerTabRoles.canForwardRealtime(role);
 }
 
-function scheduleSidebarActivitySync(tab, fingerprint, observedThreads = []) {
+function relaySidebarActivityThreads(threads, origin, observedAt = 0) {
+  const rows = Array.isArray(threads) ? threads : [];
+  if (!rows.length || !user_id) return false;
+  if (!(ws && ws.readyState === WebSocket.OPEN)) return false;
+  const lightweightThreads = rows.map((thread) => ({
+    id: thread.thread_id,
+    thread_id: thread.thread_id,
+    contact_name: thread.name || thread.contact_name,
+    name: thread.name || thread.contact_name,
+    last_message: thread.last_message,
+    is_unread: thread.is_unread,
+    is_like: thread.is_like === true,
+    preview_is_outgoing: thread.preview_is_outgoing === true,
+    row_time_text: thread.row_time_text || '',
+    avatar_url: thread.avatar_url || null,
+    avatar_base64: null,
+    thread_url: thread.thread_url || null,
+    is_e2ee: Boolean(thread.is_e2ee),
+    source_type: 'personal_messenger',
+    inbox_folder: 'INBOX'
+  }));
+  sendToBackend('SYNC_THREADS_RESULT', {
+    account_id: user_id,
+    threads: lightweightThreads,
+    partial: true,
+    sync_status: 'realtime_hint',
+    origin,
+    observed_at: observedAt || undefined
+  });
+  return true;
+}
+
+// ── Nhịp chuyển tab khi sync nền ────────────────────────────────────────────
+// Page lane và lane cá nhân chạy song song, mỗi job đều muốn tab của mình
+// active (tab nền bị Chrome throttle làm quét chậm 20-40s) -> nếu mỗi job tự
+// tabs.update thì tab nhảy liên tục. Gom về một điểm: tối đa 1 lần chuyển/5s,
+// request mới nhất thắng, tab Messenger cá nhân đè request Page đang chờ,
+// page lane rảnh việc thì hẹn về lại tab Messenger để bắt tin cho chuẩn.
+const crmTabSwitch = { lastAt: 0, activeTabId: null, pending: null, timer: null, personalBusyUntil: 0 };
+const CRM_TAB_SWITCH_MIN_GAP_MS = 5000;
+// Xin active tab Page bị hạ thêm một bậc (2026-10-01: "tab messenger page
+// chiếm quyền kiểm soát nhiều quá"). Sau khi Messenger vừa active, Page phải
+// đợi 15s mới được thay lượt; trong lúc tin khách đang về, request Messenger
+// (mỗi job nền là isMessengerHome) luôn đè pending Page nên tab chat cá nhân
+// giữ quyền. Khi rảnh, Page vẫn được active theo chu kỳ để render đủ row.
+const CRM_PAGE_TAB_SWITCH_MIN_GAP_MS = 15000;
+let lastPageSyncJobStartAt = 0;
+let returnToMessengerTimer = null;
+
+// Job đồng bộ cá nhân (history/media, gửi tin) cần tab active SUỐT quá trình
+// render: Messenger chỉ mount/decode ảnh-video (blob, base64) khi tab được
+// active. Page giành active giữa job là render đứng lại - ảnh/video chậm hoặc
+// mất hẳn, gửi tin chậm (2026-10-01: 2-3 acc chat, page lane stream liên tục
+// giành slot mỗi 15s). Busy chặn cả request Page mới lẫn timer Page đã hẹn.
+function setPersonalSyncBusy(ms) {
+  crmTabSwitch.personalBusyUntil = Date.now() + Math.max(1000, Number(ms) || 1000);
+}
+function isPersonalSyncBusy() {
+  return Date.now() < crmTabSwitch.personalBusyUntil;
+}
+
+function requestTabActivation(tabId, { isMessengerHome = false, immediate = false } = {}) {
+  const targetId = Number(tabId);
+  if (!Number.isFinite(targetId) || targetId < 0 || !user_id) return;
+  if (crmTabSwitch.activeTabId === targetId) return;
+  // Messenger pending -> job Page phải chờ lượt (ưu tiên bắt tin).
+  if (crmTabSwitch.pending && crmTabSwitch.pending.isMessengerHome && !isMessengerHome) return;
+  // Job cá nhân đang chạy: request Page mới bị bỏ hẳn (click user vẫn qua).
+  if (!isMessengerHome && !immediate && isPersonalSyncBusy()) return;
+  crmTabSwitch.pending = { tabId: targetId, isMessengerHome, immediate };
+  if (crmTabSwitch.timer) { clearTimeout(crmTabSwitch.timer); crmTabSwitch.timer = null; }
+  const fire = async () => {
+    crmTabSwitch.timer = null;
+    const pending = crmTabSwitch.pending;
+    crmTabSwitch.pending = null;
+    if (!pending) return;
+    // Timer Page hẹn từ trước không được bắn giữa job cá nhân.
+    if (!pending.isMessengerHome && !pending.immediate && isPersonalSyncBusy()) return;
+    try {
+      const tab = await chrome.tabs.get(pending.tabId).catch(() => null);
+      if (!tab) return;
+      crmTabSwitch.activeTabId = pending.tabId;
+      crmTabSwitch.lastAt = Date.now();
+      await chrome.tabs.update(pending.tabId, { active: true }).catch(() => {});
+    } catch (_) {}
+  };
+  const waitMs = immediate ? 0 : Math.max(0, crmTabSwitch.lastAt
+    + (isMessengerHome ? CRM_TAB_SWITCH_MIN_GAP_MS : CRM_PAGE_TAB_SWITCH_MIN_GAP_MS)
+    - Date.now());
+  if (waitMs <= 0) fire();
+  else crmTabSwitch.timer = setTimeout(fire, waitMs);
+}
+
+// Page lane vừa nhả job: nếu 2.5s sau không còn job Page nào mới bắt đầu thì
+// đưa tab Messenger cá nhân trở lại vị trí active.
+function scheduleReturnToMessengerTab() {
+  if (returnToMessengerTimer) clearTimeout(returnToMessengerTimer);
+  returnToMessengerTimer = setTimeout(async () => {
+    returnToMessengerTimer = null;
+    if (Date.now() - lastPageSyncJobStartAt < 2500) return;
+    // Job cá nhân (history/media/send) đang giữ slot thì không kéo tab chat
+    // về - tab history cần active để render tiếp ảnh/video.
+    if (isPersonalSyncBusy()) return;
+    if (!user_id) return;
+    try {
+      const chatTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(user_id, 'chat'));
+      if (chatTab?.id != null) requestTabActivation(chatTab.id, { isMessengerHome: true });
+    } catch (_) {}
+  }, 2000);
+}
+
+function scheduleSidebarActivitySync(tab, fingerprint, observedThreads = [], observedAt = 0) {
   if (!tab?.id || !fingerprint) return false;
   const key = String(tab.id);
   const previous = sidebarActivityHints.get(key) || {};
@@ -1741,44 +1991,37 @@ function scheduleSidebarActivitySync(tab, fingerprint, observedThreads = []) {
   state.timer = setTimeout(async () => {
     state.timer = null;
     try {
-      if (!await isRealtimeSidebarTab(tab)) return;
-      const result = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: scrapeFacebookSidebar
-      });
-      const parsedThreads = Array.isArray(result?.[0]?.result) ? result[0].result : [];
-      // Messenger virtualizes sidebar rows aggressively. If the row that
-      // triggered the mutation disappeared before executeScript ran, consume
-      // the content-script snapshot captured at mutation time.
-      const threads = parsedThreads.length
-        ? parsedThreads
-        : (Array.isArray(observedThreads) ? observedThreads : []);
-      if (!threads.length) return;
-      const lightweightThreads = threads.map((thread) => ({
-        id: thread.thread_id,
-        thread_id: thread.thread_id,
-        contact_name: thread.name || thread.contact_name,
-        name: thread.name || thread.contact_name,
-        last_message: thread.last_message,
-        is_unread: thread.is_unread,
-        is_like: thread.is_like === true,
-        preview_is_outgoing: thread.preview_is_outgoing === true,
-        avatar_url: thread.avatar_url || null,
-        avatar_base64: null,
-        thread_url: thread.thread_url || null,
-        is_e2ee: Boolean(thread.is_e2ee),
-        source_type: 'personal_messenger',
-        inbox_folder: 'INBOX'
-      }));
-      sendToBackend('SYNC_THREADS_RESULT', {
-        account_id: user_id,
-        threads: lightweightThreads,
-        partial: true,
-        sync_status: 'realtime_hint',
-        origin: 'sidebar_activity_observer'
-      });
+      if (!await isRealtimeSidebarTab(tab)) {
+        bgDebug({ stage: 'HINT_TAB_REJECTED', tab_id: tab.id });
+        // Tab role check can fail after a registry swap while the mutation
+        // was real; the content-script snapshot still proves it happened.
+        relaySidebarActivityThreads(observedThreads, 'sidebar_hint_snapshot_fallback', observedAt);
+        return;
+      }
+      let threads = [];
+      try {
+        const result = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: scrapeFacebookSidebar
+        });
+        threads = Array.isArray(result?.[0]?.result) ? result[0].result : [];
+      } catch (scrapeError) {
+        bgDebug({ stage: 'HINT_SCRAPE_FAIL', tab_id: tab.id, error: String(scrapeError?.message || scrapeError).substring(0, 120) });
+      }
+      // Messenger virtualizes sidebar rows aggressively: keep the mutation-time
+      // snapshot whenever the scrape came back empty.
+      if (!threads.length && Array.isArray(observedThreads) && observedThreads.length) {
+        threads = observedThreads;
+      }
+      if (!threads.length) {
+        bgDebug({ stage: 'HINT_RELAY_EMPTY', tab_id: tab.id });
+        return;
+      }
+      const relayed = relaySidebarActivityThreads(threads, 'sidebar_activity_observer', observedAt);
+      bgDebug({ stage: 'HINT_RELAYED', tab_id: tab.id, threads: threads.length, sent: relayed });
     } catch (error) {
       console.warn('[FB Engine] Sidebar activity fallback failed:', error?.message || error);
+      bgDebug({ stage: 'HINT_RELAY_FAIL', error: String(error?.message || error).substring(0, 120) });
     }
   }, 180);
   if (typeof state.timer.unref === 'function') state.timer.unref();
@@ -1879,11 +2122,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return senderRole;
   }
 
+  if (message.type === 'CRM_QUERY_TEMPLATE') {
+    handleCrmQueryTemplate(message.data);
+    return true;
+  }
+  if (message.type === 'CRM_FETCH_RESULT') {
+    const d = message.data || {};
+    console.log(`[FB Engine] 🧩 GraphQL fast fetch thread=${String(d.thread_id || '').substring(0, 20)} found=${d.found} http=${d.http || ''} ${d.reason || ''}`);
+    bgDebug({ stage: 'FAST_FETCH_RESULT', thread_id: String(d.thread_id || '').substring(0, 20), found: d.found, http: d.http || null, reason: d.reason || null });
+    return true;
+  }
+
   if (message.type === 'SIDEBAR_ACTIVITY_HINT') {
+    const hintData = message.data || {};
+    const observedAt = Number(hintData.observed_at || 0);
+    bgDebug({ stage: 'HINT_RECEIVED', tab_id: sender?.tab?.id ?? null, threads: Array.isArray(hintData.threads) ? hintData.threads.length : 0, fingerprint: String(hintData.fingerprint || '').substring(0, 16) });
+    triggerGraphqlFastFetch(sender?.tab?.id, hintData.threads, sender?.tab?.url || hintData.url);
+    // Relay the mutation-time snapshot immediately: the server dedupes preview
+    // bubbles, and the 180ms scrape below only refines what was observed.
+    const hintUrl = String(sender?.tab?.url || hintData.url || '');
+    if (user_id && /(^|\.)(facebook\.com\/messages|messenger\.com)/i.test(hintUrl)) {
+      relaySidebarActivityThreads(hintData.threads, 'sidebar_hint_snapshot', observedAt);
+    }
     scheduleSidebarActivitySync(
       sender?.tab,
-      String(message.data?.fingerprint || ''),
-      Array.isArray(message.data?.threads) ? message.data.threads : []
+      String(hintData.fingerprint || ''),
+      Array.isArray(hintData.threads) ? hintData.threads : [],
+      observedAt
     );
     return true;
   }
@@ -2960,7 +3225,9 @@ async function handleSendPersonalMessageWithAttachment({ thread_id, recipient_th
       return;
     }
     await isolateFailedMediaDraftBeforeSend(tab.id);
-    await chrome.tabs.update(tab.id, { active: true }).catch(() => null);
+    // Attachment/video cần tab active suốt upload + settle (có thể cả phút).
+    setPersonalSyncBusy(90000);
+    requestTabActivation(tab.id, { immediate: true, isMessengerHome: true });
     await delay(300);
 
     const recipientPsid = resolvePersonalRecipientThreadId(thread_id, recipient_thread_id);
@@ -2999,7 +3266,15 @@ async function handleSendPersonalMessageWithAttachment({ thread_id, recipient_th
     assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_ATTACHMENT_IDENTITY', true);
     if (!isGenericContactName(normalizedExpectedName) && !isGenericContactName(normalizedVisibleName) && normalizedExpectedName !== normalizedVisibleName) {
       if (!normalizedExpectedName.includes(normalizedVisibleName) && !normalizedVisibleName.includes(normalizedExpectedName)) {
-        console.warn('[ATTACHMENT] Contact identity mismatch warning:', { expected_contact_name, visibleContactName });
+        trace('RECIPIENT_IDENTITY_REJECTED', { tab_id: tab.id, stage: 'PERSONAL_ATTACHMENT_IDENTITY', expected: expected_contact_name, visible: visibleContactName });
+        sendToBackend('SEND_MESSAGE_RESULT', {
+          thread_id,
+          client_message_id,
+          success: false,
+          error: `Khung chat Messenger đang mở "${visibleContactName}" thay vì "${expected_contact_name}"; gửi attachment bị chặn để tránh nhầm người nhận`,
+          error_code: 'RECIPIENT_IDENTITY_MISMATCH'
+        });
+        return;
       }
     }
 
@@ -3086,7 +3361,8 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
           const rows = [...document.querySelectorAll('[data-message-id]')].reverse();
           const row = rows.find((element) => {
             const label = element.getAttribute('aria-label') || '';
-            return normalize(element.textContent) === wanted && /(?:Bạn|You)(?::|\s|$)/i.test(label);
+            const text = normalize(element.textContent);
+            return text === wanted && /(?:Bạn|You)(?::|\s|$)/i.test(label);
           });
           return row ? { message_id: row.getAttribute('data-message-id'), content: normalize(row.textContent) } : null;
         },
@@ -3196,6 +3472,13 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
       if (strict_recipient_identity) throw tabError;
       return;
     }
+    // Gửi tin là hành động user: tab chat phải active NGAY và Page bị chặn
+    // giành slot trong suốt quá trình gõ/gửi - tab nền bị throttle làm send
+    // kéo dài hàng chục giây khi page lane đang stream.
+    setPersonalSyncBusy(25000);
+    if (tab_role === 'interaction' || tab_role === 'chat') {
+      requestTabActivation(tab.id, { immediate: true, isMessengerHome: true });
+    }
     await isolateFailedMediaDraftBeforeSend(tab.id);
     const recipientThreadId = resolvePersonalRecipientThreadId(thread_id, recipient_thread_id);
     const onRecipientThread = await ensureTabOnThread(
@@ -3207,6 +3490,13 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
       expected_contact_name,
       { forceCleanViewport: strict_recipient_identity }
     );
+    const isGenericContactName = (n) => !n || /^(khách hàng|chưa có liên hệ|khach hang|default|customer|user)$/i.test(String(n).trim());
+    const identityMatches = (expected, visible) => {
+      const normExpected = String(expected || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+      const normVisible = String(visible || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+      return normExpected === normVisible || normExpected.includes(normVisible) || normVisible.includes(normExpected);
+    };
+    const identityAvailable = Boolean(expected_contact_name && !isGenericContactName(expected_contact_name));
     const interactionDeadline = Date.now() + 10000;
     let interactionState = null;
     while (onRecipientThread && Date.now() < interactionDeadline) {
@@ -3239,7 +3529,14 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
         },
         args: [recipientThreadId]
       }).then((rows) => rows?.[0]?.result || null).catch(() => null);
-      if (interactionState?.route_ready && interactionState?.composer_ready && interactionState?.visible_contact_name) break;
+      // URL khớp chưa đủ: SPA cập nhật location.href TRƯỚC khi thay viewport,
+      // nên phải chờ thêm tên hiển thị khớp người nhận - nếu không tin sẽ được
+      // chèn vào khung chat của hội thoại cũ rồi gửi sang nhầm khách
+      // (reproduce 2026-09-30: nhắn cho khách A, tin rơi vào khách B).
+      const identityOk = !identityAvailable || !interactionState?.visible_contact_name
+        || isGenericContactName(interactionState.visible_contact_name)
+        || identityMatches(expected_contact_name, interactionState.visible_contact_name);
+      if (interactionState?.route_ready && interactionState?.composer_ready && interactionState?.visible_contact_name && identityOk) break;
       await delay(200);
     }
     const verifiedThreadId = interactionState?.current_thread_id || await getCurrentThreadIdInTab(tab.id);
@@ -3265,15 +3562,17 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
       return;
     }
     const visibleContactName = interactionState.visible_contact_name;
-    const normalizeIdentity = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
-    const isGenericContactName = (n) => !n || /^(khách hàng|chưa có liên hệ|khach hang|default|customer|user)$/i.test(String(n).trim());
     assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_TEXT_IDENTITY', true);
-    if (expected_contact_name && visibleContactName && !isGenericContactName(expected_contact_name) && !isGenericContactName(visibleContactName)) {
-      const normExpected = normalizeIdentity(expected_contact_name);
-      const normVisible = normalizeIdentity(visibleContactName);
-      if (normExpected !== normVisible && !normExpected.includes(normVisible) && !normVisible.includes(normExpected)) {
-        console.warn('[SEND_MESSAGE] Contact identity mismatch warning:', { expected_contact_name, visibleContactName });
-      }
+    if (identityAvailable && visibleContactName && !isGenericContactName(visibleContactName) && !identityMatches(expected_contact_name, visibleContactName)) {
+      trace('RECIPIENT_IDENTITY_REJECTED', { tab_id: tab.id, expected: expected_contact_name, visible: visibleContactName });
+      sendToBackend('SEND_MESSAGE_RESULT', {
+        thread_id,
+        client_message_id,
+        success: false,
+        error: `Khung chat Messenger đang mở "${visibleContactName}" thay vì "${expected_contact_name}"; gửi bị chặn để tránh nhầm người nhận`,
+        error_code: 'RECIPIENT_IDENTITY_MISMATCH'
+      });
+      return;
     }
     if (strict_recipient_identity) {
       const stableComposer = await prepareCampaignRecipientComposer(tab.id, recipientThreadId);
@@ -3530,6 +3829,25 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
         // detach, browser focus may have moved to the 👍 Like button - pressing
         // Enter on that sends a reaction instead of the typed message.
         await refocusComposer(tab.id);
+        // refocus + debugger attach takes ~150ms; an SPA navigation in that
+        // window would press Enter on a DIFFERENT conversation's composer
+        // (wrong-recipient send or stray Like). Re-verify the route last.
+        const enterRouteCheck = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            const m = location.href.match(/\/messages\/(?:e2ee\/)?t\/([^\/?#]+)/);
+            return m ? decodeURIComponent(m[1]) : null;
+          }
+        }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+        if (String(enterRouteCheck || '') !== String(recipientThreadId)) {
+          trace('CDP_ENTER_ROUTE_REJECTED', { tab_id: tab.id, requested: recipientThreadId, actual: enterRouteCheck });
+          sendToBackend('SEND_MESSAGE_RESULT', {
+            thread_id, client_message_id, success: false,
+            error: 'Conversation changed before Enter dispatch; send blocked to prevent a wrong recipient',
+            error_code: 'THREAD_ROUTE_MISMATCH'
+          });
+          return;
+        }
         const cdpResult = await dispatchTrustedEnter(tab.id);
         trace('CDP_ENTER_RESULT', { adapter_version: TRUSTED_SEND_ADAPTER_VERSION, success: !!cdpResult.success, error_code: cdpResult.error_code || null });
         if (cdpResult.success) {
@@ -4818,7 +5136,17 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
   // tabs independently as well. A Page thread must carry the asset_id of the
   // exact tab it came from even when a Personal Messenger tab is also open.
   // Discovery must never scroll the operator's interaction/chat tab.
-  const personalTab = isRealtimeRequestScan ? null : await ensureRoleMessengerTab(account_id, 'discovery');
+  let personalTab = null;
+  if (isRealtimeInboxScan) {
+    // Quét nhẹ 2s đọc sidebar NGAY trên tab chat cá nhân (tab nhà do
+    // recoverRealtimeReceiver giữ sống) - KHÔNG mở/giữ tab discovery riêng
+    // (2026-10-01: user không muốn tab "Đồng bộ hội thoại" tồn tại khi chưa
+    // bấm icon). Tab discovery chỉ phục vụ quét sâu 'full' trong cửa sổ icon.
+    personalTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'chat'))
+      || await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'interaction'));
+  } else if (!isRealtimeRequestScan) {
+    personalTab = await ensureRoleMessengerTab(account_id, 'discovery');
+  }
   const recoveryDialogOpen = personalTab?.id ? await chrome.scripting.executeScript({
     target: { tabId: personalTab.id },
     func: () => {
@@ -4843,7 +5171,10 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
     }
     return;
   }
-  const bizTabs = isRealtimeRequestScan ? [] : await new Promise((resolve) => {
+  // Tab Business Suite chỉ được quét trong quét sâu 'full' (cửa sổ icon).
+  // Nhét BS vào vòng quét 2s nghĩa là force-active mọi tab Page mỗi 2 giây -
+  // chính là hiện tượng tab Page chiếm quyền Chrome (2026-10-01).
+  const bizTabs = isRealtimeScan ? [] : await new Promise((resolve) => {
     chrome.tabs.query({ url: ['*://business.facebook.com/*'] }, (tabs) => resolve(tabs || []));
   });
   const scrapeTargets = [];
@@ -4920,7 +5251,12 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
         // background tab. Make the target active inside the managed (already
         // hidden/off-screen) Chrome window before selecting Requests/Spam.
         // This does not foreground Chrome on the user's desktop.
-        await chrome.tabs.update(target.tab.id, { active: true }).catch(() => null);
+        // Quét sâu/Requests vẫn cần active để Facebook mount row ảo trong tab
+        // nền. Riêng quét nhẹ 2s đọc tab chat không được force active - nó
+        // đang là nguyên nhân tab khác bị giật khỏi vị trí mỗi 2 giây.
+        if (!isRealtimeInboxScan) {
+          await chrome.tabs.update(target.tab.id, { active: true }).catch(() => null);
+        }
         await delay(target.requestSection ? 1200 : (isRealtimeScan ? 50 : 500));
         let scraped = [];
         if (target.isBizTab) {
@@ -5779,6 +6115,10 @@ function scrapeFacebookSidebar() {
         const isSeparatorJunk = /^[\s\u00b7\u2022.\-|•·]+$/.test(txt);
         if (txt && !isSeparatorJunk && txt !== name && !txt.includes(name) && !isSystemText(txt) && txt.length > 2 && txt.length < 200 && !/^\d+\s*(?:ngày|giờ|phút|năm|s|m|h|d|y)$/i.test(txt)) last_message = txt;
       }
+      // Dòng thời gian relative ("Bây giờ"/"1 phút"/"12:30"): server dùng làm
+      // bằng chứng tin vừa đến cho media thuần trên thread đã unread sẵn.
+      const SIDEBAR_TIME_LINE_RE = /^(?:bây giờ|just now|vừa xong|vài giây|a few seconds ago|hôm qua|yesterday|thứ [a-zà-ỹ]+|mon|tue|wed|thu|fri|sat|sun|\d{1,2}:\d{2}|\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y)(?:\s*(?:trước|ago))?)$/iu;
+      const row_time_text = (String(rowContainer.innerText || '').split(/\n+/).map((l) => l.trim()).reverse().find((l) => l && l.length <= 24 && SIDEBAR_TIME_LINE_RE.test(l)) || '');
 
       // Icon-only Like has no text preview and Facebook may omit the unread dot.
       // Sidebar rows contain no composer quick-like control, so the exact SVG title is safe evidence.
@@ -5824,6 +6164,7 @@ function scrapeFacebookSidebar() {
         is_unread: !!hasUnreadDot,
         is_like: sidebarLike,
         preview_is_outgoing,
+        row_time_text,
         avatar_url,
         avatar_base64,
         thread_url,
@@ -6224,6 +6565,20 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
             ? (new URL(reqUrl, location.origin)).pathname
             : `/messages/t/${encodeURIComponent(tid)}/`;
 
+          // Sidebar ao hoa: row thread dich thuong KHONG render (1000+
+          // threads) -> khong co link de click. Muon href cua 1 link sidebar
+          // dang co thanh link dich roi click: router SPA bat click <a> va
+          // dieu huong ngay tai cho, khong reload ca trang (reload mat
+          // 15-25s moi mount lai viewport - do chuong ngai hydrate nhanh).
+          const donor = links.find((a) => typeof a.click === 'function');
+          if (donor) {
+            const savedHref = donor.getAttribute('href');
+            donor.setAttribute('href', targetPath);
+            donor.click();
+            setTimeout(() => { try { donor.setAttribute('href', savedHref); } catch (_) {} }, 300);
+            return { ok: true, type: 'href_spoof_click' };
+          }
+
           window.location.href = targetPath;
           return { ok: true, type: 'location_assign' };
         },
@@ -6232,14 +6587,18 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
 
       if (clicked?.[0]?.result?.ok) {
         const deadline = Date.now() + 4000;
+        let navOk = false;
+        let lastSeenId = null;
         while (Date.now() < deadline) {
           if (!isPersonalNavigationCurrent(navigationToken)) return false;
           await delay(200);
-          const currentId = await getCurrentThreadIdInTab(tab.id);
-          if (String(currentId) === targetId) {
-            console.log(`[FB Engine] ✅ Navigation tới thread ${targetId} thành công (${clicked[0].result.type})`);
-            return true;
-          }
+          lastSeenId = await getCurrentThreadIdInTab(tab.id);
+          if (String(lastSeenId) === targetId) { navOk = true; break; }
+        }
+        bgDebug({ stage: 'SPA_NAV', type: clicked[0].result.type, ok: navOk, current: String(lastSeenId || '').substring(0, 24), target: String(targetId).substring(0, 24) });
+        if (navOk) {
+          console.log(`[FB Engine] ✅ Navigation tới thread ${targetId} thành công (${clicked[0].result.type})`);
+          return true;
         }
       }
     } catch (e) {
@@ -6257,14 +6616,18 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
     await delay(800);
 
     const deadline = Date.now() + 4000;
+    let navOk = false;
+    let lastSeenId = null;
     while (Date.now() < deadline) {
       if (!isPersonalNavigationCurrent(navigationToken)) return false;
       await delay(250);
-      const currentId = await getCurrentThreadIdInTab(tab.id);
-      if (String(currentId) === targetId) {
-        console.log(`[FB Engine] ✅ Personal Messenger đã vào đúng thread ${targetId} via tabs.update`);
-        return true;
-      }
+      lastSeenId = await getCurrentThreadIdInTab(tab.id);
+      if (String(lastSeenId) === targetId) { navOk = true; break; }
+    }
+    bgDebug({ stage: 'NAV_FALLBACK', ok: navOk, current: String(lastSeenId || '').substring(0, 24), target: String(targetId).substring(0, 24) });
+    if (navOk) {
+      console.log(`[FB Engine] ✅ Personal Messenger đã vào đúng thread ${targetId} via tabs.update`);
+      return true;
     }
   } catch (e) {
     console.warn('[FB Engine] Điều hướng URL Messenger cá nhân thất bại:', targetId, e.message);
@@ -6395,9 +6758,11 @@ const PAGE_TAB_BUDGET = 5;
 async function handleSyncThreadMessages({ account_id, thread_id, external_thread_id = null, thread_url, page_id = null, mode = 'initial', cursor = null, contact_name = null, reason = null, allow_navigation = false, scroll_delta = 0, _history_tab_id = null }) {
   console.log(`[FB Engine] 🔄 Sync lịch sử tin nhắn cho thread: ${thread_id} (${contact_name || 'unknown'}, account=${account_id || user_id}) mode=${mode}`);
   if (!thread_id) return;
+  bgDebug({ stage: 'SYNC_THREAD_START', thread: String(thread_id || '').substring(0, 24), mode, reason: reason || null, allow_nav: allow_navigation === true });
   const allowedReasons = new Set(['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport', 'initial_sweep', 'manual_resync', 'history_retry', 'sidebar_incoming']);
   const baseReason = FbCrmMessengerTabRoles.stripSyncReasonSuffix(reason);
   if (!_history_tab_id && (allow_navigation !== true || !allowedReasons.has(baseReason))) {
+    bgDebug({ stage: 'SYNC_SKIP', why: 'navigation_not_authorized', thread: String(thread_id || '').substring(0, 24), reason: reason || null });
     sendToBackend('THREAD_MESSAGES_SYNCED', {
       account_id: account_id || user_id,
       thread_id,
@@ -6413,11 +6778,15 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   // but only during the 30s click window, otherwise threads the operator never
   // clicks would never sync their messages (images/videos included).
   const isUserDrivenReason = ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].includes(baseReason);
+  // Tin khach (sidebar_incoming) luon duoc di qua khoa: operator dang doc
+  // hoi thoai khac khong duoc lam tin khach mat qua hydrate media.
   if (!_history_tab_id && !page_id && !isUserDrivenReason
+    && baseReason !== 'sidebar_incoming'
     && userNavigationLockThreadId
     && Date.now() < userNavigationLockUntil
     && userNavigationLockThreadId !== String(thread_id || '')) {
     console.log(`[FB Engine] [NAV_LOCK] Skipping background sync for thread=${thread_id} — history tab locked to ${userNavigationLockThreadId}`);
+    bgDebug({ stage: 'SYNC_SKIP', why: 'locked_by_user_selection', thread: String(thread_id || '').substring(0, 24), locked_to: String(userNavigationLockThreadId || '').substring(0, 24) });
     sendToBackend('THREAD_MESSAGES_SYNCED', {
       account_id: account_id || user_id,
       thread_id,
@@ -6434,6 +6803,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     const lockedThread = pageNavigationLockThreadId.get(pid);
     if (Date.now() < lockedUntil && lockedThread && lockedThread !== String(thread_id || '')) {
       console.log(`[FB Engine] [PAGE_NAV_LOCK] Skipping background sync for thread=${thread_id} on page=${pid} — tab locked to ${lockedThread}`);
+      bgDebug({ stage: 'SYNC_SKIP', why: 'page_locked', thread: String(thread_id || '').substring(0, 24) });
       sendToBackend('THREAD_MESSAGES_SYNCED', {
         account_id: account_id || user_id,
         thread_id,
@@ -6523,7 +6893,9 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   // per-page tab is also the requested UX: the operator sees which
   // conversation is being synced.
   if (page_id && tab && tab.id != null) {
-    chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    // Nhịp chuyển tab gom về một điểm: tối đa 1 lần/5s, Messenger ưu tiên.
+    // Click của operator vẫn chuyển ngay (immediate).
+    requestTabActivation(tab.id, { immediate: isUserDrivenReason });
     // Chỉ bật cửa sổ Chrome lên trên CRM khi người dùng chủ động click
     // thread. Sync nền (sidebar_incoming/initial_sweep/retry) không được
     // giật cửa sổ Chrome mỗi lần khách nhắn - tab vẫn active trong cửa sổ
@@ -6532,6 +6904,13 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     if (isUserDrivenReason && tab.windowId != null) {
       chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
     }
+  } else if (!page_id && !usesVisibleCrmTab && tab && tab.id != null
+    && ['sidebar_incoming', 'initial_sweep', 'history_retry', 'manual_resync'].includes(baseReason)) {
+    // Tab Messenger cá nhân là "tab nhà": request active của nó đè request
+    // Page đang chờ, không giật cửa sổ Chrome (chỉ tabs.update nội bộ).
+    // immediate vì job ĐANG chạy cần render media ngay, đợi gap 5s là
+    // Messenger throttle làm blob/data-url không mount -> ảnh/video mất.
+    requestTabActivation(tab.id, { isMessengerHome: true, immediate: true });
   }
   const onTargetThread = await ensureTabOnThread(
     tab,
@@ -6591,6 +6970,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   }
 
   if (!onTargetThread || !pageIdentityOk || (currentTabThreadId && String(currentTabThreadId) !== navigationThreadId)) {
+    bgDebug({ stage: 'SYNC_ABORT', why: page_id ? 'thread_route_mismatch' : 'url_mismatch', on_target: onTargetThread === true, current: String(currentTabThreadId || '').substring(0, 24), target: String(navigationThreadId || '').substring(0, 24) });
     console.warn(`[DOM Sync Verification] ⚠️ Tab Facebook đang mở thread ${currentTabThreadId || 'khác'} (header: ${routeDetail || 'n/a'}), không khớp thread ${thread_id}. Hủy sync để tránh ghi nhầm DB.`);
     sendToBackend('THREAD_MESSAGES_SYNCED', {
       account_id: targetAcc,
@@ -6639,6 +7019,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   // Facebook creates its first message rows.
   let previousActiveTabId = null;
   if (!page_id && ['ondemand_initial', 'ondemand_viewport', 'ondemand_older'].includes(mode)) {
+    setPersonalSyncBusy(65000);
     const [activeTab] = await chrome.tabs.query({ active: true, windowId: tab.windowId }).catch(() => []);
     if (activeTab?.id && activeTab.id !== tab.id) previousActiveTabId = activeTab.id;
     await chrome.tabs.update(tab.id, { active: true }).catch(() => null);
