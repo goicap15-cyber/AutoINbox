@@ -98,6 +98,19 @@ const SYSTEM_PATTERNS = [
 
   /^Bạn đã phản hồi ghi chú của (?:họ|họ\.|họ\.?)$/i,
   /^Bạn đã trả lời tin của .+\.$/i,
+
+  // Hội thoại hệ thống Messenger tự sinh (connection/friend/call/sticker
+  // notice). FB tự treo chấm xanh unread trên các row này; bộ dò chấm xanh
+  // hình học (2026-10-03) bắt cả chấm của chúng -> CRM ngập thread rác ở
+  // đầu danh sách chưa đọc. Không bao giờ là tin khách.
+  /^Các bạn hiện đã được kết nối trên Messenger\.?$/i,
+  /^Bạn và .{1,60} hiện đã là bạn bè\.?$/i,
+  /^.{1,60} đã gọi cho bạn\.?$/i,
+  /^Cuộc gọi (?:thoại|video) đã kết thúc\.?$/i,
+  /^.{1,60} đã rời khỏi nhóm\.?$/i,
+  /^Bạn đã gửi \d+ (?:ảnh|video)\.?$/i,
+  /^.{1,60} đã gửi một nhãn dán\.?$/i,
+
   // Chip gợi ý trả lời của Messenger (suggested replies hiện dưới ô soạn thảo,
   // vd 'Trao đổi thêm?') - DOM observer đọc nhầm thành bubble tin của khách.
   /^Trao đổi thêm\??$/i,
@@ -155,6 +168,26 @@ const SYSTEM_PATTERNS = [
 ];
 
 const SEPARATOR_ONLY_REGEX = /^[\s\u00b7\u2022.\-|•·]+$/;
+
+// Chỉ riêng dòng hội thoại hệ thống (kết nối/bạn bè/cuộc gọi) - không bao
+// gồm các pattern metadata khác. Dùng để chặn MEDIA_HINT/unread giả cho
+// thread hệ thống trong khi vẫn giữ isSystemOrMetadataText rộng cho lọc
+// tin nhắn thông thường.
+const SYSTEM_CONVERSATION_NOTICE_PATTERNS = [
+  /^Các bạn hiện đã được kết nối trên Messenger\.?$/i,
+  /^Bạn và .{1,60} hiện đã là bạn bè\.?$/i,
+  /^.{1,60} đã gọi cho bạn\.?$/i,
+  /^Cuộc gọi (?:thoại|video) đã kết thúc\.?$/i,
+  /^.{1,60} đã rời khỏi nhóm\.?$/i,
+  /^Bạn đã gửi \d+ (?:ảnh|video)\.?$/i,
+  /^.{1,60} đã gửi một nhãn dán\.?$/i
+];
+
+function isSystemConversationNotice(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return false;
+  return SYSTEM_CONVERSATION_NOTICE_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
 
 function isSystemOrMetadataText(text) {
   if (isBareVietnamMobileText(text)) return false; // SĐT VN: không phải junk
@@ -333,6 +366,7 @@ function isBizSentByAttributionOnly(text) {
 module.exports = {
   isRelativeTimeMetadataText: (text) => RELATIVE_TIME_METADATA_RE.test(String(text || '').trim()),
   isSystemOrMetadataText,
+  isSystemConversationNotice,
   cleanMessageText,
   isSidebarActivitySummary,
   isInvalidContactName,

@@ -45,6 +45,34 @@
     return m ? decodeURIComponent(m[1]) : '';
   }
 
+  // 2026-10-03: FB bỏ data-testid="unread-count"/.unread trên row Messenger
+  // mới (đo DOM thật: 0 match, cả ngày 03-10). Chấm chưa đọc giờ là div tròn
+  // 6-16px nền xanh FB trong row - dò theo hình dạng+màu để không phụ thuộc
+  // class hash đổi liên tục, kèm biến thể aria-label (CSS i-flag không gập
+  // được Đ/đ nên so sánh bằng JS regex).
+  function detectRowUnread(row) {
+    if (row.querySelector('[data-testid="unread-count"], .unread')) return true;
+    for (const el of row.querySelectorAll('[aria-label]')) {
+      if (/chưa đọc|unread|tin nhắn mới|new message/i.test(el.getAttribute('aria-label') || '')) return true;
+    }
+    for (const el of row.querySelectorAll('div, span, i')) {
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      if (w < 6 || w > 16 || h < 6 || h > 16) continue;
+      const st = getComputedStyle(el);
+      const radius = parseFloat(st.borderTopLeftRadius);
+      if (!(Number.isFinite(radius) && radius >= Math.min(w, h) / 2)) continue;
+      const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/.exec(st.backgroundColor);
+      if (!m) continue;
+      const alpha = m[4] === undefined ? 1 : Number(m[4]);
+      if (alpha < 0.2) continue;
+      // Xanh FB (#0866FF/#1877F2/#0064E0): b cao, r thấp, g vừa. Loại chấm
+      // trạng thái online (xanh lá), xám, trắng.
+      if (+m[3] >= 180 && +m[1] <= 90 && +m[2] >= 50 && +m[2] <= 170) return true;
+    }
+    return false;
+  }
+
   function readSidebarActivity() {
     // Tab chat CRM có thể là facebook.com/messages hoặc messenger.com/t/...
     if (!isMessengerHost && !/\/messages(?:\/|$|\?)/i.test(location.pathname + location.search)) {
@@ -68,7 +96,7 @@
       seen.add(threadId);
       const row = link.closest('[role="row"], [role="listitem"], li') || link.parentElement || link;
       const text = normalize(row.textContent).slice(0, 320);
-      const unread = Boolean(row.querySelector('[data-testid="unread-count"], .unread, [aria-label*="unread" i], [aria-label*="Chưa đọc" i]'));
+      const unread = detectRowUnread(row);
       rows.push(`${threadId}|${unread ? 1 : 0}|${text}`);
       // Preserve the exact row while it is still mounted. Messenger can
       // virtualize it away between this mutation and background.executeScript.

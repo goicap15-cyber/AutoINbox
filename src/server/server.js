@@ -72,7 +72,7 @@ LinkPreviewService.onImageNeeded = (urlHash, url) => {
     }
   }
 };
-const { isSystemOrMetadataText, cleanMessageText, isSidebarActivitySummary, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
+const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
 const { sidebarShouldSkipSweep, isStaleThreadLastActivity } = require('./utils/sidebarCompare');
 const { isKnownPageSystemNotice } = require('./utils/pageSystemNotice');
 const { parsePageIdFromInput } = require('./utils/pageIdParser');
@@ -3237,6 +3237,24 @@ wss.on('connection', (ws, req) => {
                   if (manual === 1) syncUnread = 1;
                   else if (manual === -1) syncUnread = 0;
                 }
+                // 2026-10-03: hội thoại hệ thống (kết nối/bạn bè/cuộc gọi) FB
+                // tự treo chấm xanh -> bộ dò chấm xanh mới bắt cả chấm này và
+                // PREVIEW_BUBBLE gắn unread cho thread rác, CRM ngập "chưa
+                // đọc" sai. Thread hệ thống CHƯA có tin khách thật: bỏ unread
+                // + reset cờ manual để tự heal các cờ rác ghi từ build trước.
+                const systemNotice = isSystemConversationNotice(rawSidebarPreview);
+                if (systemNotice) {
+                  const hasRealIncoming = db.prepare(`
+                    SELECT 1 FROM messages
+                    WHERE thread_id = ? AND is_outgoing = 0
+                      AND fb_message_id NOT LIKE 'sidebar_preview_%'
+                    LIMIT 1
+                  `).get(existingInternalThreadId);
+                  if (!hasRealIncoming) {
+                    syncUnread = 0;
+                    db.prepare('UPDATE threads SET unread_manual = 0 WHERE id = ? AND unread_manual != 0').run(existingInternalThreadId);
+                  }
+                }
                 const storedThread = ConversationRepository.upsertThread({
                   id: threadId,
                   external_thread_id: t.external_thread_id || threadId,
@@ -3295,7 +3313,7 @@ wss.on('connection', (ws, req) => {
                 const mediaHintLastAt = mediaHintLastSeen.get(mediaHintKey) || 0;
                 if (mediaHintLastSeen.size > 600) mediaHintLastSeen.clear();
                 if (!incomingPreviewChanged
-                  && (!rawSidebarPreview || isSystemOrMetadataText(rawSidebarPreview))
+                  && (!rawSidebarPreview || (isSystemOrMetadataText(rawSidebarPreview) && !systemNotice))
                   && t.preview_is_outgoing !== true
                   && (Number(t.is_unread) === 1 || t.is_like === true)
                   && (unreadFlippedToIncoming || rowFresh)
@@ -3468,14 +3486,16 @@ wss.on('connection', (ws, req) => {
                   // provisional, nhưng khi tin THẬT vừa đến thì thread vẫn
                   // phải nhảy + badge ngay (reproduce 2026-10-02: khách nhắn
                   // "ok" lần 2, CRM im lặng 1p47s).
-                  // Chỉ bump khi thread còn unread trong DB hoặc preview khác
-                  // last_message đã lưu - row "Bây giờ" + chấm unread của tab
-                  // ẩn LAG sau khi operator đọc, bump theo nó thì badge hiện
-                  // đi hiện lại vô hạn (báo lỗi 2026-10-02).
+                  // Chỉ bump khi thread còn unread trong DB, preview khác
+                  // last_message đã lưu, HOẶC chấm chưa đọc vừa xuất hiện
+                  // (unread_flipped). 2026-10-03: với bộ dò chấm xanh mới,
+                  // khách nhắn lại đúng câu cũ ("ok", "dạ") trên thread đã
+                  // đọc phải bump được - flip chỉ nổ đúng 1 lần khi chấm
+                  // chuyển 0->1 nên không tái diễn "đọc rồi hiện lại" (45b).
                   const readState = db.prepare('SELECT is_unread, last_message FROM threads WHERE id = ?').get(String(canonicalThreadId));
                   const isUnreadNow = Number(readState?.is_unread) === 1;
                   const lastMsgMatches = cleanMessageText(readState?.last_message) === previewContent;
-                  if (isUnreadNow || !lastMsgMatches) {
+                  if (isUnreadNow || !lastMsgMatches || changed.unread_flipped) {
                     const bumpedAtIso = new Date().toISOString();
                     db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
                     io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: bumpedAtIso });
@@ -3492,14 +3512,21 @@ wss.on('connection', (ws, req) => {
                 syncDebug('MEDIA_HINT', { thread: String(canonicalThreadId).substring(0, 24), status: sync_status || null });
               }
 
-              InboxSyncScheduler.enqueueThreadSync({
+              if (changed.page_id) {
+                // 2026-10-03: chỉ job Page còn được điều hướng từ hint (lane
+                // Page dùng tab Business Suite riêng). Job cá nhân bỏ hẳn - tab
+                // history cá nhân chỉ di chuyển theo operator (click/kéo);
+                // preview + bump đã chạy ở trên, nội dung đầy đủ sync khi click
+                // (crm_navigation) hoặc khi hội thoại đang mở ở tab chat.
+                InboxSyncScheduler.enqueueThreadSync({
                   ...changed,
                   thread_id: canonicalThreadId,
                   reason: 'sidebar_incoming',
                 allow_navigation: true,
                 priority: 'high',
                 sync_mode: 'incremental'
-              });
+                });
+              }
             }
             }
 
@@ -3561,7 +3588,16 @@ wss.on('connection', (ws, req) => {
           // Phase C (2026-10-01): ket qua ve = kenh dispatch song 2 chieu, reset
           // bo dem stall (ca count=0 deu tinh - diem quan trong la tin di va ve).
           dispatchStallWatchdog.noteResult(String(account_id || ws.accountId || ''));
-          InboxSyncScheduler.markThreadSyncResult(account_id, thread_id, reason || null, page_id || null);
+          // 2026-10-03: ket qua thanh cong khong mang reason; terminal signal
+          // that su nam o checkpoint. no_scroll_growth = vong cuon het ngan
+          // sach ma DOM khong moc them; boundary_reached = cham het lich su.
+          // Truoc day ca hai deu roi vao null -> scheduler replay vo han moi
+          // ~2s (reproduce: crm_scroll_older_replay chay 90s lien, nghẽn CRM).
+          const checkpointStopReason = checkpoint ? String(checkpoint.stop_reason || '') : '';
+          const schedulerResultReason = reason
+            || (checkpointStopReason === 'no_scroll_growth' ? 'no_scroll_growth' : null)
+            || (checkpoint && checkpoint.boundary_reached ? 'reached_top' : null);
+          InboxSyncScheduler.markThreadSyncResult(account_id, thread_id, schedulerResultReason, page_id || null);
 
           if (reason) {
             const HistorySyncManager = require('./services/HistorySyncManager');

@@ -278,35 +278,20 @@ function runPersonalSendSerialized(accountId, operation) {
 function runPersonalHistorySerialized(accountId, operation, isPriority = false, isUserJob = false) {
   const key = String(accountId || user_id || 'default');
   const userJobOccupiesLane = !isUserJob && personalHistoryUserJobActive.get(key) === true;
-  let incomingTakeoverTimer = null;
   if (isPriority && userJobOccupiesLane) {
     // Tin khach toi khi operator dang click/cuon: xep hang sau, khong gianh tab.
     bgDebug({ stage: 'SYNC_DEFERRED', lane: key, why: 'user_job_occupies_history_lane' });
   } else if (isPriority) {
     personalHistoryChains.delete(key);
   }
+  // 2026-10-03: da bo takeover "tin khach gianh lane sau 15s" - sidebar_incoming
+  // khong con dieu huong tab history ca nhan (bump chay o server), khong con
+  // job nao can kick token cua job operator nua.
   const previous = personalHistoryChains.get(key) || Promise.resolve();
   const current = previous.catch(() => {}).then(operation);
   personalHistoryChains.set(key, current);
   if (isUserJob) personalHistoryUserJobActive.set(key, true);
-  if (isPriority && userJobOccupiesLane && !key.startsWith('page:')) {
-    // 2026-10-02: sau 15s doi, tin khach GIANH lane ca nhan - kick token
-    // navigation (cung key "<acc>:history" voi token cua job click/cuon)
-    // lam job do tu huy (navigation_superseded, server retry lai qua
-    // TRANSIENT_REASONS), thay vi de tin khach doi ca 45-65s cua job
-    // operator (reproduce 2026-10-02: tin Khang den 12:42:26, chay
-    // 12:44:13 sau 3 job click/scroll chiem lane). Lane Page bo qua:
-    // job Page khong tao navigation token de kick.
-    incomingTakeoverTimer = setTimeout(() => {
-      if (personalHistoryUserJobActive.get(key) !== true) return;
-      if (personalHistoryChains.get(key) !== current) return;
-      beginPersonalNavigation(key);
-      personalHistoryChains.delete(key);
-      bgDebug({ stage: 'SYNC_LANE_TAKEOVER', lane: key, why: 'incoming_grace_15s' });
-    }, 15000);
-  }
   current.finally(() => {
-    if (incomingTakeoverTimer) clearTimeout(incomingTakeoverTimer);
     if (isUserJob) personalHistoryUserJobActive.delete(key);
     if (personalHistoryChains.get(key) === current) personalHistoryChains.delete(key);
   }).catch(() => {});
@@ -1692,6 +1677,28 @@ function connectWebSocket() {
             const laneKey = message.data?.page_id
               ? `page:${message.data.page_id}`
               : `${message.data?.account_id || user_id}:history`;
+            // Click cua operator phai thang: trong window khoa 30s (moi lan
+            // crm_navigation gia han), job nen cho thread khac khong duoc dieu
+            // huong tab history ca nhan - day la nguyen nhan "an lien tuc nhieu
+            // user thi tab nhay loan" (reproduce 2026-10-02). Truoc day
+            // sidebar_incoming bypass khoa (build40); gio defer voi reason
+            // lock-window: server retry backoff 35s dau tien, tin chu van vao
+            // DB ngay qua duong preview nen chi media doi lock het han.
+            if (!message.data?.page_id && !isUserClick
+              && userNavigationLockThreadId
+              && Date.now() < userNavigationLockUntil
+              && userNavigationLockThreadId !== String(message.data?.thread_id || '')) {
+              bgDebug({ stage: 'SYNC_SKIP', why: 'operator_click_sticky', thread: String(message.data?.thread_id || '').substring(0, 24), locked_to: String(userNavigationLockThreadId || '').substring(0, 24), reason: message.data?.reason || null });
+              sendToBackend('THREAD_MESSAGES_SYNCED', {
+                account_id: message.data?.account_id || user_id,
+                thread_id: message.data?.thread_id,
+                messages: [],
+                reason: 'navigation_locked_by_user_selection',
+                mode: message.data?.mode || 'incremental',
+                cursor: message.data?.cursor || null
+              });
+              break;
+            }
             if (message.data?.page_id) lastPageSyncJobStartAt = Date.now();
             if (!message.data?.page_id) {
               // Job history/media cá nhân giữ slot active suốt job (deadline
@@ -5102,8 +5109,8 @@ function moveMessengerDiscoverySidebar(action = 'step') {
   };
 }
 
-async function handleSync100Threads({ account_id, resume = false, scan_mode = 'full', time_budget_ms = 120000 }) {
-  const requestedScan = { account_id, resume, scan_mode, time_budget_ms };
+async function handleSync100Threads({ account_id, resume = false, scan_mode = 'full', time_budget_ms = 120000, reason = null }) {
+  const requestedScan = { account_id, resume, scan_mode, time_budget_ms, reason };
   const requestedAccountKey = String(account_id || '');
   if (discoverySyncInFlight) {
     pendingDiscoveryScans.set(requestedAccountKey, requestedScan);
@@ -5194,7 +5201,17 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
   // navigate or scroll the tab used for normal CRM chat/send/call actions.
   // The normal Inbox tick stays lightweight. A separate lightweight mode
   // visits both Requests buttons without waiting for the periodic full crawl.
-  const requestsTab = isRealtimeInboxScan ? null : await ensureRoleMessengerTab(account_id, 'requests');
+  // 2026-10-03: tab "Đồng bộ hội thoại" (requests) chỉ được MỞ khi operator
+  // bấm icon xoay (manual_window_*). Quét nền scheduler + tab Tin nhắn chờ
+  // (crm_waiting_tab) chỉ tái dùng tab requests đã mở sẵn, không tự tạo.
+  const operatorRequestsReasons = new Set(['manual_window_inbox', 'manual_window_requests', 'crm_manual', 'crm_continue']);
+  let requestsTab = null;
+  if (!isRealtimeInboxScan) {
+    requestsTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'requests')).catch(() => null);
+    if (!requestsTab && operatorRequestsReasons.has(String(requestedScan?.reason || ''))) {
+      requestsTab = await ensureRoleMessengerTab(account_id, 'requests').catch(() => null);
+    }
+  }
   let liveRequestsTab = requestsTab;
   if (liveRequestsTab?.id) {
     // Tab 'requests' co the da chet tu phien truoc (id khon con ton tai).
@@ -6105,7 +6122,30 @@ function scrapeFacebookSidebar() {
       }
 
       // 3. Kiểm tra trạng thái unread
-      const hasUnreadDot = rowContainer.querySelector('[data-testid="unread-count"]') || rowContainer.querySelector('.unread') || rowContainer.querySelector('[aria-label*="unread"]') || rowContainer.querySelector('[aria-label*="Chưa đọc"]');
+      // 2026-10-03: selector cũ đo DOM thật = 0 match cả ngày (FB bỏ
+      // data-testid="unread-count"/.unread). Chấm chưa đọc mới là div tròn
+      // 6-16px nền xanh FB - dò hình dạng+màu, kèm aria-label (so JS regex
+      // vì CSS i-flag không gập Đ/đ).
+      let hasUnreadDot = rowContainer.querySelector('[data-testid="unread-count"], .unread') ? true : false;
+      if (!hasUnreadDot) {
+        for (const el of rowContainer.querySelectorAll('[aria-label]')) {
+          if (/chưa đọc|unread|tin nhắn mới|new message/i.test(el.getAttribute('aria-label') || '')) { hasUnreadDot = true; break; }
+        }
+      }
+      if (!hasUnreadDot) {
+        for (const el of rowContainer.querySelectorAll('div, span, i')) {
+          const w = el.offsetWidth; const h = el.offsetHeight;
+          if (w < 6 || w > 16 || h < 6 || h > 16) continue;
+          const st = window.getComputedStyle(el);
+          const radius = parseFloat(st.borderTopLeftRadius);
+          if (!(Number.isFinite(radius) && radius >= Math.min(w, h) / 2)) continue;
+          const bgM = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/.exec(st.backgroundColor);
+          if (!bgM) continue;
+          const bgAlpha = bgM[4] === undefined ? 1 : Number(bgM[4]);
+          if (bgAlpha < 0.2) continue;
+          if (+bgM[3] >= 180 && +bgM[1] <= 90 && +bgM[2] >= 50 && +bgM[2] <= 170) { hasUnreadDot = true; break; }
+        }
+      }
 
       // 4. Lấy đoạn tin nhắn cuối
       const spans = rowContainer.querySelectorAll('span');
@@ -6237,7 +6277,27 @@ function scrapeMessageRequestsSidebar() {
     seen.add(String(threadId));
     threads.push({
       thread_id: String(threadId), name, last_message: lastMessage,
-      is_unread: Boolean(row.querySelector('[aria-label*="Chưa đọc"], [aria-label*="unread"], [data-testid="unread-count"]')),
+      is_unread: (() => {
+        // 2026-10-03: cùng bộ dò với scrapeFacebookSidebar - selector cũ chết,
+        // dò chấm tròn xanh + aria-label.
+        if (row.querySelector('[data-testid="unread-count"], .unread')) return true;
+        for (const el of row.querySelectorAll('[aria-label]')) {
+          if (/chưa đọc|unread|tin nhắn mới|new message/i.test(el.getAttribute('aria-label') || '')) return true;
+        }
+        for (const el of row.querySelectorAll('div, span, i')) {
+          const w = el.offsetWidth; const h = el.offsetHeight;
+          if (w < 6 || w > 16 || h < 6 || h > 16) continue;
+          const st = getComputedStyle(el);
+          const radius = parseFloat(st.borderTopLeftRadius);
+          if (!(Number.isFinite(radius) && radius >= Math.min(w, h) / 2)) continue;
+          const bgM = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/.exec(st.backgroundColor);
+          if (!bgM) continue;
+          const bgAlpha = bgM[4] === undefined ? 1 : Number(bgM[4]);
+          if (bgAlpha < 0.2) continue;
+          if (+bgM[3] >= 180 && +bgM[1] <= 90 && +bgM[2] >= 50 && +bgM[2] <= 170) return true;
+        }
+        return false;
+      })(),
       avatar_url: image?.currentSrc || image?.src || image?.getAttribute?.('href') || null,
       avatar_base64: null, thread_url: threadUrl,
       is_e2ee: /\/messages\/(?:e2ee\/(?:requests(?:\/spam)?|spam)|(?:requests(?:\/spam)?|spam)\/e2ee|e2ee)\/t\//i.test(threadUrl)
@@ -6760,9 +6820,17 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   if (!thread_id) return;
   bgDebug({ stage: 'SYNC_THREAD_START', thread: String(thread_id || '').substring(0, 24), mode, reason: reason || null, allow_nav: allow_navigation === true });
   const allowedReasons = new Set(['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport', 'initial_sweep', 'manual_resync', 'history_retry', 'sidebar_incoming']);
+  // 2026-10-03: tab history CÁ NHÂN chỉ di chuyển theo thao tác operator
+  // (click hội thoại / kéo lên đầu / resync) và retry của các job đó.
+  // sidebar_incoming + initial_sweep chỉ còn hợp lệ cho thread Page - lane
+  // Page dùng tab Business Suite riêng. Preview + bump tin khách đã chạy ở
+  // server; nội dung đầy đủ sync khi operator click/kéo hoặc khi hội thoại
+  // đang mở sẵn ở tab chat (observer bắt trực tiếp).
+  const pageOnlyReasons = new Set(['initial_sweep', 'sidebar_incoming']);
   const baseReason = FbCrmMessengerTabRoles.stripSyncReasonSuffix(reason);
-  if (!_history_tab_id && (allow_navigation !== true || !allowedReasons.has(baseReason))) {
-    bgDebug({ stage: 'SYNC_SKIP', why: 'navigation_not_authorized', thread: String(thread_id || '').substring(0, 24), reason: reason || null });
+  if (!_history_tab_id && (allow_navigation !== true || !allowedReasons.has(baseReason)
+    || (!page_id && pageOnlyReasons.has(baseReason)))) {
+    bgDebug({ stage: 'SYNC_SKIP', why: pageOnlyReasons.has(baseReason) ? 'personal_history_tab_idle' : 'navigation_not_authorized', thread: String(thread_id || '').substring(0, 24), reason: reason || null });
     sendToBackend('THREAD_MESSAGES_SYNCED', {
       account_id: account_id || user_id,
       thread_id,
@@ -6778,10 +6846,11 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   // but only during the 30s click window, otherwise threads the operator never
   // clicks would never sync their messages (images/videos included).
   const isUserDrivenReason = ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].includes(baseReason);
-  // Tin khach (sidebar_incoming) luon duoc di qua khoa: operator dang doc
-  // hoi thoai khac khong duoc lam tin khach mat qua hydrate media.
+  // 2026-10-02: sidebar_incoming KHONG bypass khoa nua - job bat ky thread
+  // khac se skip (server retry sau khi lock het han). Tin chu van vao DB qua
+  // duong preview, chi media doi. Neu cho bypass nhu build40 thi tab history
+  // nhay sang thread khach ngay khi operator vua click user khac.
   if (!_history_tab_id && !page_id && !isUserDrivenReason
-    && baseReason !== 'sidebar_incoming'
     && userNavigationLockThreadId
     && Date.now() < userNavigationLockUntil
     && userNavigationLockThreadId !== String(thread_id || '')) {
@@ -8805,6 +8874,11 @@ function recoverRealtimeReceiver() {
     const tab = await ensureRoleMessengerTab(user_id, 'chat');
     const observerReady = await ensureRealtimeObserver(tab?.id);
     if (observerReady) await flushBackendOutbox();
+    // 2026-10-02: tao truoc tab history (tab messenger ca nhan thu 2) thay vi
+    // de job sync dau tien tao - truoc day tab nay xuat hien muot hon cac tab
+    // Page duoc server mo truc tiep qua puppeteer, user thay "2 tab messenger
+    // ca nhan mo cham". active:false nen khong gianh focus.
+    ensureRoleMessengerTab(user_id, 'history').catch(() => {});
     return observerReady;
   })().catch((error) => {
     console.warn('[FB Engine] Realtime receiver recovery failed:', error?.message || error);
@@ -8875,6 +8949,38 @@ async function runTabAudit() {
   }
 }
 runTabAudit();
+
+// 2026-10-02: tab discovery/requests la be mat transient - chi ton tai trong
+// cua so operator bam icon (hoac khi operator mo tab "Tin nhan cho" trong
+// CRM). Tab mo coi song sot qua lan restart app truoc day vi audit chay som
+// co the chon no lam keeper messenger; don dep truc tiep theo URL ngay khi
+// worker khoi dong (flow tu tao lai tab khi can - quet 'full'/WAITING).
+async function closeLeftoverTransientTabs() {
+  try {
+    const tabs = await new Promise((resolve) => {
+      chrome.tabs.query({
+        url: ['*://*.facebook.com/*', '*://facebook.com/*', '*://*.messenger.com/*', '*://messenger.com/*']
+      }, (result) => resolve(result || []));
+    });
+    let closed = 0;
+    for (const t of tabs) {
+      const u = String(t.url || '');
+      const isTransient = /\/messages\/requests(?:\/|$|\?)/i.test(u) || /[?&]crm_tab_role=(?:discovery|requests)/i.test(u);
+      if (!isTransient) continue;
+      for (const [role, tabId] of [...tabRegistry.entries()]) {
+        if (tabId === t.id) {
+          tabRegistry.delete(role);
+          await persistTabRegistry().catch(() => {});
+        }
+      }
+      try { await chrome.tabs.remove(t.id); closed += 1; } catch (_) {}
+    }
+    if (closed > 0) console.log(`[FB Engine] [TAB_AUDIT] Closed ${closed} leftover transient tab(s) at worker start.`);
+  } catch (error) {
+    console.warn('[FB Engine] [TAB_AUDIT] leftover sweep failed:', error?.message || error);
+  }
+}
+closeLeftoverTransientTabs();
 
 // Do not wait for the first outbound CRM command. Restore the Messenger tab,
 // content observer and queued customer messages as soon as the worker starts.

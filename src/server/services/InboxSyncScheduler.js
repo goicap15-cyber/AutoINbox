@@ -1,3 +1,25 @@
+// Các lý do này đã có HistorySyncRetryPolicy retry CÓ GIỚI HẠN + backoff
+// (hoặc là lỗi vĩnh viễn cố ý). Scheduler tuyệt đối không replay lại chúng -
+// replay vô hạn mỗi ~2s là nguồn bão dispatch giữ chặt lane, làm tin khách
+// nghẽn ~10s (reproduce 2026-10-03: crm_scroll_older_replay chạy 90s liền).
+const NO_REPLAY_REASONS = new Set([
+  'marker_mismatch', 'sidebar_mismatch', 'no_rows', 'no_main_container',
+  'url_mismatch', 'navigation_superseded', 'navigation_not_authorized',
+  'navigation_locked_by_user_selection', 'page_locked_by_user_action',
+  'thread_route_mismatch', 'extension_history_timeout', 'thread_changed_after_parse',
+  'no_background_tab', 'page_content_unavailable', 'error_screen',
+  'timeout', 'no_scroll_growth'
+]);
+
+// Kết quả trễ của job thế hệ cũ (job đã bị preempt, navigation của nó đã bị
+// thay thế). Nếu key đang có job mới hơn chạy thì kết quả này phải bị bỏ qua
+// hoàn toàn - không thì nó xóa nhầm state của job mới, lane bị thả giữa chừng
+// rồi drain dispatch job khác chồng lên tab đang bận (dây chuyền supersede).
+const STALE_RESULT_REASONS = new Set([
+  'navigation_superseded', 'thread_changed_after_parse', 'thread_route_mismatch',
+  'url_mismatch', 'navigation_not_authorized'
+]);
+
 class InboxSyncScheduler {
   constructor({
     // Realtime network/DOM observation is the primary path. When Facebook
@@ -39,6 +61,9 @@ class InboxSyncScheduler {
     this.threadQueues = new Map();
     this.accountThreadBusy = new Set();
     this.historyCompletedThreads = new Set();
+    // key -> thời điểm job bị preempt gần nhất; dùng phân biệt kết quả trễ
+    // của job thế hệ cũ với job mới đang chạy (STALE_RESULT_REASONS).
+    this.preemptedAt = new Map();
     // Page lane chỉ được dispatch khi tab Business Suite của page đó đã báo
     // PAGE_EXTENSION_READY - chống dispatch lệch sang extension Chrome cá nhân
     // khi Chrome page còn đang khởi động (reproduce 2026-09-19: job initial
@@ -496,7 +521,11 @@ class InboxSyncScheduler {
     // jump the lane queue - they must not wait behind the initial_sweep
     // backlog while their server-side 120s timeout burns (reproduce: thread
     // Nguyen Thi Hoa timed out twice before its scan could start).
-    const userDriven = /^(crm_navigation|crm_navigation_replay|crm_scroll_older|crm_scroll_viewport)/.test(String(reason || ''));
+    // 2026-10-03: job mang suffix `_replay` là phần dư của thao tác cũ (bị
+    // defer khi lane bận) - KHÔNG được chen đầu hàng nữa, không thì train
+    // replay cũ nhảy cóc lên trên click mới của operator.
+    const userDriven = !String(reason || '').includes('_replay')
+      && /^(crm_navigation|crm_scroll_older|crm_scroll_viewport)/.test(String(reason || ''));
     const effectivePriority = priority === 'high' || userDriven ? 'high' : priority;
 
     const isScrollOlder = String(reason || '').includes('scroll_older') || sync_mode === 'ondemand_older' || sync_mode === 'page_scroll_older';
@@ -617,6 +646,7 @@ class InboxSyncScheduler {
       this.accountThreadBusy.delete(laneKey);
       this.accountThreadBusy.delete(accId);
       removed += 1;
+      this.preemptedAt.set(key, Date.now());
       // Phase 2 (ke hoach 2026-10-01): job NEN (initial_sweep/history_retry)
       // bi gian doan phai duoc tra lai hang doi thay vi mat trang. Di dung
       // path replay san co (pendingThreadSyncs -> replayPendingThread ->
@@ -625,14 +655,20 @@ class InboxSyncScheduler {
       // truoc. Job do operator dieu huong (crm_navigation*/crm_scroll*) giu
       // hanh vi cu - click moi thay the click cu. Thread da quet xong
       // (loop terminator) thi khong quet lai.
+      // 2026-10-03: cap 2 lan requeue - sidebar_incoming toi lien tuc moi
+      // ~2s (thread Page con unread) preempt job sweep ngay khi no vua duoc
+      // requeue -> ping-pong vo han giu chat lane Page (reproduce 2026-10-03:
+      // initial_sweep thread 100050906602009 dispatch 2s/lan hang chuc phut).
       const preemptedReason = String(activeJob.reason || '');
+      const preemptCount = (Number(activeJob.preempt_count) || 0) + 1;
       if (/^(initial_sweep|history_retry)/.test(preemptedReason)
-        && !this.isThreadHistoryCompleted(threadId, accId)) {
-        this.pendingThreadSyncs.set(key, { ...activeJob });
+        && !this.isThreadHistoryCompleted(threadId, accId)
+        && preemptCount <= 2) {
+        this.pendingThreadSyncs.set(key, { ...activeJob, preempt_count: preemptCount });
         const replayTimer = setTimeout(() => this.replayPendingThread(key), this.preemptRequeueDelayMs);
         if (typeof replayTimer.unref === 'function') replayTimer.unref();
         requeued += 1;
-        console.log(`[INBOX_SYNC_MESSAGES_PREEMPT_REQUEUED] account=${accId} lane=${laneKey} thread=${threadId} reason=${preemptedReason}`);
+        console.log(`[INBOX_SYNC_MESSAGES_PREEMPT_REQUEUED] account=${accId} lane=${laneKey} thread=${threadId} reason=${preemptedReason} preempt=${preemptCount}`);
       }
     }
     if (removed) {
@@ -688,6 +724,7 @@ class InboxSyncScheduler {
     const accId = String(job.account_id || laneKey);
     this.accountThreadBusy.add(laneKey);
     this.threadInFlight.add(job.key);
+    job.dispatchedAt = Date.now();
     this.threadJobsInFlight.set(job.key, job);
     console.log(`[INBOX_SYNC_MESSAGES_DISPATCHED] lane=${laneKey} account=${accId} thread=${job.thread_id} reason=${job.reason} remaining_queue=${queue.length}`);
 
@@ -774,9 +811,28 @@ class InboxSyncScheduler {
       }
     }
     const laneKey = job ? this.getLaneKey(job) : this.getLaneKey(accountId, pageId);
+
+    // Kết quả trễ của job thế hệ cũ: job đã bị preempt rồi được dispatch lại
+    // (dispatchedAt mới hơn thời điểm preempt). Bỏ qua hoàn toàn để không xóa
+    // nhầm state của job mới - trước đây nó thả lane giữa chừng, drain kéo job
+    // khác chồng lên tab đang bận và tạo dây chuyền supersede kéo dài ~10s.
+    const resultReason = String(reason || '');
+    const preemptedAt = Number(this.preemptedAt.get(key) || 0);
+    if (STALE_RESULT_REASONS.has(resultReason) && job && preemptedAt
+      && Number(job.dispatchedAt || 0) > preemptedAt
+      && Date.now() - preemptedAt < this.threadTimeoutMs) {
+      console.log(`[INBOX_SYNC_STALE_RESULT_IGNORED] thread=${key} reason=${resultReason}`);
+      return;
+    }
+
     this.threadJobsInFlight.delete(key);
 
-    const isLoopTerminator = reason === 'reached_top' || reason === 'duplicate';
+    const isLoopTerminator = resultReason === 'reached_top' || resultReason === 'duplicate';
+    const isNoReplay = NO_REPLAY_REASONS.has(resultReason);
+    if (isNoReplay) {
+      this.pendingThreadSyncs.delete(key);
+      this.pendingThreadSyncs.delete(`${accId}:${threadId}`);
+    }
     if (isLoopTerminator) {
       this.historyCompletedThreads.add(key);
       this.historyCompletedThreads.add(`${accId}:${threadId}`);
@@ -794,8 +850,9 @@ class InboxSyncScheduler {
       this.threadTimeouts.delete(key);
       this.accountThreadBusy.delete(laneKey);
       this.accountThreadBusy.delete(accId);
+      this.preemptedAt.delete(key);
       console.log(`[INBOX_SYNC_MESSAGES_RESULT] lane=${laneKey} account=${accountId} thread=${threadId}${reason ? ` reason=${reason}` : ''}`);
-      if (!isLoopTerminator) {
+      if (!isLoopTerminator && !isNoReplay) {
         this.replayPendingThread(key);
       }
       const timer = setTimeout(() => {

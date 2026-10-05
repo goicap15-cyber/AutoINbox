@@ -1,4 +1,5 @@
 const { spawn, exec, execFile, spawnSync } = require('child_process');
+const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const { resolveChromePath } = require('../../../chrome-bundling/resolveChromePath');
@@ -395,6 +396,10 @@ class ProcessManager {
       } else if (isAlive) {
         existing.displayMode = 'VISIBLE';
         this.unhideWindow(accountId);
+        // 2026-10-02: Chrome song sot qua lan restart app co the thieu tab
+        // Messenger ca nhan (bi dong o phien truoc) - mo ngay qua DevTools
+        // thay cho cho extension SW boot + register roi moi tu tao (cham).
+        await this.ensureMessagesTabOnRunningProfile(existing.profileDir);
         console.log(`[ProcessManager] Tài khoản ${accountId} đã đang chạy (PID ${existing.pid}).`);
         return true;
       } else {
@@ -456,6 +461,7 @@ class ProcessManager {
         displayMode: 'VISIBLE'
       });
       this.unhideWindow(accountId);
+      await this.ensureMessagesTabOnRunningProfile(absProfileDir);
       console.log(`[ProcessManager] Dùng lại Chrome đang chạy cho account ${accountId} (PID ${runningProfilePid}).`);
       return true;
     }
@@ -513,7 +519,11 @@ class ProcessManager {
 
       const pages = await browser.pages();
       const page = pages[0] || await browser.newPage();
-      await page.goto('https://www.facebook.com/messages/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      // 2026-10-02: KHONG doi tab Messenger load xong moi mo batch tab Page -
+      // goto facebook tren may yeu co the mat 10-30s lam tab Page xuat hien
+      // muon theo. Chay song song: batch Page bat dau ngay (van theo dot
+      // 3 tab/4s nen toi da 4 tab tai cung luc), goto chiu gioi han 8s.
+      const messagesLoad = page.goto('https://www.facebook.com/messages/', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
 
       // Chính sách "1 account = 1 Chrome": mở thêm tab Business Suite cho từng
       // Page ACTIVE của account ngay trong Chrome này (không còn Chrome riêng
@@ -524,6 +534,7 @@ class ProcessManager {
         const activePageIds = this.getActivePageIdsForAccount(accountId);
         this.schedulePageTabBatches(accountId, activePageIds);
       }
+      await Promise.race([messagesLoad, new Promise((resolve) => setTimeout(resolve, 8000))]);
 
       console.log(`[ProcessManager] Chrome Stable [PID ${child.pid}] đã tự cài extension cho account ${accountId}.`);
       return true;
@@ -550,6 +561,54 @@ class ProcessManager {
   // - Chrome mồ côi từ run trước (flag thiếu) -> force-reload để cập nhật extension.
   wasLaunchedByThisRun(accountId) {
     return Boolean(this.processes.get(String(accountId || ''))?.launchedByThisRun);
+  }
+
+  // 2026-10-02: Chrome đang chạy nhưng có thể THIẾU tab Messenger cá nhân
+  // (bị đóng ở phiên trước). Kiểm tra qua DevToolsActivePort rồi mở tab
+  // /messages/ ngay - thay vì chờ extension SW boot + register rồi mới tự
+  // tạo (lệch nhiều giây sau các tab Page do server mở trực tiếp).
+  async ensureMessagesTabOnRunningProfile(absProfileDir) {
+    try {
+      const portFile = path.join(String(absProfileDir || ''), 'DevToolsActivePort');
+      if (!fs.existsSync(portFile)) return false;
+      const [port] = fs.readFileSync(portFile, 'utf8').split(/\r?\n/).filter(Boolean);
+      const debugPort = Number(port);
+      if (!Number.isFinite(debugPort) || debugPort <= 0) return false;
+      const targets = await new Promise((resolve) => {
+        const req = http.get({ host: '127.0.0.1', port: debugPort, path: '/json/list' }, (res) => {
+          let d = '';
+          res.on('data', (c) => (d += c));
+          res.on('end', () => { try { resolve(JSON.parse(d)); } catch (_) { resolve([]); } });
+        });
+        req.on('error', () => resolve([]));
+        req.setTimeout(2500, () => { req.destroy(); resolve([]); });
+      });
+      if ((targets || []).some((t) => t?.type === 'page'
+        && /facebook\.com\/messages(?:\/|$|\?)/i.test(String(t.url || '')))) return true;
+      for (const method of ['PUT', 'GET']) {
+        const opened = await new Promise((resolve) => {
+          const req = http.request({
+            host: '127.0.0.1',
+            port: debugPort,
+            path: '/json/new?https://www.facebook.com/messages/',
+            method
+          }, (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode >= 200 && res.statusCode < 300));
+          });
+          req.on('error', () => resolve(false));
+          req.setTimeout(2500, () => { req.destroy(); resolve(false); });
+          req.end();
+        });
+        if (opened) {
+          console.log(`[ProcessManager] Đã mở lại tab Messenger cá nhân qua DevTools (port ${debugPort}).`);
+          return true;
+        }
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
   }
 
   // 2026-09-30: mở tab page THEO ĐỢT (3 tab / 4 giây) thay vì 13 tab tải đồng

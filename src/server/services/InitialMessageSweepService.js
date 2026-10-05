@@ -204,6 +204,16 @@ class InitialMessageSweepService {
       return;
     }
     const thread = state.queue.shift();
+    // 2026-10-03: tab history cá nhân chỉ di chuyển theo thao tác operator
+    // (click hội thoại / kéo lên đầu). Sweep nền không còn điều hướng tab này
+    // - chỉ giữ sweep cho thread Page (lane riêng, tab Business Suite).
+    if (!thread.page_id) {
+      state.done += 1;
+      state.processedIds?.add(String(thread.id));
+      this._emit(laneKey);
+      this._schedule(laneKey, this.tickMs);
+      return;
+    }
     const accepted = this.callbacks.enqueue({
       account_id: state.accountId,
       lane_key: laneKey,

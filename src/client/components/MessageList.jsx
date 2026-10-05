@@ -29,6 +29,9 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
   const scrollTimerRef = useRef(null);
   const syncWasActiveRef = useRef(false);
   const localSyncTimeoutRef = useRef(null);
+  // Wheel lên của operator gần nhất - dùng phân biệt với scrollTop bị trình
+  // duyệt clamp khi nội dung co lại giữa chừng render (không phải thao tác user).
+  const pendingUserWheelUpRef = useRef(false);
   const [localHistorySyncing, setLocalHistorySyncing] = useState(false);
   const displayMessages = collapseMessengerMediaCompanions(messages).filter((msg) => {
     // A Messenger media row can arrive before its URL is hydrated. Keep that
@@ -253,7 +256,18 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
         }
       } catch (_) {}
     }
-    if (suppressScrollRef.current || !delta || !onViewportScroll) return;
+    if (suppressScrollRef.current || !delta || !onViewportScroll) {
+      pendingUserWheelUpRef.current = false;
+      return;
+    }
+    // 2026-10-03: khi nội dung CO LẠI giữa chừng render (dedupe/reconcile),
+    // trình duyệt tự clamp scrollTop xuống để giữ khung hình - sự kiện đó
+    // KHÔNG phải thao tác cuộn. Trước đây delta âm này bị hiểu là "cuộn lên"
+    // -> gửi crm_scroll_older mỗi khi sync trả dữ liệu về -> tab history bị
+    // giành liên tục, tin khách nghẽn ~10s (reproduce 2026-10-03).
+    const clampedByContentShrink = delta < 0 && contentShrank && !pendingUserWheelUpRef.current;
+    pendingUserWheelUpRef.current = false;
+    if (clampedByContentShrink) return;
 
     queueViewportDelta(delta);
   };
@@ -262,6 +276,7 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     const container = containerRef.current;
     if (!container || suppressScrollRef.current) return;
     if (event.deltaY < 0 && activeThread?.history_completed === 1) return;
+    if (event.deltaY < 0) pendingUserWheelUpRef.current = true;
     // At scrollTop=0 another upward wheel does not change scrollTop, therefore
     // React's onScroll never fires. Forward that boundary gesture explicitly
     // so each additional wheel requests the next Messenger history page.

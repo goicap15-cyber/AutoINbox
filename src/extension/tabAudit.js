@@ -115,16 +115,30 @@
 
     // Pass 3: messenger - nếu chưa có keeper làm việc nào, chọn 1 candidate
     // (ưu tiên active) làm keeper; còn lại toàn bộ đóng (gồm transient role).
+    // 2026-10-02: keeper KHÔNG BAO GIỜ chọn tab transient (discovery/requests)
+    // - khi audit chạy sớm lúc khởi động mà tab chat/history chưa kịp tạo,
+    // tab requests mồ côi từ phiên trước được chọn làm keeper và sống sót
+    // mãi (reproduce 2026-10-02 07:36Z: tab /messages/requests còn nguyên sau
+    // relaunch dù user chưa bấm icon). Chỉ chọn keeper từ tab role làm việc;
+    // nếu chỉ có transient thì đóng hết - flow quét tự tạo lại tab cần dùng.
     if (messengerCandidates.length > 0) {
+      // Ngoài role transient, nhận diện cả tab transient MẤT registry (sau
+      // restart tab id đổi) qua URL - nếu không nó được chọn làm keeper.
+      const isTransientTab = (c) => (c.roleName && PERSONAL_TRANSIENT_ROLES.has(c.roleName))
+        || /\/messages\/requests(?:\/|$|\?)/i.test(String(c.tab.url || ''))
+        || /[?&]crm_tab_role=(?:discovery|requests)/i.test(String(c.tab.url || ''));
       if (!messengerSeenKeeper) {
-        const active = messengerCandidates.find((c) => c.tab.active);
-        const keeper = active ? active.tab : messengerCandidates[0].tab;
-        keepIds.push(keeper.id);
-        messengerSeenKeeper = true;
-        messengerCandidates.splice(messengerCandidates.indexOf(messengerCandidates.find((c) => c.tab.id === keeper.id)), 1);
+        const workPool = messengerCandidates.filter((c) => !isTransientTab(c));
+        if (workPool.length > 0) {
+          const active = workPool.find((c) => c.tab.active);
+          const keeper = active ? active.tab : workPool[0].tab;
+          keepIds.push(keeper.id);
+          messengerSeenKeeper = true;
+          messengerCandidates.splice(messengerCandidates.indexOf(messengerCandidates.find((c) => c.tab.id === keeper.id)), 1);
+        }
       }
       for (const c of messengerCandidates) {
-        const isTransientRole = c.roleName && PERSONAL_TRANSIENT_ROLES.has(c.roleName);
+        const isTransientRole = isTransientTab(c);
         const unregistered = !c.role;
         if (c.tab.active && !isTransientRole) { keepIds.push(c.tab.id); continue; } // không đóng tab user đang nhìn
         if (unregistered || isTransientRole) closeIds.push(c.tab.id);
